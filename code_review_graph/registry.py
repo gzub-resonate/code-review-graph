@@ -14,6 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from .constants import crg_home
+from .repo_aliases import RepoNameResolver
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +299,9 @@ def resolve_repo(
     Resolution order:
     1. If repo is given, try as alias first.
     2. If repo is given and not an alias, try as a direct path.
-    3. If repo is None, use cwd.
+    3. If repo is given and still unresolved, try the optional
+       ``repo-aliases.toml`` (its target is resolved as alias, then folder).
+    4. If repo is None, use cwd.
 
     Args:
         registry: The Registry instance.
@@ -318,6 +321,12 @@ def resolve_repo(
         path = Path(repo).resolve()
         if path.is_dir():
             return str(path)
+
+        # Try the hand-maintained alias file
+        repos = registry.list_repos()
+        matches = RepoNameResolver(repos).lookup(repo)
+        if matches:
+            return repos[matches[0]]["path"]
 
     # Fall back to CWD
     if cwd:
