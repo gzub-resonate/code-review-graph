@@ -37,7 +37,7 @@ One `[aliases]` table of `name = "target"` pairs.
 | name (the key) | string | Letters, digits, `.`, `_` and `-`; 1 to 100 characters. Case-sensitive: `Billing` and `billing` are different names. |
 | target (the value) | string | Not empty. The alias or folder name of a registered repository. |
 
-At most 200 aliases are read; later entries are ignored.
+Only the first 200 entries are read, whether valid or not; later entries are ignored with a single warning.
 
 ## Resolution order
 
