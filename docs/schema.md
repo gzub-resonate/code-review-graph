@@ -175,7 +175,7 @@ names the class the call went through. Both are `INFERRED`.
 | TESTED_BY | function -> test function | |
 | REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment |
 | DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives |
-| INJECTS | Spring bean -> injected field or constructor parameter type | Spring enrichment |
+| INJECTS | Spring bean -> injected field or constructor parameter type (`extra.qualifier` holds a literal `@Qualifier` value; class nodes carry `spring_bean_name` and `spring_qualifiers`) | Spring enrichment |
 | CONSUMES | `@KafkaListener` / `@KafkaHandler` method -> `kafka:<topic>` | Spring Kafka enrichment |
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
