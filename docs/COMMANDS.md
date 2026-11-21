@@ -905,6 +905,53 @@ are capped at 20 entries; `unknown_total` / `ambiguous_total` and
 `unknown_truncated` / `ambiguous_truncated` report the real counts, and the
 summary reports the counts rather than echoing the names.
 
+#### `cross_repo_requests_tool`
+```
+repos: list[str] | None      # Calling repos (aliases or folder names); default: every registered repo
+service: str | None          # Only calls to this Feign service name (exact)
+route: str | None            # Only calls whose route equals this or lies below it
+status: str | None           # matched | ambiguous | no_route_match | no_target_repo | unmatchable
+limit: int = 20              # Rows per calling repo
+max_results: int = 50        # Rows overall (max 100)
+```
+
+Joins each outbound Spring Feign call to the server endpoint it reaches in
+another registered repository. It is computed on every call from the graphs
+that already exist, opened read-only; nothing is stored, so no rebuild is
+needed beyond a graph that already indexes Feign clients. Each row has the
+calling repo, file and line, the HTTP method, route and service name, a
+`status`, and `candidates` (repo, file, line, method, route; at most five,
+with `candidates_total`).
+
+How a call is classified:
+
+- `unmatchable`, with a `reason`, when the target cannot be known from the
+  code: `service_unresolved` (the `@FeignClient` name is a `${...}`
+  placeholder or absent), `url_from_argument` (a `java.net.URI` argument
+  receives the request), `url_literal` (the client has a fixed `url`),
+  `route_dynamic` or `placeholder_in_route` (part of the route could not be
+  resolved). These are never guessed.
+- The service name picks the target repository: a registry alias or folder
+  name first, then a name in `repo-aliases.toml`, then a name that differs only
+  in case, `-` versus `_` or repeated separators. That last step must reach
+  exactly one repository. Otherwise the status is `no_target_repo` with
+  `service_not_registered`, `service_name_ambiguous` or `target_unreadable`.
+  Sibling checkouts that share a folder name are all searched.
+- Within the target, an endpoint matches when its HTTP method is the same (an
+  endpoint mapped for every method matches any) and its route is the same
+  after dropping the query string, collapsing repeated slashes, dropping a
+  trailing slash and treating every `{name}` as one wildcard segment. Case is
+  kept. A `{name}` in the call does not match a fixed segment on the server.
+  One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
+
+`repos` selects the calling repositories only; targets are always looked up
+across the whole registry. Names that match no entry are returned in
+`unknown`, ambiguous ones in `ambiguous`, as for `cross_repo_search_tool`.
+`counts` and `total` cover every call that passed the filters; `results` is
+capped by `limit` and `max_results`, and `truncated` says so. A repository whose
+graph is missing or unreadable is listed in `unreadable` (with its role,
+`client` or `target`, and a short reason) and does not stop the call.
+
 ## Result Bounds
 
 Every tool that returns a list is bounded, so one MCP response cannot fill a

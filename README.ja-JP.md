@@ -589,7 +589,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 個の MCP ツール</strong></summary>
+<summary><strong>31 個の MCP ツール</strong></summary>
 <br>
 
 グラフを構築すると、アシスタントはこれらを使います。読むだけの 25 個のツールには `readOnlyHint: true` が付いているので、クライアントは確認なしで実行できます。書き込みを行う 5 個（`build_or_update_graph_tool`、`run_postprocess_tool`、`embed_graph_tool`、`apply_refactor_tool`、`generate_wiki_tool`）には付いていません。
@@ -626,6 +626,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 1 つの Wiki ページ |
 | `list_repos_tool` | 登録済みのリポジトリ |
 | `cross_repo_search_tool` | 登録済みのリポジトリを検索。`repos` で対象を絞り込める |
+| `cross_repo_requests_tool` | Spring Feign の呼び出しを、他の登録済みリポジトリ内の対応するエンドポイントに結び付ける |
 
 **MCP プロンプト**（5 つのワークフローテンプレート）:
 `review_changes`、`architecture_map`、`debug_issue`、`onboard_developer`、`pre_merge_check`
@@ -737,7 +738,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### ツールの絞り込み
 
-CRG は既定で 30 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
+CRG は既定で 31 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
 
 ```bash
 # CLI flag

@@ -103,7 +103,8 @@ Known gaps in Feign support:
   `@FeignClient` that declares mapped methods is indexed like a controller, so those methods
   still get server-style `Endpoint` nodes and `HANDLES` edges.
 - Query strings stay verbatim in `route` (`/items?active=true`); stripping is left to whoever
-  matches routes.
+  matches routes (`cross_repo_requests_tool` strips them, and ignores a trailing slash and the
+  names inside `{...}`, when it joins a call to a server endpoint in another registered repo).
 - Feign's native `@RequestLine` contract and Kotlin clients are not supported.
 - `requests_of` and `requesters_of` take a method or an endpoint qualified name. A class name
   returns nothing, as it does for `endpoints_for` and `handlers_of`.
