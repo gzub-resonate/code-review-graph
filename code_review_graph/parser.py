@@ -41,6 +41,7 @@ from .constants import (
     IMPORT_SCOPE_KEY,
     IMPORT_SCOPE_PACKAGE,
     IMPORT_SCOPE_TREE,
+    SPRING_FEIGN_EDGE_KIND,
     normalize_file_path,
     release_os_memory,
 )
@@ -1964,6 +1965,11 @@ _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
 _JAVA_WILDCARD_KEY = "__crg_java_wildcard__"
 _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
+# Spring Cloud OpenFeign declares an HTTP client as an annotated interface.
+# Its request mappings describe calls the service makes, not routes it serves.
+_SPRING_FEIGN_CLIENT_ANNOTATIONS = frozenset({"FeignClient"})
+_SPRING_FEIGN_CLIENT_KEY = "__crg_spring_feign_client__:"
+_SPRING_FEIGN_ABSOLUTE_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # Marks a Python local name bound to a MODULE rather than to a symbol inside
 # one (``from . import cli``). The value is that module's file; a reference to
@@ -15788,6 +15794,239 @@ class CodeParser:
                         emitted += 1
         return emitted
 
+    @staticmethod
+    def _spring_feign_literal(node) -> tuple[str, bool]:
+        """Fold a Java annotation value into ``(text, dynamic)`` without evaluating it.
+
+        String literals and ``+`` chains of them fold into one value. Anything
+        else (a constant, a call) contributes no text and marks the value dynamic.
+        """
+        if node.type == "string_literal":
+            text = node.text.decode("utf-8", errors="replace")
+            return (text[1:-1] if len(text) >= 2 else "", False)
+        if node.type == "parenthesized_expression":
+            inner = [part for part in node.children if part.is_named]
+            if len(inner) == 1:
+                return CodeParser._spring_feign_literal(inner[0])
+        if node.type == "binary_expression":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            operator = node.child_by_field_name("operator")
+            if (
+                left is not None
+                and right is not None
+                and operator is not None
+                and operator.text == b"+"
+            ):
+                left_text, left_dynamic = CodeParser._spring_feign_literal(left)
+                right_text, right_dynamic = CodeParser._spring_feign_literal(right)
+                return (left_text + right_text, left_dynamic or right_dynamic)
+        return ("", True)
+
+    @staticmethod
+    def _spring_feign_values(value_node) -> list[tuple[str, bool]]:
+        """Return the folded values of one annotation argument (array or scalar)."""
+        if value_node.type == "element_value_array_initializer":
+            return [
+                CodeParser._spring_feign_literal(part)
+                for part in value_node.children
+                if part.is_named and not part.type.endswith("comment")
+            ]
+        return [CodeParser._spring_feign_literal(value_node)]
+
+    @staticmethod
+    def _spring_feign_arguments(annotation_node) -> list[tuple[str, object]]:
+        """Return ``(key, value_node)`` pairs; a lone unnamed argument is ``value``."""
+        arguments: list[tuple[str, object]] = []
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type == "element_value_pair":
+                    named = [part for part in argument.children if part.is_named]
+                    if len(named) >= 2 and named[0].type == "identifier":
+                        key = named[0].text.decode("utf-8", errors="replace")
+                        arguments.append((key, named[-1]))
+                elif argument.is_named and not argument.type.endswith("comment"):
+                    arguments.append(("value", argument))
+        return arguments
+
+    @staticmethod
+    def _spring_feign_placeholder_keys(text: str) -> list[str]:
+        """Return the normalized ``${key}`` names in a string, in order, without defaults."""
+        keys: list[str] = []
+        for match in _SPRING_PLACEHOLDER_RE.finditer(text):
+            key = normalize_spring_config_key(match.group(1).split(":", 1)[0].strip())
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _spring_feign_client_attributes(self, annotation_node) -> dict:
+        """Read ``@FeignClient`` attributes; the ``url`` is reduced to placeholder keys."""
+        name: Optional[str] = None
+        context_id: Optional[str] = None
+        path = ""
+        path_dynamic = False
+        url_text = ""
+        for key, value_node in self._spring_feign_arguments(annotation_node):
+            values = self._spring_feign_values(value_node)
+            text, dynamic = values[0] if values else ("", False)
+            if key in ("name", "value", "serviceId"):
+                # ``name`` wins over ``value``; neither is meaningful when dynamic.
+                if not dynamic and (name is None or key == "name"):
+                    name = text
+            elif key == "contextId":
+                if not dynamic:
+                    context_id = text
+            elif key == "path":
+                path, path_dynamic = text, dynamic
+            elif key == "url":
+                url_text = "" if dynamic else text
+        config_keys: list[str] = []
+        for text in (name or "", url_text, path):
+            for key in self._spring_feign_placeholder_keys(text):
+                if key not in config_keys:
+                    config_keys.append(key)
+        return {
+            "name": name or None,
+            "context_id": context_id or None,
+            "path": path,
+            "path_dynamic": path_dynamic,
+            "url_literal": bool(_SPRING_PLACEHOLDER_RE.sub("", url_text).strip()),
+            "config_keys": config_keys,
+        }
+
+    def _emit_spring_feign_config_edges(
+        self,
+        class_node,
+        class_name: str,
+        enclosing_class: Optional[str],
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit DEPENDS_ON_CONFIG edges for ``${key}`` placeholders in ``@FeignClient``."""
+        source = self._qualify(class_name, file_path, enclosing_class)
+        for annotation in self._java_annotations_named(
+            class_node, _SPRING_FEIGN_CLIENT_ANNOTATIONS,
+        ):
+            for key in self._spring_feign_client_attributes(annotation)["config_keys"]:
+                edges.append(EdgeInfo(
+                    kind="DEPENDS_ON_CONFIG",
+                    source=source,
+                    target=f"config:{key}",
+                    file_path=file_path,
+                    line=annotation.start_point[0] + 1,
+                    extra={"config_key": key, "resolution": "feign_client"},
+                ))
+
+    def _emit_spring_feign_client_nodes(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        import_map: dict[str, str],
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> int:
+        """Emit outbound endpoints and REQUESTS edges for a Feign client method."""
+        encoded = import_map.get(f"{_SPRING_FEIGN_CLIENT_KEY}{class_name or ''}")
+        if not encoded:
+            return 0
+        try:
+            client = json.loads(encoded)
+        except (TypeError, ValueError):
+            return 0
+        if not isinstance(client, dict):
+            return 0
+        annotations = self._java_annotations_named(
+            method_node,
+            frozenset(_SPRING_REQUEST_MAPPINGS),
+        )
+        if not annotations:
+            return 0
+
+        prefixes = client.get("prefixes")
+        if not isinstance(prefixes, list) or not all(isinstance(p, str) for p in prefixes):
+            prefixes = []
+        prefixes = prefixes or [""]
+        interface_keys = [k for k in client.get("config_keys", []) if isinstance(k, str)]
+
+        source = self._qualify(method_name, file_path, class_name)
+        emitted = 0
+        for annotation_index, annotation in enumerate(annotations):
+            annotation_name = self._java_annotation_name(annotation)
+            if annotation_name is None:
+                continue
+            mapped: list[tuple[str, bool]] = []
+            for key, value_node in self._spring_feign_arguments(annotation):
+                if key in ("path", "value"):
+                    mapped.extend(self._spring_feign_values(value_node))
+            mapped = mapped or [("", False)]
+            # OpenFeign's SpringMvcContract treats a @RequestMapping without
+            # ``method`` as GET, unlike a controller where it matches any verb.
+            verbs = self._spring_mapping_methods(annotation, annotation_name)
+            if verbs == ["ANY"]:
+                verbs = ["GET"]
+            for prefix in prefixes:
+                for path, path_dynamic in mapped:
+                    route = self._join_spring_route(
+                        self._join_spring_route(client.get("path", ""), prefix),
+                        path,
+                    )
+                    config_keys = list(interface_keys)
+                    for key in self._spring_feign_placeholder_keys(path):
+                        if key not in config_keys:
+                            config_keys.append(key)
+                    route_dynamic = bool(
+                        client.get("path_dynamic")
+                        or path_dynamic
+                        or _SPRING_FEIGN_ABSOLUTE_URL_RE.match(path)
+                    )
+                    for verb in verbs:
+                        endpoint_name = (
+                            f"{method_name}@{annotation_name}"
+                            f"[{annotation_index}:{emitted}] {verb} {route}"
+                        )
+                        metadata: dict[str, Any] = {
+                            "annotation": annotation_name,
+                            "client_method": method_name,
+                            "http_method": verb,
+                            "route": route,
+                            "role": "client",
+                            "client": "feign",
+                            "config_keys": config_keys,
+                            "route_dynamic": route_dynamic,
+                            "url_literal": bool(client.get("url_literal")),
+                        }
+                        service = client.get("name")
+                        if service and "${" not in service:
+                            metadata["service"] = service
+                        else:
+                            metadata["service_unresolved"] = True
+                        if client.get("context_id"):
+                            metadata["context_id"] = client["context_id"]
+                        nodes.append(NodeInfo(
+                            kind="Endpoint",
+                            name=endpoint_name,
+                            file_path=file_path,
+                            line_start=annotation.start_point[0] + 1,
+                            line_end=annotation.end_point[0] + 1,
+                            language="java",
+                            parent_name=class_name,
+                            extra=metadata,
+                        ))
+                        edges.append(EdgeInfo(
+                            kind=SPRING_FEIGN_EDGE_KIND,
+                            source=source,
+                            target=self._qualify(endpoint_name, file_path, class_name),
+                            file_path=file_path,
+                            line=annotation.start_point[0] + 1,
+                            extra={**metadata, "resolution": "spring_feign_client"},
+                        ))
+                        emitted += 1
+        return emitted
+
     def _java_invocation_chain_has_route(self, invocation) -> bool:
         """Return whether a fluent Java invocation is rooted at ``route()``."""
         current = invocation
@@ -16703,6 +16942,24 @@ class CodeParser:
                     import_map[f"{_SPRING_REQUEST_PREFIX_KEY}{name}"] = json.dumps(
                         request_prefixes,
                     )
+                feign_annotations = self._java_annotations_named(
+                    child, _SPRING_FEIGN_CLIENT_ANNOTATIONS,
+                )
+                if feign_annotations:
+                    feign = self._spring_feign_client_attributes(feign_annotations[0])
+                    # Legacy: current OpenFeign rejects @RequestMapping on a client
+                    # interface, older releases applied it as a route prefix.
+                    feign["prefixes"] = request_prefixes
+                    # Keyed by the full scope chain so a nested interface resolves.
+                    feign_scope = f"{class_parent}.{name}" if class_parent else name
+                    import_map[f"{_SPRING_FEIGN_CLIENT_KEY}{feign_scope}"] = json.dumps(
+                        feign,
+                    )
+                    extra["spring_feign_client"] = True
+                    if feign["name"] and "${" not in feign["name"]:
+                        extra["feign_name"] = feign["name"]
+                    if feign["context_id"] and "${" not in feign["context_id"]:
+                        extra["feign_context_id"] = feign["context_id"]
 
         # Class-level annotation persistence for all annotation-bearing
         # languages.  Kotlin (@HiltViewModel, @AndroidEntryPoint) and C#
@@ -16781,6 +17038,9 @@ class CodeParser:
                 import_map,
             )
             self._emit_spring_config_edges(
+                child, name, enclosing_class, file_path, edges,
+            )
+            self._emit_spring_feign_config_edges(
                 child, name, enclosing_class, file_path, edges,
             )
             # Temporal: emit TEMPORAL_STUB edges for activity/workflow stub fields
@@ -17009,18 +17269,33 @@ class CodeParser:
         if child.type == "abstract_method_signature":
             method_extra["abstract"] = True
         if language == "java" and deco_list:
-            endpoint_count = self._emit_spring_endpoint_nodes(
-                child,
-                name,
-                enclosing_class,
-                file_path,
-                import_map or {},
-                nodes,
-                edges,
-            )
-            if endpoint_count:
-                method_extra["spring_endpoint"] = True
-                method_extra["spring_endpoint_count"] = endpoint_count
+            if f"{_SPRING_FEIGN_CLIENT_KEY}{enclosing_class or ''}" in (import_map or {}):
+                # A Feign client method is an outbound call, never a served route.
+                feign_count = self._emit_spring_feign_client_nodes(
+                    child,
+                    name,
+                    enclosing_class,
+                    file_path,
+                    import_map or {},
+                    nodes,
+                    edges,
+                )
+                if feign_count:
+                    method_extra["spring_feign_client"] = True
+                    method_extra["spring_feign_request_count"] = feign_count
+            else:
+                endpoint_count = self._emit_spring_endpoint_nodes(
+                    child,
+                    name,
+                    enclosing_class,
+                    file_path,
+                    import_map or {},
+                    nodes,
+                    edges,
+                )
+                if endpoint_count:
+                    method_extra["spring_endpoint"] = True
+                    method_extra["spring_endpoint_count"] = endpoint_count
             temporal_method_annots = [
                 a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS
             ]
