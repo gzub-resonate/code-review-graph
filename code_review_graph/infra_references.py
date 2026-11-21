@@ -193,3 +193,62 @@ def is_dockerfile_name(name: str) -> bool:
         if lower == stem or lower.startswith(stem + ".") or lower.endswith("." + stem):
             return True
     return False
+
+
+#: Target of a Terragrunt source, include or dependency that is an expression, such as
+#: ``find_in_parent_folders()``. The raw text is on the edge; it is never evaluated.
+EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET = "external:terragrunt:dynamic"
+
+#: Target prefix of a remote Terraform module source (git, registry, archive).
+EXTERNAL_TERRAFORM_MODULE_PREFIX = "external:terraform-module:"
+
+_GETTER_PREFIX = re.compile(r"^([A-Za-z0-9]+)::")
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def parse_terragrunt_source(raw: str) -> dict[str, Any]:
+    """Split a ``terraform { source = ... }`` value into where it points and which version.
+
+    ``kind`` is ``local`` (a ``./``, ``../`` or absolute path), ``git`` (a ``git::`` prefix, a
+    ``.git`` URL or ``git@`` address), ``registry`` (``tfr://`` or ``<ns>/<name>/<provider>``),
+    ``archive`` (``http(s)``, ``s3``, ``gcs``) or ``other``. A remote source has ``base``
+    (the address without the ``//subdir`` and without the query), ``subdir`` and ``ref``
+    (the ``ref`` or ``version`` query parameter). Nothing is fetched or evaluated.
+    """
+    text = raw.strip()
+    parts: dict[str, Any] = {"raw": text, "kind": "other", "base": None, "subdir": None,
+                             "ref": None}
+    if text.startswith(("./", "../", "/")):
+        parts["kind"] = "local"
+        return parts
+    getter = None
+    match = _GETTER_PREFIX.match(text)
+    if match and not text.startswith(match.group(1) + "://"):
+        getter = match.group(1).lower()
+        text = text[match.end():]
+    address, _, query = text.partition("?")
+    for pair in query.split("&"):
+        key, _, value = pair.partition("=")
+        if key in ("ref", "version") and value:
+            parts["ref"] = value
+    scheme = _URL_SCHEME.match(address)
+    head = address[scheme.end():] if scheme else address
+    base, sep, subdir = head.partition("//")
+    if sep:
+        parts["subdir"] = subdir.strip("/") or None
+    base = (address[:scheme.end()] if scheme else "") + base
+    if base.endswith(".git"):
+        base = base[:-4]
+    parts["base"] = base or None
+    scheme_name = scheme.group(0)[:-3].lower() if scheme else ""
+    if getter == "git" or head.startswith("git@") or address.split("//")[0].endswith(".git"):
+        parts["kind"] = "git"
+    elif scheme_name == "tfr" or (
+        not scheme and not getter and re.fullmatch(r"\w[\w-]*/[\w.-]+/[\w.-]+", base or "")
+    ):
+        parts["kind"] = "registry"
+    elif getter in ("s3", "gcs", "http", "https") or scheme_name in ("http", "https", "s3", "gcs"):
+        parts["kind"] = "archive"
+    elif not scheme and not getter and base and "." in base.split("/")[0]:
+        parts["kind"] = "git"  # ``github.com/acme/mods``: go-getter's shorthand
+    return parts
