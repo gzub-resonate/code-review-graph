@@ -414,7 +414,7 @@ jobs:
 | **语言与笔记本支持** | 见上文[语言覆盖](#语言覆盖与笔记本)。 |
 | **框架感知的 PHP 解析** | 仓库范围内的 Composer PSR-4 导入、Blade 模板引用、有证据支撑的 Laravel Route 到控制器以及 Eloquent 关系边 |
 | **框架感知的 Java 解析** | Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知边、Temporal 工作流与活动的边，以及只索引键名不索引值的 Spring Boot 配置键 |
-| **基础设施引用** | GitHub Actions 的 `uses:`、Dockerfile 的 `FROM` 与 `COPY --from`，以及 Terragrunt 的 `source`、`include` 和 `dependency` 会成为指向 `external:` 目标的边，因此可以查询哪些文件使用了某个共享工作流、基础镜像或模块；这些文件中的其他值一律不存储 |
+| **基础设施引用** | GitHub Actions 的 `uses:`、Dockerfile 的 `FROM` 与 `COPY --from`，以及 Terragrunt 的 `source`、`include` 和 `dependency` 会成为指向 `external:` 目标的边，因此可以查询哪些文件使用了某个共享工作流、基础镜像或模块；这些文件中的其他值一律不存储，URL 中的凭据以及 ref 以外的查询参数也会被丢弃 |
 | **影响半径分析** | 一次改动可能影响哪些函数、类和文件 |
 | **自动更新钩子** | 编辑器钩子、git 钩子（每次提交前，以及 checkout、merge 和 rebase 之后）和 watch 模式在你工作时更新图谱 |
 | **语义搜索** | 可选的向量嵌入，通过 sentence-transformers、Google Gemini、MiniMax、Voyage AI，或任何 OpenAI 兼容端点 |

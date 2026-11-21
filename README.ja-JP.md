@@ -410,7 +410,7 @@ jobs:
 | **言語とノートブックの対応** | 上記の[対応言語](#対応言語とノートブック)を参照。 |
 | **フレームワークを理解する PHP 解析** | リポジトリ内に閉じた Composer PSR-4 のインポート、Blade テンプレートの参照、根拠に基づく Laravel Route からコントローラへのエッジと Eloquent のリレーションのエッジ |
 | **フレームワークを理解する Java 解析** | Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスのエッジ、Temporal のワークフローとアクティビティのエッジ、そして値を含めずにインデックスする Spring Boot の設定キー |
-| **インフラ参照** | GitHub Actions の `uses:`、Dockerfile の `FROM` と `COPY --from`、Terragrunt の `source`、`include`、`dependency` が `external:` ターゲットへのエッジになり、共有ワークフロー、ベースイメージ、モジュールを使うファイルを調べられます。これらのファイルのほかの値は保存しません |
+| **インフラ参照** | GitHub Actions の `uses:`、Dockerfile の `FROM` と `COPY --from`、Terragrunt の `source`、`include`、`dependency` が `external:` ターゲットへのエッジになり、共有ワークフロー、ベースイメージ、モジュールを使うファイルを調べられます。これらのファイルのほかの値は保存せず、URL の認証情報と ref 以外のクエリ文字列も破棄します |
 | **影響範囲の分析** | 変更によって影響を受けそうな関数、クラス、ファイル |
 | **自動更新フック** | エディタのフック、git のフック（コミットの前と、チェックアウト、マージ、リベースの後）、watch モードが作業中にグラフを更新 |
 | **セマンティック検索** | 任意のベクトル埋め込み。sentence-transformers、Google Gemini、MiniMax、Voyage AI、あるいは任意の OpenAI 互換エンドポイント |
