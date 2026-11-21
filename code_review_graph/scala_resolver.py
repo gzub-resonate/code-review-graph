@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -63,7 +62,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TRUST_OUTSIDE_PARENTS = os.environ.get("CRG_SCALA_TRUST_OUTSIDE") == "1"
+_OUTSIDE_PARENT_CONFIDENCE = 0.6
 _MAX_CANDIDATES = 20
 _MAX_INHERITANCE_DEPTH = 25
 _MAX_CHAIN_DEPTH = 50
@@ -71,7 +70,7 @@ _MAX_CHAIN_DEPTH = 50
 _OBJECT_KINDS = frozenset({"object", "case_object"})
 _FLOWS_DIRTY_KEY = "scala_flows_dirty"
 
-_RESOLVED_KEYS = ("scala_resolved", "scala_via", "scala_ambiguous")
+_RESOLVED_KEYS = ("scala_resolved", "scala_via", "scala_ambiguous", "scala_outside_parent")
 # Written by the store when a name is shared by several definitions; a bound
 # call must not carry them, and neither must one handed back to its raw name.
 _COLLISION_KEYS = (
@@ -553,13 +552,14 @@ class _Index:
 
 
 class _Outcome:
-    __slots__ = ("targets", "rule", "via", "ambiguous")
+    __slots__ = ("targets", "rule", "via", "ambiguous", "low")
 
-    def __init__(self, targets, rule, via="", ambiguous=False):
+    def __init__(self, targets, rule, via="", ambiguous=False, low=False):
         self.targets = targets
         self.rule = rule
         self.via = via
         self.ambiguous = ambiguous
+        self.low = low
 
 
 def _objects(nodes) -> list[_Type]:
@@ -580,18 +580,17 @@ def _fits(index: _Index, qns, argc: Optional[int]) -> list[str]:
     ]
 
 
-def _declared_here(index: _Index, owners, found) -> set[str]:
-    """Drop a member an outside parent might overload rather than override.
+def _may_overload(index: _Index, owners, found) -> bool:
+    """Whether an outside parent could declare a method this one only overloads.
 
     When a type extends something outside the repository, a ``def get(a, b)``
     written without ``override`` can sit next to a ``get`` that parent declares,
     and the call may mean the parent's. With ``override`` the two are one method.
+    The link is kept, at a lower confidence.
     """
-    if _TRUST_OUTSIDE_PARENTS or not found:
-        return set(found)
-    if not any(index.has_outside_ancestor(owner) for owner in owners):
-        return set(found)
-    return {qn for qn in found if qn in index.overrides}
+    if not found or not any(index.has_outside_ancestor(owner) for owner in owners):
+        return False
+    return any(qn not in index.overrides for qn in found)
 
 
 def _members_outcome(
@@ -605,12 +604,12 @@ def _members_outcome(
     # A declaration that cannot take this many arguments is another overload
     # (often one an out-of-repository parent declares).
     found = set(_fits(index, found, argc))
-    found = _declared_here(index, owners, found)
     if not found:
         return None
+    low = _may_overload(index, owners, found)
     targets = sorted(found)
     if len(targets) == 1 and len(owners) == 1:
-        return _Outcome(targets, rule, via)
+        return _Outcome(targets, rule, via, low=low)
     return _Outcome(targets[:_MAX_CANDIDATES], rule, via, ambiguous=True)
 
 
@@ -752,14 +751,17 @@ def _resolve_bare(
     chain_unknown = False
     for enclosing in ctx.chain:
         found, unknown = index.find_members(enclosing, name)
-        hits = sorted(_declared_here(index, [enclosing], _fits(index, found, argc)))
+        hits = _fits(index, found, argc)
         if found and not hits:
             # Declared here, but not for this many arguments: another overload,
             # most likely an out-of-repository parent's.
             return None
         if hits:
             if len(hits) == 1:
-                return _Outcome(hits, "enclosing_member", enclosing.qn)
+                return _Outcome(
+                    hits, "enclosing_member", enclosing.qn,
+                    low=_may_overload(index, [enclosing], hits),
+                )
             return _Outcome(hits[:_MAX_CANDIDATES], "enclosing_member", ambiguous=True)
         _known, has_unknown = index.parents(enclosing)
         if unknown or has_unknown:
@@ -892,7 +894,7 @@ def resolve_scala_calls(store: GraphStore) -> dict[str, int]:
         outcome = _resolve_call(index, extra, ctx)
         raw_name = extra.get("scala_name", current)
         desired_extra = {k: v for k, v in extra.items() if k not in _RESOLVED_KEYS}
-        if "scala_ambiguous" in extra or outcome is not None:
+        if owned or outcome is not None:
             for key in _COLLISION_KEYS:
                 desired_extra.pop(key, None)
         if outcome is not None and not outcome.ambiguous and len(outcome.targets) == 1:
@@ -902,6 +904,9 @@ def resolve_scala_calls(store: GraphStore) -> dict[str, int]:
             desired_extra["scala_resolved"] = outcome.rule
             if outcome.via:
                 desired_extra["scala_via"] = outcome.via
+            if outcome.low:
+                desired_extra["scala_outside_parent"] = True
+                desired_extra["confidence"] = _OUTSIDE_PARENT_CONFIDENCE
             stats["calls_resolved"] += 1
         elif outcome is not None and outcome.ambiguous and not parser_direct:
             target = raw_name

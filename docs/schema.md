@@ -165,6 +165,28 @@ wrote `<path>::Leaf.handle` and only `Alpha` declares `handle`, the target becom
 checks the move again. When the bare-name resolver binds a call this way, `extra.inherited_through`
 names the class the call went through. Both are `INFERRED`.
 
+Scala calls and imports are bound across files by `scala_resolver.py`, from the package
+clauses, imports and declared types the parser recorded. A bound call is `INFERRED` and
+carries `extra.scala_resolved` (the rule: `object_member`, `constructor`, `apply`,
+`case_class_constructor`, `typed_receiver`, `this_member`, `super_member`, `enclosing_member`,
+`imported_member` or `wildcard_member`), `extra.scala_via` (the declaring type or types) and
+`extra.scala_name` (the name as written, which restores the edge when its target goes away). A
+call several declarations could mean (overloads, an object defined twice, a case class with
+an explicit `apply`) stays `AMBIGUOUS`: `extra.scala_ambiguous` names the rule and
+`extra.ambiguous_targets` lists them. A name that is not declared in the repository is never
+linked. The parser also leaves what the resolver reads: on a `Class` node `extra.scala_kind`
+(`class`, `trait`, `object`, `enum` or the `case_` form), `scala_package`,
+`scala_package_scopes` (when package clauses are chained or braced) and `scala_parents` (the
+`extends` clause as written, `?` for a parent that is no plain name); on a `Function` node
+`scala_private` and `scala_override`; on an `IMPORTS_FROM` edge `scala_import` (the dotted
+name), `scala_alias` (a rename), `scala_wildcard` and `scala_given`; on a `CALLS` edge
+`scala_form` (`bare`, `member`, `new` or `other`), `scala_receiver`, `scala_receiver_type`,
+`scala_receiver_new`, `scala_receiver_apply`, `scala_receiver_expr_new`,
+`scala_receiver_local`, `scala_shadowed`, `scala_type` and `scala_argc`. An `IMPORTS_FROM`
+edge whose import names a type or an object (or one of its members) in the repository points
+at that file and has `extra.import_resolution = "scala_scope"`; an import of a whole package
+keeps its dotted name, because a package has no single file.
+
 | Kind | Source -> target | Notes |
 |---|---|---|
 | CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`) |
@@ -372,7 +394,7 @@ CREATE TABLE embeddings (
 | `symlink_followed_files`, `symlink_followed_dirs` | Builds that follow symlinked folders (`--follow-symlinks` or `CRG_FOLLOW_SYMLINKS`): files and outside folders reached through a link |
 | `dependents_reparse_pending` | Incremental updates; importers whose re-parse failed, to retry. A full build clears it |
 | `cpp_identity_version`, `cpp_identity_pending`, `csharp_identity_version`, `csharp_identity_pending_files`, `nested_scope_identity_version`, `nested_scope_identity_pending_files` | Builds and updates; force one re-parse when node names change shape |
-| `csharp_flows_dirty` | C# call resolution sets `1`; rebuilding flows clears it |
+| `csharp_flows_dirty`, `scala_flows_dirty` | C# and Scala call resolution set `1` when they rebind calls in files that were not reparsed; rebuilding flows clears both |
 
 ### Indexes
 

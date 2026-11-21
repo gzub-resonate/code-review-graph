@@ -297,6 +297,42 @@ def test_member_reached_through_two_levels_of_inheritance(tmp_path):
     assert call["extra"]["scala_via"].endswith("::Leaf")
 
 
+def test_member_an_outside_parent_may_overload_is_linked_at_lower_confidence(tmp_path):
+    _write(tmp_path, {
+        "a/Routes.scala": (
+            "package demo\n"
+            "class Routes extends ExternalBase {\n"
+            "  def get(path: String, form: Int): Int = 1\n"
+            "  override def render(): Int = 2\n"
+            "  def a(): Int = get(\"/x\", 1)\n"
+            "  def b(): Int = render()\n"
+            "}\n"
+        ),
+        "b/Use.scala": (
+            "package demo\n"
+            "object Use { def run(r: Routes): Int = r.get(\"/y\", 2) }\n"
+        ),
+    })
+    (tmp_path / ".git").mkdir()
+    with _store(tmp_path) as store:
+        full_build(tmp_path, store)
+        g = Graph(store, tmp_path)
+        member = g.call("b/Use.scala", 2, "get")
+        override = g.call("a/Routes.scala", 6, "render")
+        scores = {
+            name: store._conn.execute(
+                "SELECT confidence FROM edges WHERE kind = 'CALLS' AND extra LIKE ? "
+                "AND extra LIKE '%scala_resolved%'",
+                (f'%"scala_name": "{name}"%',),
+            ).fetchone()[0]
+            for name in ("get",)
+        }
+    assert member["rule"] == "typed_receiver"
+    assert member["extra"]["scala_outside_parent"] is True
+    assert override["extra"].get("scala_outside_parent") is None
+    assert scores["get"] == 0.6
+
+
 def test_private_member_of_a_parent_is_not_inherited(tmp_path):
     _write(tmp_path, {
         "a/Parent.scala": (
