@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from .tools import (
         apply_refactor_func,
         build_or_update_graph,
+        cross_repo_requests_func,
         cross_repo_search_func,
         detect_changes_func,
         embed_graph,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
 _LAZY_TOOL_NAMES = frozenset({
     "apply_refactor_func",
     "build_or_update_graph",
+    "cross_repo_requests_func",
     "cross_repo_search_func",
     "detect_changes_func",
     "embed_graph",
@@ -1501,6 +1503,49 @@ async def cross_repo_search_tool(
         lambda: cross_repo_search_func(
             query=query, kind=kind, limit=limit, max_results=max_results,
             repos=repos,
+        ),
+        None,
+        provenance=False,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def cross_repo_requests_tool(
+    repos: Optional[list[str]] = None,
+    service: Optional[str] = None,
+    route: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 20,
+    max_results: int = 50,
+) -> dict:
+    """Join outbound Spring Feign calls to the endpoints they reach in other repos.
+
+    Lists the Feign client calls of the registered repos and, for each, the
+    controller endpoint in the repo its service name points at, found by HTTP
+    method and route. Read-only and computed on every call; nothing is stored.
+    A call is ``matched`` (one endpoint), ``ambiguous`` (several),
+    ``no_route_match``, ``no_target_repo`` (no registered repo carries the
+    service name) or ``unmatchable`` with a ``reason`` (placeholder service
+    name, absolute ``url``, ``URI`` argument, or a route piece that could not
+    be resolved). Nothing is guessed.
+
+    Args:
+        repos: Optional aliases or folder names of the client repos to list
+            calls from. Default: every registered repo. Targets are always
+            looked up across the whole registry. Names matching no entry come
+            back in ``unknown``; names matching several are in ``ambiguous``.
+        service: Only calls to this Feign service name (exact).
+        route: Only calls whose route equals this or lies below it.
+        status: Only rows with this status.
+        limit: Maximum rows per client repo. Default: 20.
+        max_results: Maximum rows overall, at most 100. ``counts`` and
+            ``total`` cover every call that passed the filters. Default: 50.
+    """
+    return await _offload(
+        "cross_repo_requests_tool",
+        lambda: cross_repo_requests_func(
+            repos=repos, service=service, route=route, status=status,
+            limit=limit, max_results=max_results,
         ),
         None,
         provenance=False,
