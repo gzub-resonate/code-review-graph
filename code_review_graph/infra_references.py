@@ -25,6 +25,11 @@ MAX_INFRA_REFERENCES_PER_FILE = 500
 #: Longest reference string kept. A longer one is not a reference, and is skipped.
 MAX_REFERENCE_CHARS = 512
 
+#: Dockerfile limits. Past either one the rest of the file is not read, and the file node's
+#: ``infra_references_truncated`` says so. Real Dockerfiles are tens of lines.
+MAX_DOCKERFILE_BYTES = 1_048_576
+MAX_DOCKERFILE_LINES = 2_000
+
 #: Target prefixes. A reference to code outside the repository is
 #: ``<prefix><name>``; the ref, tag or digest stays in the edge's ``extra``, so every
 #: version of one action or image shares one target.
@@ -34,6 +39,9 @@ EXTERNAL_DOCKER_IMAGE_PREFIX = "external:docker-image:"
 #: Target of a ``uses`` whose repository part is an expression, such as
 #: ``${{ matrix.action }}``. The raw text is on the edge; it is never guessed.
 DYNAMIC_GITHUB_ACTIONS_TARGET = EXTERNAL_GITHUB_ACTIONS_PREFIX + "dynamic"
+
+#: Target of an image reference that uses a build argument or variable (``FROM ${BASE}``).
+EXTERNAL_DYNAMIC_DOCKER_TARGET = EXTERNAL_DOCKER_IMAGE_PREFIX + "dynamic"
 
 _OWNER_REPO_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -173,3 +181,15 @@ def is_github_workflow_path(parts: tuple[str, ...]) -> Optional[int]:
         if github + 1 < len(parts) - 1 and parts[github + 1] == "actions":
             return github
     return None
+
+
+def is_dockerfile_name(name: str) -> bool:
+    """Whether a file name is a Dockerfile: ``Dockerfile``, ``Dockerfile.*``, ``*.Dockerfile``.
+
+    ``Containerfile`` (Podman and Buildah) is the same format and is matched the same way.
+    """
+    lower = name.lower()
+    for stem in ("dockerfile", "containerfile"):
+        if lower == stem or lower.startswith(stem + ".") or lower.endswith("." + stem):
+            return True
+    return False

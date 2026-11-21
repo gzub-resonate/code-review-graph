@@ -270,3 +270,135 @@ def test_parse_docker_image_parts() -> None:
     assert parts["tag"] == "3.12" and parts["digest"] == "sha256:abc"
     assert parse_docker_image("python")["tag"] is None
     assert parse_docker_image("${BASE}")["dynamic"] is True
+
+
+# ---------------------------------------------------------------------------
+# Dockerfile
+# ---------------------------------------------------------------------------
+
+DOCKERFILE = f"""\
+# syntax=docker/dockerfile:1
+ARG BASE=registry.example.com/base/python:3.12
+ARG TOKEN={SECRET}
+FROM --platform=linux/amd64 registry.example.com/base/python:3.12 AS build
+ENV API_KEY={SECRET}
+LABEL owner="{SECRET}"
+RUN pip install \\
+    --no-cache-dir \\
+    wheel
+COPY --from=acme/tool:1.2@sha256:{"cd" * 32} /usr/bin/tool /usr/bin/tool
+
+FROM build AS test
+RUN echo hi
+
+FROM ${{BASE}} AS dynamic
+FROM registry.example.com:5000/base/node@sha256:{"ab" * 32}
+COPY --from=build /out /out
+COPY --from=0 /out /out2
+COPY --from=test /out /out3
+FROM scratch AS empty
+"""
+
+
+def _docker(tmp_path: Path, name: str = "Dockerfile", text: str = DOCKERFILE):
+    return _parse(tmp_path, name, text)
+
+
+def test_dockerfile_stages_and_image_edges(tmp_path: Path) -> None:
+    nodes, edges = _docker(tmp_path)
+    stages = [n for n in nodes if n.kind == "Class"]
+    assert [n.name for n in stages] == [
+        "stage:build", "stage:test", "stage:dynamic", "stage:3", "stage:empty",
+    ]
+    assert stages[0].extra["base_image"] == "registry.example.com/base/python:3.12"
+    imports = _imports(edges)
+    got = [(e.target, e.line, e.extra["via"], e.extra.get("stage")) for e in imports]
+    assert got == [
+        ("external:docker-image:registry.example.com/base/python", 4, "from", "build"),
+        ("external:docker-image:acme/tool", 10, "copy_from", "build"),
+        ("external:docker-image:dynamic", 15, "from", "dynamic"),
+        ("external:docker-image:registry.example.com:5000/base/node", 16, "from", None),
+    ]
+    assert imports[0].extra["tag"] == "3.12"
+    assert imports[1].extra["tag"] == "1.2"
+    assert imports[1].extra["digest"] == "sha256:" + "cd" * 32
+    assert imports[2].extra["dynamic"] is True
+    assert imports[2].extra["raw"] == "${BASE}"
+    assert imports[3].extra["digest"] == "sha256:" + "ab" * 32
+    assert imports[3].extra["registry"] == "registry.example.com:5000"
+
+
+def test_dockerfile_stage_to_stage_edges(tmp_path: Path) -> None:
+    _nodes, edges = _docker(tmp_path)
+    file_path = (tmp_path / "Dockerfile").as_posix()
+    deps = [
+        (e.source.split("::")[1], e.target.split("::")[1], e.extra["via"], e.line)
+        for e in edges if e.kind == "DEPENDS_ON"
+    ]
+    assert deps == [
+        ("stage:test", "stage:build", "from", 12),
+        ("stage:3", "stage:build", "copy_from", 17),
+        ("stage:3", "stage:build", "copy_from", 18),
+        ("stage:3", "stage:test", "copy_from", 19),
+    ]
+    assert all(e.source.startswith(file_path) for e in edges if e.kind == "DEPENDS_ON")
+
+
+def test_dockerfile_never_stores_arg_env_or_label_values(tmp_path: Path) -> None:
+    nodes, edges = _docker(tmp_path)
+    assert SECRET not in _dump(nodes, edges)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Dockerfile", "Dockerfile.dev", "api.Dockerfile", "Containerfile", "dockerfile"],
+)
+def test_dockerfile_names_are_detected(tmp_path: Path, name: str) -> None:
+    nodes, edges = _docker(tmp_path, name, "FROM acme/base:1\n")
+    assert next(n for n in nodes if n.kind == "File").language == "dockerfile"
+    assert [e.target for e in _imports(edges)] == ["external:docker-image:acme/base"]
+
+
+@pytest.mark.parametrize("name", ["Dockerfile-notes.md", "dockerfiles.txt", "mydockerfile"])
+def test_non_dockerfile_names_are_not_detected(tmp_path: Path, name: str) -> None:
+    path = tmp_path / name
+    path.write_text("FROM acme/base:1\n")
+    assert CodeParser().detect_language(path) != "dockerfile"
+
+
+def test_dockerfile_line_cap(tmp_path: Path) -> None:
+    filler = "RUN true\n" * 3000
+    text = "FROM acme/base:1\n" + filler + "FROM acme/late:1\n"
+    nodes, edges = _docker(tmp_path, text=text)
+    assert [e.target for e in _imports(edges)] == ["external:docker-image:acme/base"]
+    assert next(n for n in nodes if n.kind == "File").extra["infra_references_truncated"]
+    many = "FROM acme/base:1\n" * 5000
+    nodes, edges = _docker(tmp_path, text=many)
+    assert len(_imports(edges)) <= 500
+    assert len([n for n in nodes if n.kind == "Class"]) <= 500
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["FROM\n", "FROM --platform\n", "COPY --from=\n", "\x00\xff", "FROM a AS\nCOPY --from", ""],
+)
+def test_malformed_dockerfiles_never_raise(tmp_path: Path, text: str) -> None:
+    _docker(tmp_path, text=text)
+
+
+def test_dockerfile_is_deterministic(tmp_path: Path) -> None:
+    assert _dump(*_docker(tmp_path)) == _dump(*_docker(tmp_path))
+
+
+def test_dockerfile_edges_survive_a_build(tmp_path: Path) -> None:
+    _docker(tmp_path, "svc/Dockerfile", "FROM registry.example.com/base/python:3.12\n")
+    _docker(tmp_path, "web/Dockerfile.dev", "FROM registry.example.com/base/python:3.11\n")
+    store = _build(tmp_path)
+    try:
+        edges = store.get_edges_by_target("external:docker-image:registry.example.com/base/python")
+        assert sorted((e.file_path, e.extra["tag"]) for e in edges) == [
+            ((tmp_path / "svc/Dockerfile").as_posix(), "3.12"),
+            ((tmp_path / "web/Dockerfile.dev").as_posix(), "3.11"),
+        ]
+    finally:
+        store.close()
