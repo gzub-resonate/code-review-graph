@@ -215,6 +215,8 @@ code-review-graph register /path/to/other/repo --alias mylib
 ```
 Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset. `code-review-graph serve --http --multi-repo` runs one HTTP server for every registered repository; each tool call must then name one in `repo_root`.
 
+A repository can also be known by extra names that you keep in `repo-aliases.toml`. See [REPO_ALIASES.md](REPO_ALIASES.md).
+
 `code-review-graph repos` lists each repository's registered `data_dir`, marking
 missing directories with `[MISSING]`. If a registered directory disappears and
 the repository still has a local `.code-review-graph/graph.db`, graph commands
