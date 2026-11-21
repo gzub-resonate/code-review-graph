@@ -4,6 +4,24 @@
 
 ### Added
 
+- New `cross_repo_requests_tool` answers "which endpoint does this Feign call
+  reach?" across your registered repositories. For each outbound Spring Feign
+  call it names the controller endpoint in the repository the service name
+  points at, matched by HTTP method and route, and says `matched`,
+  `ambiguous` (several endpoints fit), `no_route_match` or `no_target_repo`
+  (no registered repository carries that service name). A call whose target
+  cannot be known from the code, such as a placeholder service name, a fixed
+  `url` or a `URI` argument, is `unmatchable` and says why instead of being
+  guessed. Narrow it with `repos` (the calling repositories), `service`,
+  `route` and `status`. Service names resolve through registry aliases, folder
+  names and `repo-aliases.toml`, then through a case-insensitive match that
+  ignores `-` versus `_`. It reads each graph read-only and stores nothing, so
+  there is nothing to rebuild; see `docs/COMMANDS.md`.
+- Spring Cloud OpenFeign client methods are shown as calls the service makes
+  to other services, not as routes it serves. The route includes the interface
+  path prefix, and a route built from a constant is shown as unresolved.
+  `query_graph_tool` has two new patterns, `requests_of` and `requesters_of`,
+  to follow these calls.
 - A Feign route built from a constant or a method call is shown with an
   `<unresolved>` marker, and `route_literal_parts` lists the literal pieces, so
   a route is never shown as fully literal when something was dropped. A method

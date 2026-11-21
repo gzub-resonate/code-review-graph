@@ -57,6 +57,10 @@ chains and no cycles. A target that matches no registered repository is
 skipped with a warning, and the name is reported the way any unknown name is
 (for example in `unknown` from `cross_repo_search_tool`).
 
+`cross_repo_requests_tool` uses the same lookup for a Feign client's service
+name, so an entry such as `old-service-name = "orders"` lets a client that
+still says `old-service-name` reach the `orders` repository.
+
 `register` and `unregister` never read or change the file. If you unregister
 a repository, aliases that pointed at it stop resolving and log a warning.
 

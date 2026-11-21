@@ -592,7 +592,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 个 MCP 工具</strong></summary>
+<summary><strong>31 个 MCP 工具</strong></summary>
 <br>
 
 图谱构建完成后，助手会使用这些工具。只读的 25 个工具带有 `readOnlyHint: true`，客户端可以不经询问直接运行；会写入的五个（`build_or_update_graph_tool`、`run_postprocess_tool`、`embed_graph_tool`、`apply_refactor_tool`、`generate_wiki_tool`）则没有。
@@ -629,6 +629,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 单个 Wiki 页面 |
 | `list_repos_tool` | 已注册的仓库 |
 | `cross_repo_search_tool` | 搜索已注册的仓库；`repos` 可把搜索限定到一个子集 |
+| `cross_repo_requests_tool` | 把 Spring Feign 调用关联到其他已注册仓库中对应的端点 |
 
 **MCP 提示模板**（5 个工作流模板）：
 `review_changes`、`architecture_map`、`debug_issue`、`onboard_developer`、`pre_merge_check`
@@ -740,7 +741,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 工具过滤
 
-CRG 默认暴露 30 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
+CRG 默认暴露 31 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
 
 ```bash
 # CLI flag
