@@ -4,6 +4,11 @@
 
 ### Added
 
+- An optional `repo-aliases.toml` next to `registry.json` (in `$CRG_HOME`) gives
+  a registered repository extra names, for example
+  `cross_repo_search_tool(repos=["old-service-name"])`. A registry alias or
+  folder name always wins over the file, a bad entry is skipped with a
+  warning, and `register` never changes the file. See `docs/REPO_ALIASES.md`.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
