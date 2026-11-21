@@ -39,6 +39,13 @@ MAX_TEMPLATE_BYTES = 1_000_000
 MAX_INVOCATIONS = 2_000
 #: Most characters one mustache or one tag may span before it is abandoned.
 _MAX_SPAN = 20_000
+#: ``_skip_mustache`` result for a mustache that never closes within the span.
+UNTERMINATED = -1
+#: Characters one file may cost to scan in all (a hostile file stops here).
+MAX_WORK = 4_000_000
+_RAW_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+_TOKEN_RE = re.compile(r"<|\{\{")
+_LITERAL_RE = re.compile(r"\s*(['\"])([A-Za-z][A-Za-z0-9_/-]*)\1")
 
 BUILTINS = frozenset("""
 action and array concat debugger each each-in else fn get has-block
@@ -52,8 +59,12 @@ BUILTIN_COMPONENTS = frozenset({
 })
 
 _NAME_RE = re.compile(r"[a-z][A-Za-z0-9_-]*(?:/[A-Za-z0-9_-]+)*")
-_TAG_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_:-]*")
+_TAG_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_:.-]*")
 _BLOCK_PARAMS_RE = re.compile(r"\bas\s*\|([^|]*)\|")
+
+
+class _BudgetExceededError(Exception):
+    """Raised inside :func:`scan` when a file costs more than :data:`MAX_WORK`."""
 
 
 @dataclass(frozen=True)
@@ -70,8 +81,9 @@ class Invocation:
 def _skip_mustache(text: str, start: int) -> int:
     """Index just past the ``}}`` closing the mustache that opens at *start*.
 
-    Quotes protect a ``}}`` inside a string. Returns ``len(text)`` for an
-    unterminated mustache or one longer than :data:`_MAX_SPAN`.
+    Quotes protect a ``}}`` inside a string. Returns :data:`UNTERMINATED` (-1)
+    for a mustache with no closer within :data:`_MAX_SPAN` characters, so a
+    caller never treats the rest of the file as a mustache body.
     """
     i = start + 2
     limit = min(len(text), start + _MAX_SPAN)
@@ -92,16 +104,16 @@ def _skip_mustache(text: str, start: int) -> int:
                 end += 1
             return end
         i += 1
-    return len(text)
+    return UNTERMINATED
 
 
 def _normalise_angle(name: str) -> str:
     return "/".join(dasherize(part) for part in name.split("::"))
 
 
-def _first_literal(arguments: str) -> str:
-    """The name in ``"foo-bar" ...``/``'foo-bar'``, only when it is a plain name."""
-    match = re.match(r"\s*(['\"])([A-Za-z][A-Za-z0-9_/-]*)\1", arguments)
+def _first_literal(text: str, pos: int = 0) -> str:
+    """The name in ``"foo-bar" ...``/``'foo-bar'`` at *pos*, only when a plain name."""
+    match = _LITERAL_RE.match(text, pos)
     return match.group(2) if match else ""
 
 
@@ -114,6 +126,18 @@ def scan(text: str) -> list[Invocation]:
         locals_.update(match.group(1).split())
 
     found: dict[tuple[str, str], list] = {}  # (ref, name) -> [line, count, syntax]
+    work = 0
+
+    def charge(amount: int) -> None:
+        nonlocal work
+        work += amount
+        if work > MAX_WORK:
+            raise _BudgetExceededError
+
+    def skip(src: str, start: int) -> int:
+        end = _skip_mustache(src, start)
+        charge((end if end != UNTERMINATED else min(len(src), start + _MAX_SPAN)) - start)
+        return end
 
     def add(ref: str, name: str, offset: int, syntax: str) -> None:
         if not name:
@@ -129,6 +153,7 @@ def scan(text: str) -> list[Invocation]:
 
     def subexpressions(body: str, offset: int) -> None:
         # Walk the mustache body outside quotes for ``(name`` heads.
+        charge(len(body))
         quote = ""
         i = 0
         while i < len(body):
@@ -145,17 +170,17 @@ def scan(text: str) -> list[Invocation]:
                 match = _NAME_RE.match(body, i + 1)
                 if match:
                     name = match.group(0)
-                    rest = body[match.end():]
+                    end = match.end()
                     if name == "component":
-                        literal = _first_literal(rest)
+                        literal = _first_literal(body, end)
                         if literal:
                             add("component", dasherize(literal), offset, "literal")
                     elif name == "helper":
-                        literal = _first_literal(rest)
+                        literal = _first_literal(body, end)
                         if literal:
                             add("helper", dasherize(literal), offset, "literal")
                     elif name == "modifier":
-                        literal = _first_literal(rest)
+                        literal = _first_literal(body, end)
                         if literal:
                             add("modifier", dasherize(literal), offset, "literal")
                     elif name not in BUILTINS and name not in locals_:
@@ -179,7 +204,7 @@ def scan(text: str) -> list[Invocation]:
         if rest[:1] in (".", ":") or name in locals_:
             return
         if name in ("component", "helper", "modifier"):
-            literal = _first_literal(rest)
+            literal = _first_literal(stripped, match.end())
             if literal:
                 ref = {"component": "component", "helper": "helper", "modifier": "modifier"}[name]
                 add(ref, dasherize(literal), offset, "literal")
@@ -207,15 +232,17 @@ def scan(text: str) -> list[Invocation]:
         limit = min(len(text), start + _MAX_SPAN)
         after_equals = False
         while i < limit:
+            charge(1)
             ch = text[i]
             if ch == ">":
                 return i + 1
-            if text.startswith("{{!", i):
-                i = _skip_mustache(text, i)
-                continue
             if text.startswith("{{", i):
-                end = _skip_mustache(text, i)
-                mustache(text[i + 2:end - 2], i, in_tag=not after_equals)
+                end = skip(text, i)
+                if end == UNTERMINATED:
+                    i += 2
+                    continue
+                if not text.startswith("{{!", i):
+                    mustache(text[i + 2:end - 2], i, in_tag=not after_equals)
                 after_equals = False
                 i = end
                 continue
@@ -223,10 +250,14 @@ def scan(text: str) -> list[Invocation]:
                 close = text.find(ch, i + 1, limit)
                 if close < 0:
                     return limit
+                charge(close - i)
                 inner = text[i + 1:close]
                 k = inner.find("{{")
                 while k >= 0:
-                    end = _skip_mustache(inner, k)
+                    end = skip(inner, k)
+                    if end == UNTERMINATED:
+                        k = inner.find("{{", k + 2)
+                        continue
                     mustache(inner[k + 2:end - 2], i + 1 + k, in_tag=False)
                     k = inner.find("{{", end)
                 i = close + 1
@@ -238,36 +269,43 @@ def scan(text: str) -> list[Invocation]:
 
     i = 0
     n = len(text)
-    while i < n:
-        j = text.find("<", i)
-        k = text.find("{{", i)
-        if j < 0 and k < 0:
-            break
-        if k >= 0 and (j < 0 or k < j):
-            if k > 0 and text[k - 1] == "\\":
-                i = k + 2
-                continue
-            if text.startswith("{{!--", k):
-                end = text.find("--}}", k + 5)
-                i = n if end < 0 else end + 4
-            elif text.startswith("{{{{", k):
-                end = text.find("}}}}", k + 4)
-                i = n if end < 0 else end + 4
-            elif text.startswith("{{!", k):
-                i = _skip_mustache(text, k)
+    try:
+        while i < n:
+            token = _TOKEN_RE.search(text, i)
+            if token is None:
+                break
+            charge(1)
+            start = token.start()
+            if token.group() == "{{":
+                if start > 0 and text[start - 1] == "\\":
+                    i = start + 2
+                elif text.startswith("{{!--", start):
+                    end = text.find("--}}", start + 5)
+                    i = n if end < 0 else end + 4
+                elif text.startswith("{{{{", start):
+                    # Raw block: skip to its own ``{{{{/name}}}}``.
+                    named = _RAW_NAME_RE.match(text, start + 4)
+                    close = text.find("{{{{/" + named.group(0), start + 4) if named else -1
+                    end = text.find("}}}}", close if close >= 0 else start + 4)
+                    i = n if end < 0 else end + 4
+                else:
+                    end = skip(text, start)
+                    if end == UNTERMINATED:
+                        i = start + 2
+                        continue
+                    if not text.startswith("{{!", start):
+                        mustache(text[start + 2:end - 2], start, in_tag=False)
+                    i = end
+            elif text.startswith("<!--", start):
+                end = text.find("-->", start + 4)
+                i = n if end < 0 else end + 3
+            elif text.startswith("</", start):
+                end = text.find(">", start)
+                i = n if end < 0 else end + 1
             else:
-                end = _skip_mustache(text, k)
-                mustache(text[k + 2:end - 2], k, in_tag=False)
-                i = end
-            continue
-        if text.startswith("<!--", j):
-            end = text.find("-->", j + 4)
-            i = n if end < 0 else end + 3
-        elif text.startswith("</", j):
-            end = text.find(">", j)
-            i = n if end < 0 else end + 1
-        else:
-            i = scan_tag(j)
+                i = scan_tag(start)
+    except _BudgetExceededError:
+        pass
     return [
         Invocation(ref, name, line, count, syntax)
         for (ref, name), (line, count, syntax) in found.items()

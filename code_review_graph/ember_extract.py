@@ -655,7 +655,7 @@ def _extract_routes(map_call, file_path: str, nodes: list["NodeInfo"],
             seen = emitted.get(key, 0)
             emitted[key] = seen + 1
             node_name = key if seen == 0 else f"{key}@L{call.start_point[0] + 1}"
-            extra = {
+            extra: dict = {
                 "framework": "ember",
                 "ember_kind": "mount" if chain[1] == "mount" else "route",
                 "route_name": full,

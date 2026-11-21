@@ -4808,7 +4808,7 @@ class CodeParser:
         edges: list[EdgeInfo] = []
         text = source.decode("utf-8", errors="replace")
         for inv in ember_template.scan(text):
-            edge_extra = {
+            edge_extra: dict = {
                 "framework": "ember",
                 "ember_ref": inv.ref,
                 "ember_name": inv.name,
