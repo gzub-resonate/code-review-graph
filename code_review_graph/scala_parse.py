@@ -119,12 +119,31 @@ def class_extra(node) -> dict:
     if _has_child(node, "case"):
         kind = f"case_{kind}"
     extra["scala_kind"] = kind
+    parents = _parent_types(node)
+    if parents:
+        extra["scala_parents"] = parents
     scopes = package_scopes(node)
     if scopes:
         extra["scala_package"] = scopes[0]
         if len(scopes) > 1:
             extra["scala_package_scopes"] = scopes
     return extra
+
+
+def _parent_types(node) -> list[str]:
+    """Types in the ``extends`` clause, as written; ``?`` for one that is no plain name."""
+    parents: list[str] = []
+    for clause in node.children:
+        if clause.type != "extends_clause":
+            continue
+        for child in clause.children:
+            if child.type in ("extends", "with", "arguments", ",", "comment"):
+                continue
+            if child.type in ("type_identifier", "stable_type_identifier", "generic_type"):
+                parents.append(type_path(child) or "?")
+            elif child.is_named:
+                parents.append("?")
+    return parents
 
 
 # ---------------------------------------------------------------------------

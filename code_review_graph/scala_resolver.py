@@ -207,6 +207,7 @@ class _Index:
         self.nested: dict[tuple[str, str], list[_Type]] = {}
         self.contained_by: dict[str, str] = {}
         self.inherits: dict[str, list[str]] = {}
+        self.written_parents: dict[str, list[str]] = {}
         self.all_qns: set[str] = set()
         self.imports: dict[str, list[_Import]] = {}
         self._lookup_cache: dict[tuple, tuple[str, tuple]] = {}
@@ -239,6 +240,9 @@ class _Index:
                 row["qualified_name"], row["name"], row["file_path"], kind,
                 tuple(str(s) for s in scopes), row["line_start"], row["line_end"],
             )
+            written = extra.get("scala_parents")
+            if isinstance(written, list):
+                self.written_parents[node.qn] = [str(p) for p in written]
             self.types[node.qn] = node
             self.file_types.setdefault(node.file, []).append(node)
 
@@ -460,7 +464,13 @@ class _Index:
             chain.append(self.types[current])
             current = self.types[current].owner
         ctx = _Context(node.file, chain, node.scopes)
-        for raw in self.inherits.get(node.qn, ()):
+        raws = self.written_parents.get(node.qn)
+        if raws is None:
+            raws = self.inherits.get(node.qn, [])
+        for raw in raws:
+            if raw == "?":
+                unknown = True
+                continue
             if raw in self.types:
                 result.append(self.types[raw])
                 continue
@@ -871,8 +881,14 @@ def resolve_scala_calls(store: GraphStore) -> dict[str, int]:
         ))
         if target != current:
             changed_calls = True
+            # A mirror of a call this pass leaves raw keeps what the parser
+            # wrote, so an update and a rebuild store the same row.
+            mirror_extra = desired_extra if "scala_resolved" in desired_extra else {
+                k: v for k, v in extra.items()
+                if k not in _RESOLVED_KEYS and k not in _COLLISION_KEYS
+            }
             mirrors.append((
-                target, json.dumps(desired_extra, sort_keys=True), current,
+                target, json.dumps(mirror_extra, sort_keys=True), current,
                 row["source_qualified"], row["file_path"], row["line"], row["extra"],
             ))
 
