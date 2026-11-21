@@ -32,6 +32,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
+from . import ember_extract, ember_template
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
     IMPORT_CONTEXT_DEFERRED,
@@ -1311,6 +1312,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".robot": "robot",
     ".resource": "robot",
     ".liquid": "liquid",
+    ".hbs": "handlebars",
 }
 
 # ``.h`` is shared by C and C++. Keep C as the extension default, then promote
@@ -4159,6 +4161,8 @@ class CodeParser:
             return self._parse_blade(path, source)
         if language == "liquid":
             return self._parse_liquid(path, source)
+        if language == "handlebars":
+            return self._parse_handlebars(path, source)
 
         # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
         if language == "vue":
@@ -4300,6 +4304,11 @@ class CodeParser:
             tree.root_node, language, source, file_path_str,
         )
         self._index_ambiguous_method_scopes(tree.root_node, language, import_map)
+        ember_enabled = language in ("javascript", "typescript", "tsx") and (
+            ember_extract.has_evidence(tree.root_node, source)
+        )
+        if ember_enabled:
+            import_map[ember_extract.EMBER_EVIDENCE_KEY] = "1"
         if language == "python":
             self._expand_python_star_imports(
                 tree.root_node, file_path_str, import_map,
@@ -4328,6 +4337,13 @@ class CodeParser:
             tree.root_node, source, language, file_path_str, nodes, edges,
             import_map=import_map, defined_names=defined_names,
         )
+
+        if ember_enabled:
+            ember_facts = ember_extract.extract(
+                tree.root_node, source, file_path_str, nodes, edges,
+                NodeInfo, EdgeInfo, language,
+            )
+            self._stamp_ember_roles(nodes, file_path_str, ember_facts)
 
         if language == "elixir":
             nodes, edges = self._merge_elixir_clauses(nodes, edges)
@@ -4735,6 +4751,79 @@ class CodeParser:
                 line=lines[0],
             ))
 
+        return nodes, edges
+
+    def _stamp_ember_roles(
+        self,
+        nodes: list[NodeInfo],
+        file_path: str,
+        facts: "ember_extract.ModuleFacts",
+    ) -> None:
+        """Record ``extra["ember_kind"]`` on an Ember module and its classes.
+
+        The module path decides first (``app/services/x.js`` is a service); the
+        base class (``Service.extend``, ``extends Component``) decides only
+        where the path says nothing, so a path never loses to a base class.
+        """
+        path_role = ember_extract.role_from_path(file_path)
+        for node in nodes:
+            if node.kind == "File":
+                role = path_role or facts.base_role
+                if role:
+                    node.extra["ember_kind"] = role
+            elif node.kind == "Class":
+                role = facts.class_roles.get(node.name) or path_role
+                if role:
+                    node.extra["ember_kind"] = role
+
+    def _parse_handlebars(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index an Ember template: a File node and what it invokes by name.
+
+        Each distinct component, helper or modifier name becomes one
+        ``IMPORTS_FROM`` edge with an ``ember:<ref>:<name>`` placeholder target
+        that ``ember_resolver`` binds to a file after the build. Template text,
+        attribute values and string literals are never stored.
+        """
+        file_path = normalize_file_path(path)
+        extra: dict = {}
+        role = ember_extract.role_from_path(file_path)
+        if role is not None or "/templates/" in file_path or file_path.endswith("/template.hbs"):
+            extra["ember_kind"] = "template"
+        nodes = [
+            NodeInfo(
+                kind="File",
+                name=file_path,
+                file_path=file_path,
+                line_start=1,
+                line_end=source.count(b"\n") + 1,
+                language="handlebars",
+                is_test=self._is_test_path(file_path),
+                extra=extra,
+            ),
+        ]
+        edges: list[EdgeInfo] = []
+        text = source.decode("utf-8", errors="replace")
+        for inv in ember_template.scan(text):
+            edge_extra = {
+                "framework": "ember",
+                "ember_ref": inv.ref,
+                "ember_name": inv.name,
+                "ember_syntax": inv.syntax,
+            }
+            if inv.count > 1:
+                edge_extra["occurrences"] = inv.count
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path,
+                target=f"ember:{inv.ref}:{inv.name}",
+                file_path=file_path,
+                line=inv.line,
+                extra=edge_extra,
+            ))
         return nodes, edges
 
     def _parse_vue(
@@ -17421,6 +17510,11 @@ class CodeParser:
                 member_call = self._get_js_member_call_name(child)
                 if member_call:
                     call_extra["member_call"] = member_call
+                if import_map is not None and import_map.get(ember_extract.EMBER_EVIDENCE_KEY):
+                    chained = ember_extract.chained_receiver(child)
+                    if chained:
+                        # ``this.get('svc').run()``: the property the call goes through.
+                        call_extra["ember_receiver"], call_extra["ember_method"] = chained
             if (
                 language in self._TYPED_CALL_LANGUAGES
                 or language in ("cpp", "go", "rust")
