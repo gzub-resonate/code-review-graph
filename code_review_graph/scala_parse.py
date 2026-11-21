@@ -465,6 +465,10 @@ def call_extra(node, name: str) -> dict:
     receiver = callee.child_by_field_name("value")
     path = _path_text(receiver) if receiver is not None else None
     if not path:
+        if receiver is not None and receiver.type == "instance_expression":
+            built = _instantiated_type(receiver)
+            if built and not _has_child(receiver, "template_body"):
+                extra["scala_receiver_expr_new"] = built
         return extra
     extra["scala_receiver"] = path
     head = path.split(".", 1)[0]
