@@ -17,6 +17,24 @@
   A route piece that is not a string literal is shown as `<unresolved>` with the
   literal fragments in `route_literal_parts`, and a method that takes a
   `java.net.URI` argument is flagged `url_from_argument`.
+- GitHub Actions workflows (`.github/workflows/*.yml`) and composite actions
+  (`.github/actions/**/action.yml`) record each `uses:` reference as an
+  `IMPORTS_FROM` edge to `external:github-actions:<owner/repo[/path]>`, with
+  `ref`, `kind` (`action`, `reusable_workflow`, `local`, `docker`) and `line`
+  in `extra`. A `./` reference points at the file in the repository.
+  Expressions are recorded as `dynamic`. `with`, `env` and `secrets` are never
+  read.
+- `Dockerfile`, `Dockerfile.*`, `*.Dockerfile` and `Containerfile` are parsed.
+  Each build stage is a node, `FROM` and `COPY --from` images are
+  `IMPORTS_FROM` edges to `external:docker-image:<name>` with `tag`, `digest`
+  and `stage`, and stage-to-stage copies are `DEPENDS_ON` edges. `ARG`, `ENV`
+  and `LABEL` values are never read.
+- Terragrunt `.hcl` files record `terraform.source`, `include.path` and
+  `dependency.config_path` as `IMPORTS_FROM` edges (remote sources point at
+  `external:terraform-module:<address>` with the `ref` in `extra`). `inputs`
+  and `locals` are never read.
+- New [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md).
+  Run `code-review-graph build` once to add these edges to an existing graph.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

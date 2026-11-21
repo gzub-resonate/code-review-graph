@@ -46,6 +46,23 @@ from .constants import (
     release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .infra_references import (
+    DYNAMIC_GITHUB_ACTIONS_TARGET,
+    EXTERNAL_DYNAMIC_DOCKER_TARGET,
+    EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET,
+    EXTERNAL_TERRAFORM_MODULE_PREFIX,
+    MAX_DOCKERFILE_BYTES,
+    MAX_DOCKERFILE_LINES,
+    MAX_INFRA_REFERENCES_PER_FILE,
+    docker_image_target,
+    github_actions_target,
+    is_dockerfile_name,
+    is_github_workflow_path,
+    is_reference_text,
+    parse_docker_image,
+    parse_github_uses,
+    parse_terragrunt_source,
+)
 from .npm_alias_resolver import NpmAliasResolver
 
 try:
@@ -1783,12 +1800,20 @@ def _builtin_language_names() -> frozenset[str]:
     """
     return (
         frozenset(EXTENSION_TO_LANGUAGE.values())
+        | frozenset({"dockerfile"})  # detected by file name, not extension
         | frozenset(_CLASS_TYPES)
         | frozenset(_FUNCTION_TYPES)
         | frozenset(_IMPORT_TYPES)
         | frozenset(_CALL_TYPES)
     )
 
+
+# Terragrunt blocks that name another unit, and the one attribute read from each.
+_TERRAGRUNT_REFERENCE_ATTRIBUTES = {
+    "terraform": "source",
+    "include": "path",
+    "dependency": "config_path",
+}
 
 # Patterns that indicate a test function
 _TEST_PATTERNS = [
@@ -4018,6 +4043,8 @@ class CodeParser:
         """
         if path.name.lower().endswith(".blade.php"):
             return "blade"
+        if is_dockerfile_name(path.name):
+            return "dockerfile"
         suffix = path.suffix.lower()
         lang = self._extension_map.get(suffix)
         if lang == "yaml" and _is_ansible_path(path):
@@ -4226,6 +4253,10 @@ class CodeParser:
         # dependencies still contribute useful graph structure.
         if language == "robot":
             return self._parse_robot(path, source)
+
+        # Dockerfiles: stages and the images they start from or copy from.
+        if language == "dockerfile":
+            return self._parse_dockerfile(path, source)
 
         # SQL: dedicated parser — tree-sitter for tables/views/functions +
         # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
@@ -11506,6 +11537,238 @@ class CodeParser:
         file_extra["yaml_duplicate_keys"] = duplicate_summaries
         file_extra["yaml_unsupported_key_count"] = unsupported_key_count
         file_extra["yaml_truncated"] = truncated
+        self._emit_github_actions_references(path, documents, file_path, file_extra, edges)
+        return nodes, edges
+
+    def _emit_github_actions_references(
+        self,
+        path: Path,
+        documents: list,
+        file_path: str,
+        file_extra: dict[str, Any],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Record the ``uses:`` references of a workflow or composite action file.
+
+        Only ``jobs.<id>.uses`` (a reusable workflow) and ``steps[].uses`` (an action) are
+        read, and only that one string per entry: ``with``, ``env`` and ``secrets`` are never
+        visited. Each reference is an ``IMPORTS_FROM`` edge from the file to
+        ``external:github-actions:<owner/repo[/path]>`` (the ref stays in ``extra``); a
+        ``./`` reference that names an existing file or action directory points at that file.
+        Capped at ``MAX_INFRA_REFERENCES_PER_FILE``; a malformed entry is skipped.
+        """
+        original = normalize_file_path(path).split("/")
+        github_index = is_github_workflow_path(tuple(part.lower() for part in original))
+        if github_index is None:
+            return
+        repo_dir = "/".join(original[:github_index])
+
+        found: list[tuple[str, str, str, Any]] = []  # (scope, job, uses text, node)
+
+        def add_uses(scope: str, job: str, mapping: object) -> None:
+            if not isinstance(mapping, _YamlMapping):
+                return
+            node = _yaml_get_key(mapping, "uses")
+            text = _yaml_scalar(node) if node is not None else None
+            if text is not None:
+                found.append((scope, job, text, node))
+
+        def add_steps(job: str, mapping: object) -> None:
+            if not isinstance(mapping, _YamlMapping):
+                return
+            steps = _yaml_get_key(mapping, "steps")
+            if isinstance(steps, _YamlSequence):
+                for step in steps.value:
+                    add_uses("step", job, step)
+
+        for document in documents:
+            if not isinstance(document, _YamlMapping):
+                continue
+            jobs = _yaml_get_key(document, "jobs")
+            if isinstance(jobs, _YamlMapping):
+                for job_key, job in jobs.value:
+                    job_id = _yaml_scalar(job_key) or ""
+                    add_uses("job", job_id, job)
+                    add_steps(job_id, job)
+            add_steps("", _yaml_get_key(document, "runs"))
+
+        references: list[dict[str, Any]] = []
+        for scope, job, text, node in found:
+            if len(references) >= MAX_INFRA_REFERENCES_PER_FILE:
+                file_extra["infra_references_truncated"] = True
+                break
+            parts = parse_github_uses(text, scope)
+            if parts is None:
+                continue
+            parts["scope"] = scope
+            if job:
+                parts["job"] = job
+            line = _yaml_line(node)
+            parts["line"] = line
+            target = self._github_actions_target(parts, repo_dir)
+            references.append(parts)
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM", source=file_path, target=target,
+                file_path=file_path, line=line,
+                extra={"resolution": "github_actions_uses", **parts},
+            ))
+        if references:
+            file_extra["github_actions_uses"] = references
+
+    def _github_actions_target(self, parts: dict[str, Any], repo_dir: str) -> str:
+        """Edge target for one parsed ``uses`` value (see ``parse_github_uses``)."""
+        kind = parts["kind"]
+        if kind == "docker":
+            image = parts.get("image")
+            return docker_image_target(image) if image else DYNAMIC_GITHUB_ACTIONS_TARGET
+        if kind == "local":
+            local = parts["local_path"]
+            base = Path(repo_dir) if repo_dir else Path(".")
+            return self._confined_local_file(
+                base, local, ("", "action.yml", "action.yaml"),
+            ) or local
+        if not parts.get("owner_repo"):
+            return DYNAMIC_GITHUB_ACTIONS_TARGET
+        return github_actions_target(parts["owner_repo"], parts.get("path", ""))
+
+    def _parse_dockerfile(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index the build stages of a Dockerfile and the images they reference.
+
+        Only ``FROM`` and ``COPY --from`` are read. A stage is a ``Class`` node named
+        ``stage:<alias>`` (``stage:<index>`` without an alias). ``FROM <image>`` and
+        ``COPY --from=<image>`` give an ``IMPORTS_FROM`` edge from the file to
+        ``external:docker-image:<name>`` with ``tag``, ``digest`` and ``stage`` in ``extra``;
+        ``FROM <stage>`` and ``COPY --from=<stage or index>`` give a ``DEPENDS_ON`` edge from
+        stage to stage. An image that uses a build argument (``FROM ${BASE}``) is recorded
+        as dynamic with its raw text and is not resolved. ``ARG``, ``ENV``, ``LABEL`` and
+        every other instruction are never read.
+        """
+        file_path = normalize_file_path(path)
+        file_extra: dict[str, Any] = {"values_indexed": False}
+        line_count = source.count(b"\n") + 1
+        nodes = [NodeInfo(
+            kind="File", name=file_path, file_path=file_path, line_start=1,
+            line_end=line_count, language="dockerfile", extra=file_extra,
+        )]
+        edges: list[EdgeInfo] = []
+        if len(source) > MAX_DOCKERFILE_BYTES:
+            file_extra["infra_references_truncated"] = True
+            return nodes, edges
+        parser = self._get_parser("dockerfile")
+        if parser is None:
+            return nodes, edges
+        try:
+            root = parser.parse(source).root_node
+        except (ValueError, RuntimeError) as exc:  # pragma: no cover - defensive
+            logger.debug("Dockerfile parse error in %s: %s", path, exc)
+            return nodes, edges
+
+        def text(node: Any) -> str:
+            return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+        stages: list[NodeInfo] = []
+        stage_by_alias: dict[str, int] = {}
+        references = 0
+
+        def stage_qualified(index: int) -> str:
+            return self._qualify(stages[index].name, file_path, None)
+
+        def add_image(
+            raw: str, line: int, resolution: str, current: Optional[int], via: str,
+        ) -> None:
+            image = parse_docker_image(raw)
+            extra: dict[str, Any] = {"resolution": resolution, "via": via, **image}
+            if current is not None:
+                extra["stage"] = stages[current].extra.get("stage_name") or None
+                extra["stage_index"] = current
+            target = (
+                docker_image_target(image["name"]) if image["name"]
+                else EXTERNAL_DYNAMIC_DOCKER_TARGET
+            )
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM", source=file_path, target=target,
+                file_path=file_path, line=line, extra=extra,
+            ))
+
+        def add_stage_edge(source_index: int, target_index: int, line: int, via: str) -> None:
+            edges.append(EdgeInfo(
+                kind="DEPENDS_ON", source=stage_qualified(source_index),
+                target=stage_qualified(target_index), file_path=file_path, line=line,
+                extra={
+                    "resolution": "dockerfile_stage", "via": via,
+                    "stage": stages[target_index].extra.get("stage_name") or None,
+                    "stage_index": target_index,
+                },
+            ))
+
+        instructions = [
+            c for c in root.children if c.type in ("from_instruction", "copy_instruction")
+        ]
+        truncated = False
+        for node in instructions:
+            line = node.start_point[0] + 1
+            if line > MAX_DOCKERFILE_LINES or references >= MAX_INFRA_REFERENCES_PER_FILE:
+                truncated = True
+                break
+            if node.type == "from_instruction":
+                spec = next((c for c in node.children if c.type == "image_spec"), None)
+                alias_node = next((c for c in node.children if c.type == "image_alias"), None)
+                if spec is None:
+                    continue
+                raw = text(spec).strip()
+                alias = text(alias_node).strip() if alias_node is not None else ""
+                index = len(stages)
+                key = alias.lower()
+                name = f"stage:{alias}" if alias and key not in stage_by_alias else f"stage:{index}"
+                stage = NodeInfo(
+                    kind="Class", name=name, file_path=file_path, line_start=line,
+                    line_end=node.end_point[0] + 1, language="dockerfile",
+                    extra={
+                        "dockerfile_type": "stage", "stage_index": index,
+                        "stage_name": alias, "base_image": raw,
+                    },
+                )
+                stages.append(stage)
+                if alias and key not in stage_by_alias:
+                    stage_by_alias[key] = index
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path,
+                    target=stage_qualified(index), file_path=file_path, line=line,
+                ))
+                references += 1
+                earlier = stage_by_alias.get(raw.lower())
+                if earlier is not None and earlier < index:
+                    add_stage_edge(index, earlier, line, "from")
+                elif raw.lower() != "scratch":
+                    add_image(raw, line, "dockerfile_from", index, "from")
+            else:
+                param = next(
+                    (c for c in node.children
+                     if c.type == "param" and text(c).startswith("--from=")),
+                    None,
+                )
+                if param is None:
+                    continue
+                raw = text(param)[len("--from="):].strip()
+                current = len(stages) - 1 if stages else None
+                references += 1
+                earlier = stage_by_alias.get(raw.lower())
+                if earlier is None and raw.isdigit() and int(raw) < len(stages):
+                    earlier = int(raw)
+                if current is not None and earlier is not None and earlier < current:
+                    add_stage_edge(current, earlier, line, "copy_from")
+                elif raw:
+                    add_image(raw, line, "dockerfile_copy_from", current, "copy_from")
+        for stage in stages:
+            if stage.line_end > line_count:  # pragma: no cover - defensive
+                stage.line_end = line_count
+        nodes.extend(stages)
+        if truncated:
+            file_extra["infra_references_truncated"] = True
         return nodes, edges
 
     def _parse_json(
@@ -13242,6 +13505,13 @@ class CodeParser:
         if block_type == "locals":
             return self._emit_hcl_locals(body_node, file_path, nodes, edges)
 
+        if block_type in _TERRAGRUNT_REFERENCE_ATTRIBUTES and file_path.lower().endswith(".hcl"):
+            if body_node is not None:
+                self._emit_terragrunt_reference(
+                    block_type, labels, body_node, file_path, edges, line_start,
+                )
+            return True
+
         cfg = _HCL_BLOCK_CFG.get(block_type)
         if cfg is None:  # "terraform" and unknown blocks silently skipped
             return True
@@ -13291,6 +13561,141 @@ class CodeParser:
             )
 
         return True
+
+    def _emit_terragrunt_reference(
+        self,
+        block_type: str,
+        labels: list[str],
+        body_node,
+        file_path: str,
+        edges: list[EdgeInfo],
+        line: int,
+    ) -> None:
+        """Emit the one reference a Terragrunt ``terraform``, ``include`` or ``dependency`` names.
+
+        Only ``terraform.source``, ``include.path`` and ``dependency.config_path`` are read.
+        ``inputs``, ``locals``, ``mock_outputs`` and every other attribute are not visited. A
+        string with an interpolation or a function call (``find_in_parent_folders()``) is
+        recorded as dynamic with its raw text. A local path resolves to the file or module it
+        names, as a ``.tf`` module ``source`` does; a remote source points at
+        ``external:terraform-module:<address>`` with the ``ref`` in ``extra``.
+        """
+        attribute = _TERRAGRUNT_REFERENCE_ATTRIBUTES[block_type]
+        found = self._terragrunt_attribute(body_node, attribute)
+        if found is None:
+            return
+        raw, is_literal, attr_line = found
+        extra: dict[str, Any] = {
+            "resolution": "terragrunt_reference", "block": block_type, "raw": raw,
+            "dynamic": not is_literal,
+        }
+        if labels:
+            extra["name"] = labels[0]
+        if not is_literal:
+            target = EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        elif block_type == "terraform":
+            parts = parse_terragrunt_source(raw)
+            extra.update(
+                source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
+            )
+            if parts["kind"] == "local":
+                target = self._terragrunt_local_target(raw, file_path)
+            elif parts["base"]:
+                target = EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
+            else:
+                target = raw
+        else:
+            target = self._terragrunt_local_target(raw, file_path)
+        edges.append(EdgeInfo(
+            kind="IMPORTS_FROM", source=file_path, target=target,
+            file_path=file_path, line=attr_line or line, extra=extra,
+        ))
+
+    @staticmethod
+    def _terragrunt_attribute(
+        body_node, attr_name: str,
+    ) -> Optional[tuple[str, bool, int]]:
+        """``(text, is_literal, line)`` of attribute *attr_name*, or ``None`` if absent.
+
+        A plain quoted string is literal. Any other expression is returned as its source text
+        with ``is_literal`` false; one that is not a reference-shaped string is dropped.
+        """
+        for attr in body_node.children:
+            if attr.type != "attribute":
+                continue
+            key = _hcl_child(attr, "identifier")
+            expr = _hcl_child(attr, "expression")
+            if key is None or expr is None or _hcl_text(key) != attr_name:
+                continue
+            literal = _hcl_child(expr, "literal_value")
+            string_lit = _hcl_child(literal, "string_lit") if literal is not None else None
+            template = (
+                _hcl_child(string_lit, "template_literal") if string_lit is not None else None
+            )
+            if template is not None:
+                text, is_literal = _hcl_text(template).strip(), True
+            else:
+                text, is_literal = _hcl_text(expr).strip(), False
+            if not is_reference_text(text):
+                return None
+            return text, is_literal, attr.start_point[0] + 1
+        return None
+
+    def _terragrunt_local_target(self, raw: str, file_path: str) -> str:
+        """The in-repo file a relative Terragrunt path names, else the raw text.
+
+        A path to a directory (a module, or a dependency's config) names the
+        ``terragrunt.hcl`` or ``main.tf`` inside it when one exists.
+        """
+        resolved = self._resolve_module_to_file(raw, file_path, "hcl")
+        if resolved:
+            return resolved
+        return self._confined_local_file(
+            Path(file_path).parent, raw, ("", "terragrunt.hcl", "main.tf"),
+        ) or raw
+
+    def _confined_local_file(
+        self, base: Path, raw: str, children: tuple[str, ...],
+    ) -> Optional[str]:
+        """The existing file *raw* names below *base*, or ``None`` when it is not allowed.
+
+        Used for the local references of infrastructure files. An absolute *raw* is never
+        probed. Each probed path (*raw* itself, then each of *children* inside it) must
+        resolve, symbolic links included, to a file inside the repository root and must not
+        be an excluded file. Without a repository root only a relative path that stays
+        below the working directory is accepted.
+        """
+        if (
+            not raw
+            or Path(raw).is_absolute()
+            or raw.startswith(("/", "\\"))
+            or re.match(r"[A-Za-z]:", raw)
+        ):
+            return None
+        candidate = Path(os.path.normpath(base / raw))
+        root = self._repo_root
+        if root is None:
+            if candidate.is_absolute() or candidate.parts[:1] == (os.pardir,):
+                return None
+            anchor = Path.cwd().resolve()
+        else:
+            anchor = root
+        for name in children:
+            target = candidate / name if name else candidate
+            probe = target if target.is_absolute() else anchor / target
+            try:
+                resolved = probe.resolve()
+                if not _path_is_within(resolved, anchor) or not resolved.is_file():
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if (
+                normalize_file_path(resolved) in self._excluded_files
+                or normalize_file_path(target) in self._excluded_files
+            ):
+                continue
+            return normalize_file_path(target)
+        return None
 
     def _emit_hcl_locals(
         self,
