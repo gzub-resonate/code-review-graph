@@ -308,6 +308,16 @@ def _run_aop_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_ember_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Ember convention resolver without failing a build."""
+    try:
+        from .ember_resolver import resolve_ember
+        return resolve_ember(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Ember resolver failed: %s", exc)
+        return None
+
+
 def _run_spring_event_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Spring application-event resolver without failing a build."""
     try:
@@ -2837,7 +2847,9 @@ def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
 
 # These languages are parsed by bounded fallbacks or config readers, so no
 # grammar package is loaded for them and probing one only costs a subprocess.
-_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties"})
+_NO_GRAMMAR_LANGUAGES = frozenset({
+    "rescript", "vbnet", "yaml", "properties", "handlebars",
+})
 
 
 def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
@@ -3119,6 +3131,7 @@ def full_build(
     spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
+    ember_stats = _run_ember_resolver(store)
     scoped_stats = _run_scoped_resolver(store, repo_root)
     jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
     _relink_stored_edges(store, repo_root, followed_dirs)
@@ -3147,6 +3160,7 @@ def full_build(
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
+        "ember_resolution": ember_stats,
         "scoped_resolution": scoped_stats,
         "jedi_enrichment": jedi_stats,
     }
@@ -3638,6 +3652,13 @@ def incremental_update(
         rp.endswith((".tf", ".hcl")) for rp in all_files
     )
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
+    # Ember binds by module name across files, so any script or template change
+    # (including a deletion that only surfaces through reconciliation) reruns it.
+    ember_changed = has_graph_changes and any(
+        path.endswith((".js", ".ts", ".gjs", ".gts", ".hbs", ".mjs", ".cjs"))
+        for path in candidate_paths
+    )
+    ember_stats = _run_ember_resolver(store) if ember_changed else None
     # Project-only edits can rebind C# calls without reparsing a source file,
     # so a project file runs the resolver even when no source was stored.
     scoped_changed = any(
@@ -3700,6 +3721,7 @@ def incremental_update(
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
+        "ember_resolution": ember_stats,
         "scoped_resolution": scoped_stats,
         "jedi_enrichment": jedi_stats,
         **({"identity_rebuild": True} if csharp_upgrade else {}),
