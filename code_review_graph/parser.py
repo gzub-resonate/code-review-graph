@@ -17104,6 +17104,9 @@ class CodeParser:
             # for one, cannot intercept constructors.
             method_extra["java_constructor"] = True
 
+        if language == "scala":
+            method_extra.update(_scala_parse.function_extra(child))
+
         docstring = self._get_docstring_summary(child, language)
         if docstring:
             method_extra["docstring"] = docstring
