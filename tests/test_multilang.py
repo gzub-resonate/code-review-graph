@@ -6213,3 +6213,67 @@ class TestAnsibleMetaParsing:
     def test_depends_on_name_key_collections(self):
         dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
         assert "security.hardening" in dep_targets
+
+
+class TestDockerfileParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.path = FIXTURES / "sample.Dockerfile"
+        self.nodes, self.edges = self.parser.parse_file(self.path)
+        self.file_path = str(self.path)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("Dockerfile")) == "dockerfile"
+        assert self.parser.detect_language(Path("Dockerfile.dev")) == "dockerfile"
+        assert self.parser.detect_language(self.path) == "dockerfile"
+        assert self.parser.detect_language(Path("Containerfile")) == "dockerfile"
+
+    def test_file_node(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "dockerfile"
+
+    def test_finds_stages(self):
+        stages = [n for n in self.nodes if n.kind == "Class"]
+        assert [(s.name, s.line_start) for s in stages] == [
+            ("stage:build", 6),
+            ("stage:test", 15),
+            ("stage:configurable", 18),
+            ("stage:3", 21),
+        ]
+        assert stages[0].extra["base_image"] == "registry.example.com/base/python:3.12"
+        assert stages[2].extra["base_image"] is None  # ARG-based FROM is not resolved
+
+    def test_image_edges(self):
+        images = [
+            (e.target, e.line, e.extra["via"], e.extra["dynamic"])
+            for e in self.edges
+            if e.kind == "IMPORTS_FROM"
+        ]
+        assert images == [
+            ("external:docker-image:registry.example.com/base/python", 6, "from", False),
+            ("external:docker-image:dynamic", 18, "from", True),
+            ("external:docker-image:registry.example.com:5000/base/runtime", 21, "from", False),
+            ("external:docker-image:acme/tool", 24, "copy_from", False),
+        ]
+        runtime = [e for e in self.edges if e.line == 21 and e.kind == "IMPORTS_FROM"][0]
+        assert runtime.extra["tag"] == "1.0"
+        assert runtime.extra["digest"].startswith("sha256:0123")
+
+    def test_stage_dependencies(self):
+        prefix = self.file_path + "::"
+        deps = [
+            (e.source.removeprefix(prefix), e.target.removeprefix(prefix), e.line, e.extra["via"])
+            for e in self.edges
+            if e.kind == "DEPENDS_ON"
+        ]
+        assert deps == [
+            ("stage:test", "stage:build", 15, "from"),
+            ("stage:configurable", "stage:build", 19, "copy_from"),
+            ("stage:3", "stage:build", 22, "copy_from"),
+            ("stage:3", "stage:build", 23, "copy_from"),
+        ]
+
+    def test_values_are_not_indexed(self):
+        dumped = repr(self.nodes) + repr(self.edges)
+        assert "not-a-real-value" not in dumped

@@ -416,7 +416,7 @@ jobs:
 | **언어와 노트북 지원** | 위의 [언어 지원](#언어-지원과-노트북)을 보세요. |
 | **프레임워크를 아는 PHP 파싱** | 저장소 범위로 제한된 Composer PSR-4 임포트, Blade 템플릿 참조, 근거에 기반한 Laravel Route에서 컨트롤러로 가는 엣지와 Eloquent 관계 엣지 |
 | **프레임워크를 아는 Java 파싱** | Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, OpenFeign 클라이언트 요청, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스 엣지, Temporal 워크플로와 액티비티 엣지, 그리고 값 없이 색인되는 Spring Boot 설정 키 |
-| **인프라 참조** | GitHub Actions의 `uses:`, Dockerfile의 `FROM`과 `COPY --from`, Terragrunt의 `source`, `include`, `dependency`가 `external:` 대상으로 가는 엣지가 되어, 공유 워크플로, 베이스 이미지, 모듈을 쓰는 파일을 찾을 수 있습니다. 이 파일들의 다른 값은 저장하지 않습니다 |
+| **인프라 참조** | GitHub Actions의 `uses:`, Dockerfile의 `FROM`과 `COPY --from`, Terragrunt의 `source`, `include`, `dependency`가 `external:` 대상으로 가는 엣지가 되어, 공유 워크플로, 베이스 이미지, 모듈을 쓰는 파일을 찾을 수 있습니다. 이 파일들의 다른 값은 저장하지 않으며, URL의 자격 증명과 ref 이외의 쿼리 문자열도 버립니다 |
 | **영향 범위 분석** | 변경으로 영향을 받을 법한 함수, 클래스, 파일 |
 | **자동 업데이트 훅** | 편집기 훅, git 훅(커밋 전, 그리고 checkout, merge, rebase 후), watch 모드가 작업 중에 그래프를 갱신 |
 | **시맨틱 검색** | 선택적 벡터 임베딩. sentence-transformers, Google Gemini, MiniMax, Voyage AI 또는 OpenAI 호환 엔드포인트 |

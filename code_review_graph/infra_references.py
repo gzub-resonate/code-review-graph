@@ -9,8 +9,10 @@ has an answer in the graph.
 
 Nothing else is read. ``env``, ``with``, ``secrets``, ``args``, ``ENV``, ``ARG`` values,
 ``LABEL`` and Terragrunt ``inputs`` are never looked at, so no value in them can reach a node
-or an edge. The helpers here are pure: they take a string and return its parts, and the
-emitters in ``parser.py`` decide where the edges go.
+or an edge. Nor does a URL credential (``user:password@``, a token), a query string other
+than a ``ref`` or ``version``, or a fragment: they are dropped from every reference and the
+raw remote string is never stored. The helpers here are pure: they take a string and return
+its parts, and the emitters in ``parser.py`` decide where the edges go.
 """
 
 from __future__ import annotations
@@ -37,14 +39,24 @@ EXTERNAL_GITHUB_ACTIONS_PREFIX = "external:github-actions:"
 EXTERNAL_DOCKER_IMAGE_PREFIX = "external:docker-image:"
 
 #: Target of a ``uses`` whose repository part is an expression, such as
-#: ``${{ matrix.action }}``. The raw text is on the edge; it is never guessed.
+#: ``${{ matrix.action }}``. It is never guessed, and its text is not stored.
 DYNAMIC_GITHUB_ACTIONS_TARGET = EXTERNAL_GITHUB_ACTIONS_PREFIX + "dynamic"
 
 #: Target of an image reference that uses a build argument or variable (``FROM ${BASE}``).
 EXTERNAL_DYNAMIC_DOCKER_TARGET = EXTERNAL_DOCKER_IMAGE_PREFIX + "dynamic"
 
 _OWNER_REPO_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+_PATH_PART = re.compile(r"^[A-Za-z0-9_.+~-]+$")
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+#: A ref, tag or version: the only part of a query string that is ever kept.
+_REF_VALUE = re.compile(r"^[A-Za-z0-9_.+/-]{1,255}$")
+_TAG_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_DOCKER_NAME = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+_STAGE_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_DIGEST_TAIL = re.compile(
+    r"@([A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:[0-9A-Fa-f]{32,})$"
+)
+_ADDRESS_VALUE = re.compile(r"^[A-Za-z0-9_.~:/+%-]+$")
 
 
 def is_reference_text(text: str) -> bool:
@@ -55,6 +67,40 @@ def is_reference_text(text: str) -> bool:
     )
 
 
+def drop_userinfo(text: str) -> Optional[str]:
+    """*text* without a leading ``userinfo@``, or ``None`` when that cannot be told safely.
+
+    *text* starts at the authority: after ``scheme://``, or the whole of an scp-like
+    ``user@host:path`` or ``user:password@registry/image``. The userinfo ends at the last ``@``
+    before the first ``/``, whatever it holds (a user name, ``user:password``, a token). It is
+    dropped, never stored. A ``?`` or ``#`` before that ``@`` could be the start of a query
+    that contains an ``@`` or a password that contains one, so the text is unusable (``None``)
+    rather than guessed at. The conventional ``git@`` user is dropped like any other.
+    """
+    segment = text.split("/", 1)[0]
+    at = segment.rfind("@")
+    if at < 0:
+        return text
+    if "?" in segment or "#" in segment:
+        return None
+    return text[at + 1:]
+
+
+def is_plain_local_path(text: str) -> bool:
+    """Whether *text* may be stored as a local path: no URL, getter, query or ``@``."""
+    return (
+        is_reference_text(text)
+        and _URL_SCHEME.match(text) is None
+        and _GETTER_PREFIX.match(text) is None
+        and not any(ch in text for ch in "?#@")
+    )
+
+
+def clean_stage_alias(alias: str) -> str:
+    """A Dockerfile stage alias, or ``""`` when it is not a plain identifier."""
+    return alias if _STAGE_ALIAS.match(alias) else ""
+
+
 def github_actions_target(owner_repo: str, path: str) -> str:
     """The external target of ``owner/repo`` with an optional in-repo ``path``."""
     return EXTERNAL_GITHUB_ACTIONS_PREFIX + (f"{owner_repo}/{path}" if path else owner_repo)
@@ -63,40 +109,44 @@ def github_actions_target(owner_repo: str, path: str) -> str:
 def parse_docker_image(raw: str) -> dict[str, Any]:
     """Split ``[registry/]name[:tag][@digest]`` into its parts.
 
-    A reference with a ``$`` is an ``ARG`` or ``ENV`` substitution and is returned with
-    ``dynamic`` set and no name: the build argument's value is not read, so the image is not
-    known. The name is lower-cased (Docker repository names are lower case). It is otherwise
-    kept as written, so ``python`` and ``docker.io/library/python`` stay two names.
+    The raw text is not part of the result. Any ``userinfo@`` prefix and any ``?query`` or
+    ``#fragment`` are dropped, and a reference with a ``$`` (an ``ARG`` or ``ENV``
+    substitution), an unexpected character or an unusable tag is returned with ``dynamic`` set
+    and no name. The name is lower-cased (Docker repository names are lower case). It is
+    otherwise kept as written, so ``python`` and ``docker.io/library/python`` stay two names.
     """
     text = raw.strip()
     parts: dict[str, Any] = {
-        "raw": text,
         "name": None,
         "registry": None,
         "tag": None,
         "digest": None,
-        "dynamic": False,
+        "dynamic": True,
     }
-    if not is_reference_text(text):
-        parts["dynamic"] = True
+    if not is_reference_text(text) or "$" in text:
         return parts
-    if "$" in text:
-        parts["dynamic"] = True
+    digest = None
+    match = _DIGEST_TAIL.search(text)
+    if match:
+        digest = match.group(1)
+        text = text[:match.start()]
+    stripped = drop_userinfo(text)
+    if stripped is None or any(ch in stripped for ch in "@?# \t"):
         return parts
-    remainder, _, digest = text.partition("@")
-    if digest:
-        parts["digest"] = digest
+    remainder = stripped
     # The tag is after the last ``:`` that follows the last ``/``; an earlier ``:`` is a
     # registry port (``registry.example.com:5000/base/python``).
     slash = remainder.rfind("/")
     colon = remainder.rfind(":")
+    tag = None
     if colon > slash:
-        parts["tag"] = remainder[colon + 1:] or None
+        tag = remainder[colon + 1:] or None
         remainder = remainder[:colon]
-    if not remainder:
-        parts["dynamic"] = True
+    if not remainder or not _DOCKER_NAME.match(remainder):
         return parts
-    parts["name"] = remainder.lower()
+    if tag is not None and not _TAG_VALUE.match(tag):
+        return parts
+    parts.update(name=remainder.lower(), tag=tag, digest=digest, dynamic=False)
     first, sep, _rest = remainder.partition("/")
     if sep and ("." in first or ":" in first or first == "localhost"):
         parts["registry"] = first.lower()
@@ -108,24 +158,35 @@ def docker_image_target(name: str) -> str:
     return EXTERNAL_DOCKER_IMAGE_PREFIX + name
 
 
+def format_docker_image(parts: dict[str, Any]) -> Optional[str]:
+    """``name[:tag][@digest]`` of :func:`parse_docker_image` parts, ``None`` when dynamic."""
+    if not parts["name"]:
+        return None
+    return parts["name"] + (f":{parts['tag']}" if parts["tag"] else "") + (
+        f"@{parts['digest']}" if parts["digest"] else ""
+    )
+
+
 def parse_github_uses(raw: str, scope: str) -> Optional[dict[str, Any]]:
     """Parse one ``uses:`` value, or return ``None`` when it is not a reference.
 
     *scope* is ``"job"`` (a reusable workflow) or ``"step"`` (an action). The result has
-    ``kind`` (``action``, ``reusable_workflow``, ``local`` or ``docker``), ``dynamic`` and the
-    raw text. A remote reference adds ``owner_repo`` (lower case, as GitHub treats it),
-    ``path`` (inside the repository, may be empty), ``ref`` and ``ref_type`` (``sha`` for a
-    full commit hash, else ``ref``). A ``docker://`` reference carries the
-    :func:`parse_docker_image` parts. A local one carries ``local_path``.
+    ``kind`` (``action``, ``reusable_workflow``, ``local`` or ``docker``) and ``dynamic``; the
+    raw text of a remote reference is never kept. A remote reference adds ``owner_repo`` (lower
+    case, as GitHub treats it), ``path`` (inside the repository, may be empty), ``ref`` and
+    ``ref_type`` (``sha`` for a full commit hash, else ``ref``). A ``docker://`` reference
+    carries the :func:`parse_docker_image` parts. A local one carries ``local_path`` when it
+    is a plain relative path.
 
-    Expressions (``${{ ... }}``) are never evaluated. One in the repository part gives
-    ``dynamic`` with no ``owner_repo``; one only in the ref keeps the repository and marks the
-    ref dynamic.
+    Expressions (``${{ ... }}``) are never evaluated or stored. One in the repository part
+    gives ``dynamic`` with no ``owner_repo``; one only in the ref keeps the repository and
+    marks the ref dynamic. A ref with any character outside a ref's alphabet is dropped the
+    same way, so a query string or credential cannot ride along in it.
     """
     text = raw.strip()
     if not is_reference_text(text):
         return None
-    result: dict[str, Any] = {"raw": text, "dynamic": False}
+    result: dict[str, Any] = {"dynamic": False}
     if text.startswith("docker://"):
         image = parse_docker_image(text[len("docker://"):])
         result.update(
@@ -138,7 +199,10 @@ def parse_github_uses(raw: str, scope: str) -> Optional[dict[str, Any]]:
         )
         return result
     if text.startswith("./") or text.startswith("../"):
-        result.update(kind="local", local_path=text)
+        if is_plain_local_path(text):
+            result.update(kind="local", local_path=text)
+        else:
+            result.update(kind="local", dynamic=True)
         return result
     kind = "reusable_workflow" if scope == "job" else "action"
     head, at, ref = text.partition("@")
@@ -151,15 +215,18 @@ def parse_github_uses(raw: str, scope: str) -> Optional[dict[str, Any]]:
         return None
     if any(not p for p in pieces[2:]):
         return None
+    if not all(_PATH_PART.match(p) for p in pieces[2:]):
+        result["dynamic"] = True
+        return result
     result["owner_repo"] = f"{pieces[0]}/{pieces[1]}".lower()
     result["path"] = "/".join(pieces[2:])
     if at and ref:
-        result["ref"] = ref
-        if "${{" in ref:
+        if _REF_VALUE.match(ref):
+            result["ref"] = ref
+            result["ref_type"] = "sha" if _FULL_SHA.match(ref) else "ref"
+        else:
             result["dynamic"] = True
             result["ref_type"] = "dynamic"
-        else:
-            result["ref_type"] = "sha" if _FULL_SHA.match(ref) else "ref"
     return result
 
 
@@ -196,7 +263,7 @@ def is_dockerfile_name(name: str) -> bool:
 
 
 #: Target of a Terragrunt source, include or dependency that is an expression, such as
-#: ``find_in_parent_folders()``. The raw text is on the edge; it is never evaluated.
+#: ``find_in_parent_folders()``. It is never evaluated, and its text is not stored.
 EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET = "external:terragrunt:dynamic"
 
 #: Target prefix of a remote Terraform module source (git, registry, archive).
@@ -210,14 +277,18 @@ def parse_terragrunt_source(raw: str) -> dict[str, Any]:
     """Split a ``terraform { source = ... }`` value into where it points and which version.
 
     ``kind`` is ``local`` (a ``./``, ``../`` or absolute path), ``git`` (a ``git::`` prefix, a
-    ``.git`` URL or ``git@`` address), ``registry`` (``tfr://`` or ``<ns>/<name>/<provider>``),
+    ``.git`` address or ``git@`` address), ``registry`` (``tfr://`` or ``<ns>/<name>/<provider>``),
     ``archive`` (``http(s)``, ``s3``, ``gcs``) or ``other``. A remote source has ``base``
-    (the address without the ``//subdir`` and without the query), ``subdir`` and ``ref``
-    (the ``ref`` or ``version`` query parameter). Nothing is fetched or evaluated.
+    (``[scheme://]host/path`` without the ``//subdir``, the ``.git`` suffix, the query and
+    any credentials), ``subdir`` and ``ref`` (the ``ref`` or ``version`` query parameter).
+    The raw text is not part of the result. ``userinfo@`` (``user:password@``, a token, the
+    ``git@`` of an scp-like address) is dropped, a fragment is dropped, and every query
+    parameter other than ``ref`` and ``version`` is dropped, so a credential or signed URL
+    parameter is never kept. A source that cannot be reduced safely has ``base`` ``None``.
+    Nothing is fetched or evaluated.
     """
     text = raw.strip()
-    parts: dict[str, Any] = {"raw": text, "kind": "other", "base": None, "subdir": None,
-                             "ref": None}
+    parts: dict[str, Any] = {"kind": "other", "base": None, "subdir": None, "ref": None}
     if text.startswith(("./", "../", "/")):
         parts["kind"] = "local"
         return parts
@@ -226,29 +297,47 @@ def parse_terragrunt_source(raw: str) -> dict[str, Any]:
     if match and not text.startswith(match.group(1) + "://"):
         getter = match.group(1).lower()
         text = text[match.end():]
-    address, _, query = text.partition("?")
+    git_user = text.startswith("git@")
+    scheme = _URL_SCHEME.match(text)
+    prefix = scheme.group(0) if scheme else ""
+    rest = drop_userinfo(text[scheme.end():] if scheme else text)
+    if rest is None:
+        return parts
+    if not scheme:
+        scp = re.match(r"^([^/:?#]+):(?!\d+(?:/|$))(.*)$", rest)
+        if scp:  # ``host:org/repo``, the scp-like form
+            rest = scp.group(1) + "/" + scp.group(2)
+    rest = rest.split("#", 1)[0]
+    address, _, query = rest.partition("?")
     for pair in query.split("&"):
         key, _, value = pair.partition("=")
-        if key in ("ref", "version") and value:
+        if key in ("ref", "version") and _REF_VALUE.match(value):
             parts["ref"] = value
-    scheme = _URL_SCHEME.match(address)
-    head = address[scheme.end():] if scheme else address
-    base, sep, subdir = head.partition("//")
-    if sep:
-        parts["subdir"] = subdir.strip("/") or None
-    base = (address[:scheme.end()] if scheme else "") + base
+    base, sep, subdir = address.partition("//")
+    subdir = subdir.strip("/")
+    dot_git = not scheme and base.endswith(".git")
     if base.endswith(".git"):
         base = base[:-4]
-    parts["base"] = base or None
-    scheme_name = scheme.group(0)[:-3].lower() if scheme else ""
-    if getter == "git" or head.startswith("git@") or address.split("//")[0].endswith(".git"):
+    base = prefix + base
+    if (
+        not base
+        or not _ADDRESS_VALUE.match(base.replace("://", "/", 1))
+        or (subdir and not _ADDRESS_VALUE.match(subdir))
+    ):
+        parts["ref"] = None
+        return parts
+    parts["base"] = base
+    if sep:
+        parts["subdir"] = subdir or None
+    scheme_name = prefix[:-3].lower()
+    if getter == "git" or git_user or dot_git:
         parts["kind"] = "git"
     elif scheme_name == "tfr" or (
-        not scheme and not getter and re.fullmatch(r"\w[\w-]*/[\w.-]+/[\w.-]+", base or "")
+        not scheme and not getter and re.fullmatch(r"\w[\w-]*/[\w.-]+/[\w.-]+", base)
     ):
         parts["kind"] = "registry"
     elif getter in ("s3", "gcs", "http", "https") or scheme_name in ("http", "https", "s3", "gcs"):
         parts["kind"] = "archive"
-    elif not scheme and not getter and base and "." in base.split("/")[0]:
+    elif not scheme and not getter and "." in base.split("/")[0]:
         parts["kind"] = "git"  # ``github.com/acme/mods``: go-getter's shorthand
     return parts

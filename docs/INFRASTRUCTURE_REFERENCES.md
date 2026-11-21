@@ -17,11 +17,32 @@ string per construct, parsed into its parts. Everything else in the file is neve
 | `*.hcl` (Terragrunt) | `terraform.source`, `include.path`, `dependency.config_path` | `inputs`, `locals`, `mock_outputs` and every other attribute |
 
 A reference that is an expression (`${{ matrix.action }}`, `FROM ${BASE}`,
-`find_in_parent_folders()`) is stored as written, marked `dynamic`, and never evaluated or
-resolved. A string longer than 512 characters, with a line break or with a control character
+`find_in_parent_folders()`) is marked `dynamic` and is never evaluated or resolved. Its text is
+not stored. A string longer than 512 characters, with a line break or with a control character
 is not a reference and is skipped. A file adds at most 500 references (`infra_references_truncated` on
 its `File` node says when more were left out), and a Dockerfile is read up to 2,000 lines and
 1 MB. A malformed file never fails a build; it simply adds no reference.
+
+## Credentials and query strings are never stored
+
+A reference can carry a secret inside the string itself, so each one is reduced to its parts
+before anything is stored:
+
+- URL credentials are dropped: the `user:password@` or `token@` of `https://`, `ssh://`,
+  `git::https://` and `docker://` addresses, and of a registry reference such as
+  `user:password@registry.example.com/image`.
+- For an scp-like address (`user@host:org/repo.git`) the user is dropped too, including the
+  conventional `git@`. The address is stored as `host/org/repo`, the same as the shorthand
+  `host/org/repo`. The user name is not a secret, but it is not needed to say which module it is.
+- A fragment (`#...`) is dropped. A query string is dropped except `ref` and `version`, and only
+  when the value looks like a ref or version (letters, digits and `_ . + / -`). Parameters such as
+  `token`, `access_token`, `sshkey` or `X-Amz-Signature` are never stored, whatever they hold.
+- The raw remote string is never stored. Only the normalised parts are: scheme or kind, host,
+  path, subdir and ref. Only a plain relative local path (no `://`, `::`, `?`, `#` or `@`) is
+  kept as written.
+- A reference that cannot be reduced safely (for example a `?` before the `@`, so the end of the
+  credentials is unclear, or an unexpected character in a ref) is recorded as `dynamic` with no
+  text, and its edge points at the `dynamic` target.
 
 ## Edges and targets
 
@@ -41,22 +62,21 @@ one target and a query by target finds them all.
 A local reference points at the file it names when that file exists in the repository: a
 workflow `uses: ./.github/workflows/x.yml`, a local action directory (its `action.yml`), a
 Terragrunt `include` path, a `dependency` directory (its `terragrunt.hcl`) and a local module
-source. When the file is missing the edge keeps the raw path. Local references are only resolved
+source. When the file is missing the edge keeps the relative path as written. Local references are only resolved
 inside the repository (no absolute paths, no `..` or symbolic link that leaves it) and never to an
-excluded or ignored file; any other reference keeps its raw path.
+excluded or ignored file; any other plain local path is kept as written.
 
 `extra` on these edges:
 
 | Key | Where | Value |
 |---|---|---|
 | `resolution` | all | `github_actions_uses`, `dockerfile_from`, `dockerfile_copy_from` or `terragrunt_reference` |
-| `raw` | all | The reference as written |
-| `dynamic` | all | True when the reference holds an expression |
+| `dynamic` | all | True when the reference holds an expression or could not be reduced safely. No text is stored |
 | `kind` | GitHub Actions | `action`, `reusable_workflow`, `local` or `docker` |
 | `owner_repo`, `path` | GitHub Actions | The parts of a remote reference |
-| `ref`, `ref_type` | GitHub Actions | The text after `@`, and `sha` (40 hex digits), `ref` or `dynamic` |
+| `ref`, `ref_type` | GitHub Actions | The text after `@` when it is a plain ref, and `sha` (40 hex digits), `ref` or `dynamic` (no `ref` then) |
 | `scope`, `job` | GitHub Actions | `job` or `step`, and the job id |
-| `name`, `registry`, `tag`, `digest` | Docker | The parts of an image reference (`name` is `None` when dynamic) |
+| `name`, `registry`, `tag`, `digest` | Docker | The parts of an image reference, without credentials or query (`name` is `None` when dynamic) |
 | `via` | Docker | `from` or `copy_from` |
 | `stage`, `stage_index` | Docker | The build stage the reference is in |
 | `block`, `name` | Terragrunt | `terraform`, `include` or `dependency`, and the block label |
@@ -65,7 +85,8 @@ excluded or ignored file; any other reference keeps its raw path.
 A workflow's `File` node also lists its references in `extra.github_actions_uses`.
 
 A Dockerfile build stage is a `Class` node named `stage:<alias>` (`stage:<index>` without an
-alias), with `extra.dockerfile_type = "stage"`. `FROM <earlier stage>` and
+alias), with `extra.dockerfile_type = "stage"`, `stage_index`, `stage_name` and `base_image`
+(`name[:tag][@digest]` of the `FROM` image, without credentials; `None` when dynamic). `FROM <earlier stage>` and
 `COPY --from=<earlier stage or index>` are `DEPENDS_ON` edges between stages.
 
 ## Querying

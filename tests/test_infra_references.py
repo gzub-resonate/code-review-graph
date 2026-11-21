@@ -11,6 +11,7 @@ import json
 import os
 from dataclasses import asdict
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -120,10 +121,11 @@ def test_workflow_file_node_lists_references(tmp_path: Path) -> None:
     nodes, _edges = _parse(tmp_path, ".github/workflows/ci.yml", WORKFLOW)
     file_node = next(n for n in nodes if n.kind == "File")
     uses = file_node.extra["github_actions_uses"]
-    assert [u["raw"] for u in uses][:2] == [
-        "acme/shared-workflows/.github/workflows/build.yml@main",
-        "actions/checkout@v4",
+    assert [(u["owner_repo"], u["ref"]) for u in uses][:2] == [
+        ("acme/shared-workflows", "main"),
+        ("actions/checkout", "v4"),
     ]
+    assert all("raw" not in u for u in uses)
     assert uses[0]["line"] == 7
 
 
@@ -183,10 +185,10 @@ def test_expressions_and_docker_refs_are_recorded_not_guessed(tmp_path: Path) ->
     rows = _imports(edges)
     assert rows[0].target == "external:github-actions:dynamic"
     assert rows[0].extra["dynamic"] is True
-    assert rows[0].extra["raw"] == "${{ matrix.action }}@v1"
+    assert "raw" not in rows[0].extra
     assert rows[1].target == "external:github-actions:acme/setup-tool"
     assert rows[1].extra["dynamic"] is True
-    assert rows[1].extra["ref"] == "${{ inputs.version }}"
+    assert "ref" not in rows[1].extra and rows[1].extra["ref_type"] == "dynamic"
     assert rows[2].target == "external:docker-image:registry.example.com/base/python"
     assert rows[2].extra["kind"] == "docker" and rows[2].extra["tag"] == "3.12"
     assert rows[3].target == "external:docker-image:alpine"
@@ -265,10 +267,10 @@ def test_external_targets_survive_a_build_and_answer_who_uses_x(tmp_path: Path) 
 
 
 def test_parse_docker_image_parts() -> None:
-    parts = parse_docker_image("registry.example.com:5000/base/Python:3.12@sha256:abc")
+    parts = parse_docker_image("registry.example.com:5000/base/Python:3.12@sha256:" + "ab" * 32)
     assert parts["name"] == "registry.example.com:5000/base/python"
     assert parts["registry"] == "registry.example.com:5000"
-    assert parts["tag"] == "3.12" and parts["digest"] == "sha256:abc"
+    assert parts["tag"] == "3.12" and parts["digest"] == "sha256:" + "ab" * 32
     assert parse_docker_image("python")["tag"] is None
     assert parse_docker_image("${BASE}")["dynamic"] is True
 
@@ -324,7 +326,7 @@ def test_dockerfile_stages_and_image_edges(tmp_path: Path) -> None:
     assert imports[1].extra["tag"] == "1.2"
     assert imports[1].extra["digest"] == "sha256:" + "cd" * 32
     assert imports[2].extra["dynamic"] is True
-    assert imports[2].extra["raw"] == "${BASE}"
+    assert "raw" not in imports[2].extra and imports[2].extra["name"] is None
     assert imports[3].extra["digest"] == "sha256:" + "ab" * 32
     assert imports[3].extra["registry"] == "registry.example.com:5000"
 
@@ -452,7 +454,7 @@ def test_parse_terragrunt_source_variants() -> None:
     )
     ssh = parse_terragrunt_source("git@git.example.com:acme/mods.git//a/b?ref=main")
     assert (ssh["kind"], ssh["base"], ssh["subdir"], ssh["ref"]) == (
-        "git", "git@git.example.com:acme/mods", "a/b", "main",
+        "git", "git.example.com/acme/mods", "a/b", "main",
     )
     registry = parse_terragrunt_source("tfr:///acme/vpc/aws?version=3.1.0")
     assert registry["kind"] == "registry" and registry["ref"] == "3.1.0"
@@ -482,9 +484,9 @@ def test_terragrunt_references(tmp_path: Path) -> None:
     source = rows[0].extra
     assert source["ref"] == "v1.4.0" and source["subdir"] == "network/vpc"
     assert source["source_kind"] == "git" and source["dynamic"] is False
-    assert rows[1].extra["raw"] == "find_in_parent_folders()"
+    assert "raw" not in rows[1].extra
     assert rows[1].extra["dynamic"] is True
-    assert rows[4].extra["raw"] == '"${get_repo_root()}/shared"'
+    assert "raw" not in rows[4].extra
     assert SECRET not in _dump(nodes, edges)
 
 
@@ -707,3 +709,181 @@ def test_github_actions_symlink_leaving_repo_is_not_followed(tmp_path: Path) -> 
     (repo / ".github/actions").mkdir(parents=True)
     _symlink(repo / ".github/actions/ext", outside / "dir")
     assert _gha_targets(repo, ["./.github/actions/ext"]) == ["./.github/actions/ext"]
+
+
+# ---------------------------------------------------------------------------
+# Credentials and query strings in references are never stored
+# ---------------------------------------------------------------------------
+
+PLANTED = (
+    "tok3n-userinfo", "p4ssw0rd-planted", "QUJD-sshkey", "acc3ss-tok-planted",
+    "sig-X-Amz-planted", "frag-secret-planted", "dockeruser-planted", "dockerpass-planted",
+    "scpuser-planted", "bearer-in-ref-planted",
+)
+
+SECRET_WORKFLOW = """\
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://dockeruser-planted:dockerpass-planted@registry.example.com/img/tool:1.2
+      - uses: docker://registry.example.com/img/other:2?token=acc3ss-tok-planted#frag-secret-planted
+      - uses: acme/setup-tool@v2?access_token=acc3ss-tok-planted
+      - uses: acme/setup-tool/sub?token=acc3ss-tok-planted@v2
+      - uses: ./local/action?token=acc3ss-tok-planted
+      - uses: https://tok3n-userinfo:p4ssw0rd-planted@github.com/acme/tool@v1
+"""
+
+SECRET_DOCKERFILE = """\
+FROM dockeruser-planted:dockerpass-planted@registry.example.com/base/python:3.12 AS build
+FROM docker://dockeruser-planted:dockerpass-planted@registry.example.com/base/node:20 AS web
+FROM registry.example.com/base/go:1.22?token=acc3ss-tok-planted#frag-secret-planted AS go
+FROM bearer-in-ref-planted@registry.example.com/base/rust:1 AS rust
+COPY --from=dockeruser-planted:dockerpass-planted@registry.example.com/acme/tool:3 /a /a
+COPY --from=build /out /out
+FROM scratch AS alias-with-secret-planted:dockerpass-planted
+"""
+
+SECRET_TERRAGRUNT = """\
+terraform {
+  source = "git::https://tok3n-userinfo:p4ssw0rd-planted@git.example.com/acme/mods.git//vpc?ref=v1&sshkey=QUJD-sshkey"
+}
+include "a" {
+  path = "https://tok3n-userinfo:p4ssw0rd-planted@git.example.com/acme/common.hcl?access_token=acc3ss-tok-planted"
+}
+dependency "b" {
+  config_path = "git::ssh://tok3n-userinfo@git.example.com/acme/dep.git?token=acc3ss-tok-planted"
+}
+"""
+
+SECRET_TERRAGRUNT_SOURCES = [
+    "git::https://tok3n-userinfo:p4ssw0rd-planted@git.example.com/acme/mods.git//vpc?ref=v1"
+    "&sshkey=QUJD-sshkey",
+    "https://git.example.com/acme/mods.zip?X-Amz-Signature=sig-X-Amz-planted"
+    "&access_token=acc3ss-tok-planted#frag-secret-planted",
+    "git@git.example.com:acme/mods.git//vpc?ref=v2&access_token=acc3ss-tok-planted",
+    "scpuser-planted@git.example.com:acme/mods.git",
+    "ssh://scpuser-planted:p4ssw0rd-planted@git.example.com:2222/acme/mods.git?ref=v3",
+    "tok3n-userinfo@git.example.com/acme/mods?ref=v4",
+    "https://tok3n-userinfo:pa?ss-planted@git.example.com/acme/mods",
+    "https://git.example.com?sshkey=a@QUJD-sshkey",
+]
+
+
+def _assert_none_planted(nodes: list[NodeInfo], edges: list[EdgeInfo]) -> None:
+    dumped = _dump(nodes, edges) + repr(nodes) + repr(edges)
+    for planted in PLANTED:
+        assert planted not in dumped, planted
+    for fragment in ("tok3n", "p4ssw0rd", "sshkey", "X-Amz", "access_token", "token="):
+        assert fragment not in dumped, fragment
+
+
+def test_workflow_credentials_and_queries_are_never_stored(tmp_path: Path) -> None:
+    nodes, edges = _parse(tmp_path, ".github/workflows/secret.yml", SECRET_WORKFLOW)
+    _assert_none_planted(nodes, edges)
+    rows = _imports(edges)
+    assert rows[0].target == "external:docker-image:registry.example.com/img/tool"
+    assert rows[0].extra["tag"] == "1.2" and rows[0].extra["registry"] == "registry.example.com"
+    assert rows[1].target == "external:github-actions:dynamic"
+    assert rows[2].target == "external:github-actions:acme/setup-tool"
+    assert rows[2].extra["dynamic"] is True and "ref" not in rows[2].extra
+    assert rows[3].target == "external:github-actions:dynamic"
+    assert rows[4].target == "external:github-actions:dynamic"
+    assert all("raw" not in row.extra for row in rows)
+
+
+def test_dockerfile_credentials_and_queries_are_never_stored(tmp_path: Path) -> None:
+    nodes, edges = _parse(tmp_path, "Dockerfile", SECRET_DOCKERFILE)
+    _assert_none_planted(nodes, edges)
+    rows = _imports(edges)
+    assert [r.target for r in rows] == [
+        "external:docker-image:registry.example.com/base/python",
+        "external:docker-image:dynamic",
+        "external:docker-image:dynamic",
+        "external:docker-image:registry.example.com/base/rust",
+        "external:docker-image:registry.example.com/acme/tool",
+    ]
+    stages = [n for n in nodes if n.kind == "Class"]
+    assert stages[0].name == "stage:build"
+    assert stages[0].extra["base_image"] == "registry.example.com/base/python:3.12"
+    assert stages[1].extra["base_image"] is None
+    assert [n.name for n in stages] == ["stage:build", "stage:web", "stage:go", "stage:rust"]
+    assert all("raw" not in row.extra for row in rows)
+
+
+def test_terragrunt_credentials_and_queries_are_never_stored(tmp_path: Path) -> None:
+    nodes, edges = _parse(tmp_path, "live/terragrunt.hcl", SECRET_TERRAGRUNT)
+    _assert_none_planted(nodes, edges)
+    rows = _imports(edges)
+    assert rows[0].target == "external:terraform-module:https://git.example.com/acme/mods"
+    assert rows[0].extra["ref"] == "v1" and rows[0].extra["subdir"] == "vpc"
+    assert rows[0].extra["source_kind"] == "git"
+    assert [r.target for r in rows[1:]] == ["external:terragrunt:dynamic"] * 2
+    assert all(r.extra["dynamic"] is True for r in rows[1:])
+    assert all("raw" not in row.extra for row in rows)
+
+
+@pytest.mark.parametrize("source", SECRET_TERRAGRUNT_SOURCES)
+def test_terragrunt_source_variants_never_keep_secrets(tmp_path: Path, source: str) -> None:
+    from code_review_graph.infra_references import parse_terragrunt_source
+
+    parts = parse_terragrunt_source(source)
+    assert not any(p in repr(parts) for p in PLANTED), parts
+    body = f'terraform {{\n  source = "{source}"\n}}\n'
+    nodes, edges = _parse(tmp_path, "live/terragrunt.hcl", body)
+    _assert_none_planted(nodes, edges)
+
+
+def test_terragrunt_remote_sources_keep_host_path_subdir_and_ref() -> None:
+    from code_review_graph.infra_references import parse_terragrunt_source
+
+    def shape(source: str) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
+        p = parse_terragrunt_source(source)
+        return p["kind"], p["base"], p["subdir"], p["ref"]
+
+    assert shape(SECRET_TERRAGRUNT_SOURCES[0]) == (
+        "git", "https://git.example.com/acme/mods", "vpc", "v1",
+    )
+    assert shape(SECRET_TERRAGRUNT_SOURCES[1]) == (
+        "archive", "https://git.example.com/acme/mods.zip", None, None,
+    )
+    # ``git@host:path`` is the conventional ssh user, not a secret; it is dropped like any
+    # userinfo and the address is host/path.
+    assert shape(SECRET_TERRAGRUNT_SOURCES[2]) == (
+        "git", "git.example.com/acme/mods", "vpc", "v2",
+    )
+    assert shape("git@git.example.com:acme/mods.git") == (
+        "git", "git.example.com/acme/mods", None, None,
+    )
+    assert shape(SECRET_TERRAGRUNT_SOURCES[4]) == (
+        "other", "ssh://git.example.com:2222/acme/mods", None, "v3",
+    )
+    assert shape("tfr:///acme/vpc/aws?version=1.2.3")[3] == "1.2.3"
+    # An ambiguous authority (a ``?`` before the ``@``) is not guessed at.
+    assert shape(SECRET_TERRAGRUNT_SOURCES[6])[1] is None
+    assert shape(SECRET_TERRAGRUNT_SOURCES[7])[1] is None
+
+
+def test_unusable_terragrunt_reference_is_dynamic_without_text(tmp_path: Path) -> None:
+    _nodes, edges = _parse(
+        tmp_path, "live/terragrunt.hcl",
+        'terraform {\n  source = "https://u:pa?ss-planted@git.example.com/x"\n}\n',
+    )
+    row = _imports(edges)[0]
+    assert row.target == "external:terragrunt:dynamic"
+    assert row.extra["dynamic"] is True
+    assert "pa?ss" not in repr(edges)
+
+
+def test_docker_image_userinfo_query_and_fragment_are_dropped() -> None:
+    cases = {
+        "user:pass@registry.example.com/img/tool:1": ("registry.example.com/img/tool", "1"),
+        "tok@alpine": ("alpine", None),
+        "registry.example.com:5000/img?x=y#z": (None, None),
+        "user:pa?ss@host.example.com/img": (None, None),
+    }
+    for text, (name, tag) in cases.items():
+        parts = parse_docker_image(text)
+        assert (parts["name"], parts["tag"]) == (name, tag), text
+        assert parts["dynamic"] is (name is None)
+        assert "raw" not in parts
