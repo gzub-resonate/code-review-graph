@@ -78,6 +78,61 @@ _COLLISION_KEYS = (
 )
 
 
+def _arity_bounds(params: Optional[str]) -> Optional[tuple[int, float]]:
+    """Fewest and most arguments the first parameter list accepts, if readable."""
+    if params is None:
+        return None
+    text = params.strip()
+    if not (text.startswith("(") and text.endswith(")")):
+        return None
+    inner = text[1:-1].strip()
+    if inner.startswith("implicit ") or inner.startswith("using "):
+        return None
+    if not inner:
+        return 0, 0
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for index, char in enumerate(inner):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    low = 0
+    high: float = 0
+    for part in parts:
+        text_part = part.strip()
+        if not text_part:
+            continue
+        high += 1
+        if text_part.endswith("*") and ":" in text_part:
+            high = float("inf")
+            continue
+        has_default = False
+        nest = 0
+        for position, char in enumerate(text_part):
+            if char in "([{":
+                nest += 1
+            elif char in ")]}":
+                nest -= 1
+            elif (
+                char == "=" and nest == 0
+                and text_part[position + 1:position + 2] != ">"
+                and text_part[position - 1:position] not in ("=", "!", "<", ">")
+            ):
+                has_default = True
+                break
+        if not has_default:
+            low += 1
+    return low, high
+
+
 class _Type:
     __slots__ = (
         "qn", "name", "file", "kind", "scopes", "start", "end", "owner", "fqn",
@@ -147,6 +202,7 @@ class _Index:
         self.file_types: dict[str, list[_Type]] = {}
         self.functions: dict[str, tuple[str, str]] = {}  # qn -> (name, file)
         self.private: set[str] = set()  # members subclasses cannot see
+        self.arity: dict[str, tuple[int, float]] = {}  # qn -> (min, max) arguments
         self.members: dict[tuple[str, str], list[str]] = {}
         self.nested: dict[tuple[str, str], list[_Type]] = {}
         self.contained_by: dict[str, str] = {}
@@ -158,7 +214,7 @@ class _Index:
         self._member_cache: dict[tuple[str, str], tuple[list[str], bool]] = {}
 
         for row in conn.execute(
-            "SELECT qualified_name, name, file_path, kind, line_start, line_end, extra "
+            "SELECT qualified_name, name, file_path, kind, line_start, line_end, extra, params "
             "FROM nodes WHERE language = 'scala' AND kind IN ('Class', 'Function', 'Test') "
             "ORDER BY qualified_name",
         ).fetchall():
@@ -168,6 +224,9 @@ class _Index:
                 self.functions[row["qualified_name"]] = (row["name"], row["file_path"])
                 if extra.get("scala_private"):
                     self.private.add(row["qualified_name"])
+                bounds = _arity_bounds(row["params"])
+                if bounds is not None:
+                    self.arity[row["qualified_name"]] = bounds
                 continue
             kind = extra.get("scala_kind")
             if not isinstance(kind, str):
@@ -474,12 +533,27 @@ def _classes(nodes) -> list[_Type]:
     return [n for n in nodes if not n.is_object]
 
 
-def _members_outcome(index: _Index, owners, name: str, rule: str, via: str) -> Optional[_Outcome]:
+def _fits(index: _Index, qns, argc: Optional[int]) -> list[str]:
+    """Declarations that can take *argc* arguments (all of them if unknown)."""
+    if argc is None:
+        return list(qns)
+    return [
+        qn for qn in qns
+        if qn not in index.arity or index.arity[qn][0] <= argc <= index.arity[qn][1]
+    ]
+
+
+def _members_outcome(
+    index: _Index, owners, name: str, rule: str, via: str, argc: Optional[int] = None,
+) -> Optional[_Outcome]:
     owners = sorted(set(owners), key=lambda t: t.qn)
     found: set[str] = set()
     for owner in owners:
         hits, _unknown = index.find_members(owner, name)
         found.update(hits)
+    # A declaration that cannot take this many arguments is another overload
+    # (often one an out-of-repository parent declares).
+    found = set(_fits(index, found, argc))
     if not found:
         return None
     targets = sorted(found)
@@ -511,7 +585,7 @@ def _declared_type(index: _Index, extra: dict, ctx: _Context) -> list[_Type]:
     return []
 
 
-def _apply_outcome(index: _Index, nodes) -> Optional[_Outcome]:
+def _apply_outcome(index: _Index, nodes, argc: Optional[int] = None) -> Optional[_Outcome]:
     """``Foo(...)``: an object's ``apply``, or a case class's own constructor.
 
     A case class with an explicit ``apply`` on its companion has two: the one
@@ -520,7 +594,9 @@ def _apply_outcome(index: _Index, nodes) -> Optional[_Outcome]:
     objects = _objects(nodes)
     cases = [n for n in nodes if n.kind == "case_class"]
     explicit = (
-        _members_outcome(index, objects, "apply", "apply", ",".join(o.qn for o in objects))
+        _members_outcome(
+            index, objects, "apply", "apply", ",".join(o.qn for o in objects), argc,
+        )
         if objects else None
     )
     if cases and len(cases) == 1:
@@ -536,6 +612,8 @@ def _resolve_call(index: _Index, extra: dict, ctx: _Context) -> Optional[_Outcom
     name = extra.get("scala_name")
     if not isinstance(name, str) or not name:
         return None
+    argc = extra.get("scala_argc")
+    argc = argc if isinstance(argc, int) else None
     if form == "new":
         path = extra.get("scala_type")
         if not isinstance(path, str):
@@ -553,7 +631,7 @@ def _resolve_call(index: _Index, extra: dict, ctx: _Context) -> Optional[_Outcom
     if form == "bare":
         if extra.get("scala_shadowed"):
             return None
-        return _resolve_bare(index, name, ctx)
+        return _resolve_bare(index, name, ctx, argc)
     if form != "member":
         return None
     receiver = extra.get("scala_receiver")
@@ -564,18 +642,22 @@ def _resolve_call(index: _Index, extra: dict, ctx: _Context) -> Optional[_Outcom
             if owners:
                 return _members_outcome(
                     index, owners, name, "typed_receiver",
-                    ",".join(sorted(o.qn for o in owners)),
+                    ",".join(sorted(o.qn for o in owners)), argc,
                 )
         return None
     if receiver == "this":
         if ctx.unknown_enclosing or not ctx.chain:
             return None
-        return _members_outcome(index, [ctx.chain[0]], name, "this_member", ctx.chain[0].qn)
+        return _members_outcome(
+            index, [ctx.chain[0]], name, "this_member", ctx.chain[0].qn, argc,
+        )
     if receiver == "super":
         if ctx.unknown_enclosing or not ctx.chain:
             return None
         parents, _unknown = index.parents(ctx.chain[0])
-        return _members_outcome(index, parents, name, "super_member", ctx.chain[0].qn)
+        return _members_outcome(
+            index, parents, name, "super_member", ctx.chain[0].qn, argc,
+        )
     if extra.get("scala_receiver_local"):
         if "." in receiver:
             return None
@@ -584,21 +666,25 @@ def _resolve_call(index: _Index, extra: dict, ctx: _Context) -> Optional[_Outcom
             return None
         return _members_outcome(
             index, owners, name, "typed_receiver", ",".join(sorted(o.qn for o in owners)),
+            argc,
         )
     objects = _receiver_objects(index, receiver, ctx)
     if not objects:
         return None
     outcome = _members_outcome(
         index, objects, name, "object_member", ",".join(sorted(o.qn for o in objects)),
+        argc,
     )
     if name == "apply":
         found = index.resolve_type_path(receiver, ctx)[1]
         if any(n.kind == "case_class" for n in found):
-            return _apply_outcome(index, found)
+            return _apply_outcome(index, found, argc)
     return outcome
 
 
-def _resolve_bare(index: _Index, name: str, ctx: _Context) -> Optional[_Outcome]:
+def _resolve_bare(
+    index: _Index, name: str, ctx: _Context, argc: Optional[int] = None,
+) -> Optional[_Outcome]:
     # Foo(...): apply of an object, or the constructor of a case class.
     status, nodes = index.lookup(name, ctx)
     if status == "found" and name[:1].isupper():
@@ -607,13 +693,18 @@ def _resolve_bare(index: _Index, name: str, ctx: _Context) -> Optional[_Outcome]
             return _Outcome(
                 sorted(n.qn for n in nodes)[:_MAX_CANDIDATES], "apply", ambiguous=True,
             )
-        return _apply_outcome(index, nodes)
+        return _apply_outcome(index, nodes, argc)
     if ctx.unknown_enclosing:
         return None
     # Members of the enclosing types, innermost first.
     chain_unknown = False
     for enclosing in ctx.chain:
-        hits, unknown = index.find_members(enclosing, name)
+        found, unknown = index.find_members(enclosing, name)
+        hits = _fits(index, found, argc)
+        if found and not hits:
+            # Declared here, but not for this many arguments: another overload,
+            # most likely an out-of-repository parent's.
+            return None
         if hits:
             if len(hits) == 1:
                 return _Outcome(hits, "enclosing_member", enclosing.qn)
@@ -636,7 +727,7 @@ def _resolve_bare(index: _Index, name: str, ctx: _Context) -> Optional[_Outcome]
             return None  # Imported from outside the repository.
         return _members_outcome(
             index, owners, imp.path.rsplit(".", 1)[-1], "imported_member",
-            ",".join(sorted(o.qn for o in owners)),
+            ",".join(sorted(o.qn for o in owners)), argc,
         )
     owners_by_import: dict[str, _Type] = {}
     for imp in imports:
@@ -649,7 +740,7 @@ def _resolve_bare(index: _Index, name: str, ctx: _Context) -> Optional[_Outcome]
         return None
     return _members_outcome(
         index, list(owners_by_import.values()), name, "wildcard_member",
-        ",".join(sorted(owners_by_import)),
+        ",".join(sorted(owners_by_import)), argc,
     )
 
 

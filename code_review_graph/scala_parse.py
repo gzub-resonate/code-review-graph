@@ -450,6 +450,29 @@ def _path_text(node) -> Optional[str]:
     return None
 
 
+def _argument_count(node) -> Optional[int]:
+    """Arguments in the first argument list, or ``None`` when it is not countable.
+
+    ``f(xs: _*)`` spreads a sequence, so the count says nothing about arity.
+    """
+    arguments = node.child_by_field_name("arguments")
+    if arguments is None:
+        arguments = next((c for c in node.children if c.type == "arguments"), None)
+    if arguments is None:
+        for child in node.children:
+            if child.type in ("block", "case_block", "indented_block"):
+                return 1  # ``f { ... }`` passes its block as the one argument.
+        return None
+    count = 0
+    for child in arguments.named_children:
+        if child.type in ("comment", "block_comment"):
+            continue
+        if child.type == "typed_expression" and _text(child).rstrip().endswith(("_*", "*")):
+            return None
+        count += 1
+    return count
+
+
 def call_extra(node, name: str) -> dict:
     """``extra`` for one Scala call or instantiation node.
 
@@ -458,6 +481,9 @@ def call_extra(node, name: str) -> dict:
     older release.
     """
     extra: dict = {"scala_name": name}
+    argc = _argument_count(node)
+    if argc is not None:
+        extra["scala_argc"] = argc
     if node.type == "instance_expression":
         extra["scala_form"] = "new"
         path = _instantiated_type(node)
