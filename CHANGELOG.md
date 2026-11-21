@@ -4,6 +4,11 @@
 
 ### Added
 
+- Spring Cloud OpenFeign clients are indexed as outbound calls. Each method of
+  a `@FeignClient` interface becomes a client `Endpoint` (with the
+  `@FeignClient` `path` prefix applied) linked to the method by a `REQUESTS`
+  edge, and the new `requests_of` and `requesters_of` patterns of
+  `query_graph_tool` follow those edges.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
@@ -21,6 +26,10 @@
 
 ### Changed
 
+- Feign client methods are no longer listed as served routes by `endpoints_for`
+  or `handlers_of`, and `@FeignClient` interfaces are no longer reported as
+  dead code or treated as flow entry points. Run `code-review-graph build`
+  once to re-index existing Feign interfaces.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers
