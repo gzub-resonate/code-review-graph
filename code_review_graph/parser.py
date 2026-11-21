@@ -1969,6 +1969,11 @@ _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
 # Its request mappings describe calls the service makes, not routes it serves.
 _SPRING_FEIGN_CLIENT_ANNOTATIONS = frozenset({"FeignClient"})
 _SPRING_FEIGN_CLIENT_KEY = "__crg_spring_feign_client__:"
+# Rendered in a Feign route in place of a path piece that cannot be resolved at
+# parse time (a constant, a call). Angle brackets are not valid in a URL path, so
+# it cannot collide with a real segment, and unlike ``{...}`` it is not a path
+# variable and contains no ``?`` that a query-string strip would cut at.
+_SPRING_FEIGN_UNRESOLVED = "<unresolved>"
 _SPRING_FEIGN_ABSOLUTE_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # Marks a Python local name bound to a MODULE rather than to a symbol inside
@@ -15799,7 +15804,8 @@ class CodeParser:
         """Fold a Java annotation value into ``(text, dynamic)`` without evaluating it.
 
         String literals and ``+`` chains of them fold into one value. Anything
-        else (a constant, a call) contributes no text and marks the value dynamic.
+        else (a constant, a call) contributes ``_SPRING_FEIGN_UNRESOLVED`` as its
+        text and marks the value dynamic, so a dropped piece stays visible.
         """
         if node.type == "string_literal":
             text = node.text.decode("utf-8", errors="replace")
@@ -15821,7 +15827,17 @@ class CodeParser:
                 left_text, left_dynamic = CodeParser._spring_feign_literal(left)
                 right_text, right_dynamic = CodeParser._spring_feign_literal(right)
                 return (left_text + right_text, left_dynamic or right_dynamic)
-        return ("", True)
+        return (_SPRING_FEIGN_UNRESOLVED, True)
+
+    @staticmethod
+    def _spring_feign_literal_parts(*texts: str) -> list[str]:
+        """Return the known literal fragments of route texts, in order."""
+        parts: list[str] = []
+        for text in texts:
+            parts.extend(
+                piece for piece in text.split(_SPRING_FEIGN_UNRESOLVED) if piece
+            )
+        return parts
 
     @staticmethod
     def _spring_feign_values(value_node) -> list[tuple[str, bool]]:
@@ -15970,16 +15986,19 @@ class CodeParser:
                 verbs = ["GET"]
             for prefix in prefixes:
                 for path, path_dynamic in mapped:
+                    client_path = client.get("path", "")
                     route = self._join_spring_route(
-                        self._join_spring_route(client.get("path", ""), prefix),
+                        self._join_spring_route(client_path, prefix),
                         path,
                     )
+                    unresolved = _SPRING_FEIGN_UNRESOLVED in route
                     config_keys = list(interface_keys)
                     for key in self._spring_feign_placeholder_keys(path):
                         if key not in config_keys:
                             config_keys.append(key)
                     route_dynamic = bool(
                         client.get("path_dynamic")
+                        or unresolved
                         or path_dynamic
                         or _SPRING_FEIGN_ABSOLUTE_URL_RE.match(path)
                     )
@@ -15999,6 +16018,10 @@ class CodeParser:
                             "route_dynamic": route_dynamic,
                             "url_literal": bool(client.get("url_literal")),
                         }
+                        if unresolved:
+                            metadata["route_literal_parts"] = (
+                                self._spring_feign_literal_parts(client_path, prefix, path)
+                            )
                         service = client.get("name")
                         if service and "${" not in service:
                             metadata["service"] = service
@@ -16949,7 +16972,18 @@ class CodeParser:
                     feign = self._spring_feign_client_attributes(feign_annotations[0])
                     # Legacy: current OpenFeign rejects @RequestMapping on a client
                     # interface, older releases applied it as a route prefix.
-                    feign["prefixes"] = request_prefixes
+                    # Folded with the Feign helpers so an unresolved constant stays
+                    # visible instead of being dropped as it is for a server prefix.
+                    feign_prefixes: list[str] = []
+                    for mapping in self._java_annotations_named(
+                        child, frozenset({"RequestMapping"}),
+                    ):
+                        for key, value_node in self._spring_feign_arguments(mapping):
+                            if key in ("path", "value"):
+                                feign_prefixes.extend(
+                                    text for text, _ in self._spring_feign_values(value_node)
+                                )
+                    feign["prefixes"] = feign_prefixes
                     # Keyed by the full scope chain so a nested interface resolves.
                     feign_scope = f"{class_parent}.{name}" if class_parent else name
                     import_map[f"{_SPRING_FEIGN_CLIENT_KEY}{feign_scope}"] = json.dumps(
