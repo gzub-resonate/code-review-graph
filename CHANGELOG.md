@@ -18,21 +18,11 @@
   finished, and which git and editor hooks are installed and the version of
   the copy they run. It changes nothing, exits 1 when a check
   fails, and takes `--json`.
-
-- Spring dependency-injection call resolution now binds an injected interface
-  that has several implementations. The implementation is chosen from the
-  injection point's `@Qualifier` (matched exactly against the bean name of
-  each class, or a `@Qualifier` on the class), then from a single `@Primary`
-  class, then from the injection point's name matching a bean name (the last
-  two are skipped when a candidate is `@Profile` or `@ConditionalOn*`). This
-  covers a caching decorator that delegates to the real implementation through
-  qualified constructor parameters: `callers_of` and `path_to` now follow the
-  call chain through both classes instead of stopping at the interface
-  method. The edge records `resolution` (`spring_qualifier`, `spring_primary`
-  or `spring_bean_name`) plus the `qualifier` or `bean_name` it used. Any
-  other shape, including a qualifier that matches no class or several, keeps
-  the call on the interface method as before. Existing graphs need one
-  `code-review-graph build` to pick this up.
+- Calls to an injected interface that has several implementations now resolve
+  to the one implementation picked by `@Qualifier`, `@Primary` or the bean or
+  field name, so call graphs and impact analysis reach the real class. Calls
+  that cannot be decided stay on the interface as before. Run
+  `code-review-graph build` once to update an existing graph.
 
 ### Changed
 
