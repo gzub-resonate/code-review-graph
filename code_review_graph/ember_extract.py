@@ -134,9 +134,6 @@ _STORE_NAMED_METHODS = _STORE_METHODS - {"push", "unloadRecord"}
 
 _RELATIONSHIPS = frozenset({"belongsTo", "hasMany"})
 
-_APP_DIR_RE = re.compile(r"(?:^|/)(?:app|addon)/(?P<rest>.+)$")
-
-
 def dasherize(name: str) -> str:
     """Ember's module spelling of a name: ``retryService`` is ``retry-service``."""
     text = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name)
@@ -155,15 +152,17 @@ def role_from_path(file_path: str) -> Optional[str]:
         return None
     if "node_modules" in parts or "bower_components" in parts:
         return None
-    match = _APP_DIR_RE.search("/".join(parts))
-    if not match:
-        return None
-    rest = match.group("rest").split("/")
-    if rest and rest[0] in _ROLE_BY_DIR:
-        return _ROLE_BY_DIR[rest[0]]
-    stem = rest[-1].rsplit(".", 1)[0]
-    if len(rest) >= 2 and stem in _ROLE_BY_POD_STEM:
-        return _ROLE_BY_POD_STEM[stem]
+    # An ``app`` or ``addon`` directory may itself sit under another one
+    # (``addon/app/services/x.js``), so try each until one gives a role.
+    for index, part in enumerate(parts[:-1]):
+        if part not in ("app", "addon"):
+            continue
+        rest = parts[index + 1:]
+        if rest[0] in _ROLE_BY_DIR:
+            return _ROLE_BY_DIR[rest[0]]
+        stem = rest[-1].rsplit(".", 1)[0]
+        if len(rest) >= 2 and stem in _ROLE_BY_POD_STEM:
+            return _ROLE_BY_POD_STEM[stem]
     return None
 
 
@@ -171,7 +170,7 @@ def _text(node) -> str:
     return node.text.decode("utf-8", errors="replace") if node is not None else ""
 
 
-def _string_value(node) -> Optional[str]:
+def string_value(node) -> Optional[str]:
     """The text of a plain string literal node, else None (templates, calls)."""
     if node is None or node.type != "string":
         return None
@@ -205,10 +204,10 @@ def collect_imports(root, source: bytes) -> EmberImports:
     for node in root.children:
         if node.type != "import_statement":
             continue
-        module = _string_value(node.child_by_field_name("source"))
+        module = string_value(node.child_by_field_name("source"))
         if module is None:
             for child in node.children:
-                module = _string_value(child) or module
+                module = string_value(child) or module
         if module is None or not _EMBER_MODULES.match(module):
             continue
         imports.evidence = True
@@ -291,7 +290,7 @@ def _first_string_arg(call) -> tuple[Optional[str], bool]:
     named = [c for c in args.children if c.is_named]
     if not named:
         return None, False
-    return _string_value(named[0]), True
+    return string_value(named[0]), True
 
 
 def _injection_kind(callee, imports: EmberImports) -> Optional[str]:
@@ -493,7 +492,7 @@ def extract(
             value = node.child_by_field_name("value")
             if key is None or value is None or value.type != "call_expression":
                 continue
-            prop = _string_value(key) if key.type == "string" else _text(key)
+            prop = string_value(key) if key.type == "string" else _text(key)
             if prop and key.type in ("property_identifier", "identifier", "string"):
                 handle_value_call(prop, value, node, "property")
         elif ntype == "call_expression":
@@ -511,16 +510,20 @@ def extract(
             elif len(chain) == 2 and chain[1] == "create" and chain[0] in imports.base_locals \
                     and imports.base_locals[chain[0]] == "mixin" and facts.base_role is None:
                 facts.base_role = "mixin"
-            if chain and chain[-1] in _STORE_NAMED_METHODS:
-                if _is_store_receiver(callee):
-                    name, had_arg = _first_string_arg(node)
-                    if name:
-                        add_edge("REFERENCES", f"{PLACEHOLDER_PREFIX}model:{name}", node, {
-                            "framework": "ember",
-                            "ember_ref": "model",
-                            "ember_name": name,
-                            "ember_store_method": chain[-1],
-                        })
+            method_node = (
+                callee.child_by_field_name("property")
+                if callee.type == "member_expression" else None
+            )
+            method = _text(method_node) if method_node is not None else ""
+            if method in _STORE_NAMED_METHODS and _is_store_receiver(callee):
+                name, _had_arg = _first_string_arg(node)
+                if name:
+                    add_edge("REFERENCES", f"{PLACEHOLDER_PREFIX}model:{name}", node, {
+                        "framework": "ember",
+                        "ember_ref": "model",
+                        "ember_name": name,
+                        "ember_store_method": method,
+                    })
             if is_router and not router_done and chain and chain[-1] == "map":
                 router_done = True
                 _extract_routes(node, file_path, nodes, node_info_cls, language)
@@ -570,7 +573,7 @@ def chained_receiver(call_node) -> Optional[tuple[str, str]]:
         args = obj.child_by_field_name("arguments")
         named = [c for c in args.children if c.is_named] if args is not None else []
         if len(named) >= 2 and named[0].type == "this":
-            prop = _string_value(named[1])
+            prop = string_value(named[1])
     if not prop or not re.fullmatch(r"[A-Za-z_$][\w$]*", prop):
         return None
     return prop, _text(method)
@@ -583,7 +586,7 @@ def _object_pair_value(obj, name: str):
         key = child.child_by_field_name("key")
         if key is None:
             continue
-        label = _string_value(key) if key.type == "string" else _text(key)
+        label = string_value(key) if key.type == "string" else _text(key)
         if label == name:
             return child.child_by_field_name("value")
     return None
@@ -625,7 +628,7 @@ def _extract_routes(map_call, file_path: str, nodes: list["NodeInfo"],
             named = [c for c in call_args.children if c.is_named] if call_args else []
             if not named:
                 continue
-            name = _string_value(named[0])
+            name = string_value(named[0])
             if not name:
                 continue
             options = next((c for c in named[1:] if c.type == "object"), None)
@@ -640,7 +643,7 @@ def _extract_routes(map_call, file_path: str, nodes: list["NodeInfo"],
             if options is not None:
                 path_node = _object_pair_value(options, "path")
                 if path_node is not None:
-                    path_override = _string_value(path_node)
+                    path_override = string_value(path_node)
                     path_dynamic = path_override is None
                 reset_node = _object_pair_value(options, "resetNamespace")
                 if reset_node is not None and _text(reset_node) == "true":

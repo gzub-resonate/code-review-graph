@@ -4345,6 +4345,12 @@ class CodeParser:
             )
             self._stamp_ember_roles(nodes, file_path_str, ember_facts)
 
+        if (
+            language in ("javascript", "typescript", "tsx")
+            and ember_extract.role_from_path(file_path_str)
+        ):
+            self._emit_ember_reexports(tree.root_node, file_path_str, language, edges)
+
         if language == "elixir":
             nodes, edges = self._merge_elixir_clauses(nodes, edges)
         if language == "ruby" and test_file:
@@ -4752,6 +4758,32 @@ class CodeParser:
             ))
 
         return nodes, edges
+
+    def _emit_ember_reexports(
+        self, root, file_path: str, language: str, edges: list[EdgeInfo],
+    ) -> None:
+        """``export { default } from '<addon>/services/x'`` is an import edge.
+
+        An addon puts a one-line re-export under ``app/`` so its module joins
+        the host application's namespace. Nothing else in the graph records
+        that line, and the Ember resolver follows it to the real module. Only
+        modules at an Ember path are read this way.
+        """
+        for node in root.children:
+            if node.type != "export_statement":
+                continue
+            spec = ember_extract.string_value(node.child_by_field_name("source"))
+            if not spec:
+                continue
+            target = self._resolve_module_to_file(spec, file_path, language) or spec
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path,
+                target=target,
+                file_path=file_path,
+                line=node.start_point[0] + 1,
+                extra={"ember_reexport": True},
+            ))
 
     def _stamp_ember_roles(
         self,

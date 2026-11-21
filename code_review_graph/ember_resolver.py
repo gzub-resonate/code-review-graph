@@ -111,6 +111,9 @@ class _ModuleIndex:
                 roots.add(match.group("root"))
         self.roots = sorted(roots, key=lambda r: (-len(r), r))
         self.files = files
+        #: Maps a module file to the file it re-exports, so an addon's ``app/``
+        #: re-export and its ``addon/`` module count as one candidate.
+        self.follow = lambda path: path
         # root -> (kind, name) -> sorted file list
         self.by_root: dict[str, dict[tuple[str, str], list[str]]] = {r: {} for r in self.roots}
         for path in sorted(files):
@@ -163,7 +166,7 @@ class _ModuleIndex:
         """(file, "") when one module is named, else (None, reason)."""
         own = self.root_of(consumer)
         if own is not None:
-            hits = self.by_root.get(own, {}).get((kind, name), [])
+            hits = sorted({self.follow(p) for p in self.by_root.get(own, {}).get((kind, name), [])})
             if len(hits) == 1:
                 return hits[0], ""
             if len(hits) > 1:
@@ -173,7 +176,7 @@ class _ModuleIndex:
             if root == own:
                 continue
             found.extend(self.by_root[root].get((kind, name), []))
-        distinct = sorted(set(found))
+        distinct = sorted({self.follow(p) for p in found})
         if len(distinct) == 1:
             return distinct[0], ""
         return (None, "ambiguous") if distinct else (None, "no_module")
@@ -297,7 +300,7 @@ class _Resolver:
             for base in bases:
                 for suffix in (".js", ".ts", ".gjs", ".gts", "/index.js", "/index.ts"):
                     candidate = f"{base}/{rest}{suffix}"
-                    if candidate in index.files:
+                    if candidate in index.files and candidate != consumer:
                         found.append(candidate)
                         break
             if found and root == own:
@@ -310,6 +313,7 @@ class _Resolver:
             "SELECT e.source_qualified, e.target_qualified FROM edges e "
             "WHERE e.kind = 'IMPORTS_FROM' AND e.target_qualified LIKE '/%' "
             "AND e.source_qualified = e.file_path "
+            "AND e.file_path NOT LIKE '%.hbs' "
             "AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.file_path = e.file_path "
             "AND n.kind IN ('Class', 'Function')) "
             "ORDER BY e.source_qualified, e.target_qualified").fetchall()
@@ -540,6 +544,7 @@ def resolve_ember(store: "GraphStore") -> dict:
     index = _ModuleIndex(files, router_roots)
     resolver.bind_prefix_imports(index)
     reexports = resolver.reexports(index)
+    index.follow = lambda path: resolver._follow_reexport(path, reexports)
     injection_map = resolver.bind_injections(index, reexports)
     resolver.bind_calls(injection_map)
     resolver.bind_placeholders(index, reexports)
