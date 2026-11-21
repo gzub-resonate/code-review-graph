@@ -16,8 +16,9 @@ rules only (no chains).  The file is never written by ``register`` or
 
 The loader is deliberately defensive: a broken file never raises.  Invalid
 entries are skipped with a ``logger.warning``, and a file that cannot be
-parsed at all yields no aliases.  At most ``MAX_REPO_ALIASES`` entries are
-honoured.
+parsed at all yields no aliases.  Only the first ``MAX_REPO_ALIASES`` entries
+of the file are looked at, valid or not, so a huge file costs bounded work and
+at most one extra warning for the remainder.
 
 See docs/REPO_ALIASES.md for the reference.
 """
@@ -103,8 +104,8 @@ def load_repo_aliases(home: Optional[Path] = None) -> dict[str, str]:
         return {}
 
     result: dict[str, str] = {}
-    for name, target in table.items():
-        if len(result) >= MAX_REPO_ALIASES:
+    for seen, (name, target) in enumerate(table.items()):
+        if seen >= MAX_REPO_ALIASES:
             logger.warning(
                 "%s defines more than %d repo aliases - ignoring the rest",
                 path, MAX_REPO_ALIASES,

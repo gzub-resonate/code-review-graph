@@ -146,6 +146,20 @@ def test_cap_is_enforced(home, caplog):
     assert len(caplog.records) == 1
 
 
+def test_cap_counts_invalid_entries_too(home, caplog):
+    lines = "\n".join(f'"bad name {i}" = "billing"' for i in range(1000))
+    write_aliases(home, f"[aliases]\n{lines}\n")
+    with caplog.at_level(logging.WARNING):
+        assert load_repo_aliases() == {}
+    assert len(caplog.records) <= MAX_REPO_ALIASES + 1
+
+
+def test_cap_keeps_order_of_valid_entries(home):
+    lines = "\n".join(f'a{i} = "billing"' for i in range(MAX_REPO_ALIASES))
+    write_aliases(home, f"[aliases]\n{lines}\n")
+    assert list(load_repo_aliases()) == [f"a{i}" for i in range(MAX_REPO_ALIASES)]
+
+
 def test_names_are_case_sensitive(home):
     write_aliases(home, '[aliases]\nOldBilling = "billing"\n')
     assert load_repo_aliases() == {"OldBilling": "billing"}
