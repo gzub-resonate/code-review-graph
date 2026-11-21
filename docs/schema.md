@@ -90,7 +90,9 @@ be read as a path variable, and it has no `?`, so a query-string strip leaves it
 `${...}` placeholders stay verbatim in `route` and do not count as unresolved. A method with a
 `java.net.URI` argument gets `url_from_argument`: Feign sends the request to that argument, so
 `route` is not the target. A `REQUESTS` edge links the interface method to its client Endpoint,
-never a `HANDLES` edge. Laravel
+never a `HANDLES` edge. The interface and its methods carry `spring_feign_client`; dead-code
+reports skip the interface, and flow detection does not treat a method as an entry point on
+the strength of its mapping annotation (a method nothing calls can still be one). Laravel
 closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
 set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 

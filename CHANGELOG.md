@@ -9,14 +9,11 @@
   `cross_repo_search_tool(repos=["old-service-name"])`. A registry alias or
   folder name always wins over the file, a bad entry is skipped with a
   warning, and `register` never changes the file. See `docs/REPO_ALIASES.md`.
-- Spring Cloud OpenFeign clients are indexed as outbound calls. Each method of
-  a `@FeignClient` interface becomes a client `Endpoint` (with the
-  `@FeignClient` `path` prefix applied) linked to the method by a `REQUESTS`
-  edge, and the new `requests_of` and `requesters_of` patterns of
-  `query_graph_tool` follow those edges.
-  A route piece that is not a string literal is shown as `<unresolved>` with the
-  literal fragments in `route_literal_parts`, and a method that takes a
-  `java.net.URI` argument is flagged `url_from_argument`.
+- Spring Cloud OpenFeign client methods are shown as calls the service makes
+  to other services, not as routes it serves. The route includes the interface
+  path prefix, and a route built from a constant is shown as unresolved.
+  `query_graph_tool` has two new patterns, `requests_of` and `requesters_of`,
+  to follow these calls.
 - GitHub Actions workflows (`.github/workflows/*.yml`) and composite actions
   (`.github/actions/**/action.yml`) record each `uses:` reference as an
   `IMPORTS_FROM` edge to `external:github-actions:<owner/repo[/path]>`, with
@@ -57,11 +54,10 @@
 
 ### Changed
 
-- Feign client methods are no longer listed as served routes by `endpoints_for`
-  or `handlers_of`. `@FeignClient` interfaces are no longer reported as dead
-  code, and the Spring mapping-annotation rule no longer makes their methods
-  flow entry points. Run `code-review-graph build` once to re-index existing
-  Feign interfaces.
+- Feign client methods no longer appear in `endpoints_for` or `handlers_of`
+  results, are no longer reported as dead code, and no longer start an
+  execution flow just because of their mapping annotation. Run
+  `code-review-graph build` once to update an existing graph.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers
