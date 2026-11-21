@@ -342,3 +342,51 @@ class InvoiceController {
         names = {n.name for n in detect_entry_points(store)}
     assert "list" in names
     assert not {"getInvoice", "createInvoice"} & names
+
+
+def test_service_call_through_injected_feign_client_reaches_client_endpoint(
+    tmp_path: Path,
+) -> None:
+    from code_review_graph.incremental import full_build
+    from code_review_graph.postprocessing import run_post_processing
+
+    package = tmp_path / "src" / "main" / "java" / "com" / "example" / "orders"
+    package.mkdir(parents=True)
+    (package / "BillingClient.java").write_text(CLIENT_SOURCE, encoding="utf-8")
+    (package / "InvoiceService.java").write_text(
+        """
+package com.example.orders;
+
+import org.springframework.stereotype.Service;
+
+@Service
+public class InvoiceService {
+    private final BillingClient billingClient;
+
+    public InvoiceService(BillingClient billingClient) {
+        this.billingClient = billingClient;
+    }
+
+    public Invoice find(String id) {
+        return billingClient.getInvoice(id);
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    (tmp_path / ".git").mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        full_build(tmp_path, store)
+        run_post_processing(store)
+
+    caller = f"{(package / 'InvoiceService.java').as_posix()}::InvoiceService.find"
+    callees = query_graph("callees_of", caller, repo_root=str(tmp_path))
+    method_qns = [r["qualified_name"] for r in callees["results"]]
+    method_qn = f"{(package / 'BillingClient.java').as_posix()}::BillingClient.getInvoice"
+    assert method_qn in method_qns
+
+    requested = query_graph("requests_of", method_qn, repo_root=str(tmp_path))
+    assert [r["kind"] for r in requested["results"]] == ["Endpoint"]
+    assert requested["edges"][0]["kind"] == SPRING_FEIGN_EDGE_KIND
