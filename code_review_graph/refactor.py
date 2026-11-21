@@ -2200,6 +2200,11 @@ def find_dead_code(
         if _is_entry_point(node):
             continue
 
+        # A @FeignClient interface is instantiated by Spring and reached through
+        # injection, never through a direct reference to the interface itself.
+        if node.extra.get("spring_feign_client"):
+            continue
+
         # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM),
         # and value references (REFERENCES -- function-as-value in maps, arrays, etc.).
 

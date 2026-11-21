@@ -601,6 +601,8 @@ async def query_graph_tool(
     - advised_by: Find AOP advice methods that intercept the target
     - handlers_of: Find methods that handle an endpoint
     - endpoints_for: Find endpoints handled by a method
+    - requests_of: Find outbound HTTP endpoints a client method requests
+    - requesters_of: Find client methods that request an outbound endpoint
     - consumers_of: Find classes that consume a Spring configuration property
     - file_summary: Get all nodes in a file
     - path_to: Find how the target reaches ``to``, one row per hop
