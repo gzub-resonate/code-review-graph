@@ -517,3 +517,35 @@ def test_feign_method_with_uri_argument_is_flagged(tmp_path: Path) -> None:
     assert routes["qualified"]["route"] == "/q"
     assert "url_from_argument" not in routes["ordinary"]
     assert "url_from_argument" not in routes["notUri"]
+
+
+def test_request_queries_take_a_method_or_endpoint_not_a_class(tmp_path: Path) -> None:
+    path, nodes, edges = _parse(tmp_path, CLIENT_SOURCE)
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges, "hash")
+
+    class_qn = f"{path.as_posix()}::BillingClient"
+    for pattern in ("requests_of", "requesters_of"):
+        result = query_graph(pattern, class_qn, repo_root=str(tmp_path))
+        assert result["results"] == []
+
+
+def test_inherited_mappings_are_not_resolved_at_parse_time(tmp_path: Path) -> None:
+    source = """
+    interface BillingApi {
+        @GetMapping("/invoices")
+        Object list();
+    }
+
+    @FeignClient(name = "billing-service")
+    interface BillingClient extends BillingApi {}
+    """
+    _, nodes, edges = _parse(tmp_path, source)
+
+    assert _client_endpoints(nodes) == []
+    # The parent has no @FeignClient, so it is indexed like a controller.
+    handled = [e for e in edges if e.kind == "HANDLES"]
+    assert [e.source.rsplit("::", 1)[-1] for e in handled] == ["BillingApi.list"]
+    assert not [e for e in edges if e.kind == SPRING_FEIGN_EDGE_KIND]

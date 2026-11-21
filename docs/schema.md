@@ -81,11 +81,30 @@ Spring Cloud OpenFeign `@FeignClient` interface emit client Endpoints instead: `
 `"client"`, `client` is `"feign"`, and `http_method` and `route` come from the mapping
 annotations with the `@FeignClient` `path` prefix applied. Other extras are `client_method`,
 `service` (the client `name`, or `service_unresolved` when it is a placeholder), `context_id`,
-`route_dynamic` (the path is not a plain string literal), `url_literal`, and `config_keys`
-(`${...}` placeholders, recorded without values). A `REQUESTS` edge links the interface method to its
-client Endpoint, never a `HANDLES` edge. Laravel
+`route_dynamic` (a path piece could not be resolved, or the mapping is an absolute URL),
+`url_literal`, and `config_keys` (`${...}` placeholders, recorded without values). A piece of a
+Feign route that is not a string literal (a constant, a method call) is rendered as the marker
+`<unresolved>`, and `route_literal_parts` lists the literal fragments in order, so a route is
+never shown as fully literal when something was dropped. The marker is not `{...}`, so it cannot
+be read as a path variable, and it has no `?`, so a query-string strip leaves it whole.
+`${...}` placeholders stay verbatim in `route` and do not count as unresolved. A method with a
+`java.net.URI` argument gets `url_from_argument`: Feign sends the request to that argument, so
+`route` is not the target. A `REQUESTS` edge links the interface method to its client Endpoint,
+never a `HANDLES` edge. Laravel
 closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
 set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
+
+Known gaps in Feign support:
+
+- Mappings inherited from a parent interface are not resolved at parse time. A marker interface
+  such as `interface X extends Base {}` gets no client endpoints. A parent interface without
+  `@FeignClient` that declares mapped methods is indexed like a controller, so those methods
+  still get server-style `Endpoint` nodes and `HANDLES` edges.
+- Query strings stay verbatim in `route` (`/items?active=true`); stripping is left to whoever
+  matches routes.
+- Feign's native `@RequestLine` contract and Kotlin clients are not supported.
+- `requests_of` and `requesters_of` take a method or an endpoint qualified name. A class name
+  returns nothing, as it does for `endpoints_for` and `handlers_of`.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
