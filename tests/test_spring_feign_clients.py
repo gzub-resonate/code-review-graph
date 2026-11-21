@@ -488,3 +488,32 @@ def test_placeholders_stay_verbatim_and_are_not_dynamic(tmp_path: Path) -> None:
     assert "route_literal_parts" not in extra
     assert "<unresolved>" not in extra["route"]
 
+
+def test_feign_method_with_uri_argument_is_flagged(tmp_path: Path) -> None:
+    source = """
+    import java.net.URI;
+
+    @FeignClient(name = "billing-service")
+    interface BillingClient {
+        @GetMapping
+        Object simple(URI target);
+
+        @GetMapping("/q")
+        Object qualified(java.net.URI target, @RequestParam("a") String a);
+
+        @GetMapping("/plain/{id}")
+        Object ordinary(@PathVariable("id") String id);
+
+        @GetMapping("/other")
+        Object notUri(UriBuilder builder, String uri);
+    }
+    """
+    _, nodes, _ = _parse(tmp_path, source)
+    routes = _routes(nodes)
+
+    assert routes["simple"]["url_from_argument"] is True
+    assert routes["simple"]["route"] == "/"
+    assert routes["qualified"]["url_from_argument"] is True
+    assert routes["qualified"]["route"] == "/q"
+    assert "url_from_argument" not in routes["ordinary"]
+    assert "url_from_argument" not in routes["notUri"]

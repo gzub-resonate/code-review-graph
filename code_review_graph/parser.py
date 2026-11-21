@@ -1974,6 +1974,7 @@ _SPRING_FEIGN_CLIENT_KEY = "__crg_spring_feign_client__:"
 # it cannot collide with a real segment, and unlike ``{...}`` it is not a path
 # variable and contains no ``?`` that a query-string strip would cut at.
 _SPRING_FEIGN_UNRESOLVED = "<unresolved>"
+_SPRING_FEIGN_URI_TYPES = frozenset({"URI", "java.net.URI"})
 _SPRING_FEIGN_ABSOLUTE_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # Marks a Python local name bound to a MODULE rather than to a symbol inside
@@ -15839,6 +15840,22 @@ class CodeParser:
             )
         return parts
 
+    def _spring_feign_has_uri_parameter(self, method_node) -> bool:
+        """Return whether a Feign method takes a ``java.net.URI`` argument."""
+        parameters = method_node.child_by_field_name("parameters")
+        if parameters is None:
+            return False
+        for parameter in parameters.children:
+            if parameter.type != "formal_parameter":
+                continue
+            type_node = parameter.child_by_field_name("type")
+            if type_node is None:
+                continue
+            text = type_node.text.decode("utf-8", errors="replace")
+            if "".join(text.split()) in _SPRING_FEIGN_URI_TYPES:
+                return True
+        return False
+
     @staticmethod
     def _spring_feign_values(value_node) -> list[tuple[str, bool]]:
         """Return the folded values of one annotation argument (array or scalar)."""
@@ -15969,6 +15986,8 @@ class CodeParser:
         interface_keys = [k for k in client.get("config_keys", []) if isinstance(k, str)]
 
         source = self._qualify(method_name, file_path, class_name)
+        # Feign sends the request to the URI argument instead of the mapped path.
+        url_from_argument = self._spring_feign_has_uri_parameter(method_node)
         emitted = 0
         for annotation_index, annotation in enumerate(annotations):
             annotation_name = self._java_annotation_name(annotation)
@@ -16022,6 +16041,8 @@ class CodeParser:
                             metadata["route_literal_parts"] = (
                                 self._spring_feign_literal_parts(client_path, prefix, path)
                             )
+                        if url_from_argument:
+                            metadata["url_from_argument"] = True
                         service = client.get("name")
                         if service and "${" not in service:
                             metadata["service"] = service
