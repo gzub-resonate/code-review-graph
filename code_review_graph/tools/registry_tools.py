@@ -8,6 +8,7 @@ from typing import Any
 
 from ..graph import GraphStore, _sanitize_name
 from ..incremental import get_db_path
+from ..repo_aliases import RepoNameResolver
 from ..search import hybrid_search
 from ._common import _bounded, _shown_of, _validate_positive_int
 
@@ -77,29 +78,22 @@ def _select_repos(
     to prevent; sibling checkouts sharing a folder name are the normal case
     this parameter was added for.
 
+    A name that matches neither is looked up in the optional
+    ``repo-aliases.toml`` (see ``repo_aliases.py``), whose target is resolved
+    by the same two rules; that file never overrides a registered name.
+
     Registry order is preserved so the caller cannot change the merge
     tie-breaker by reordering ``names``.
 
     Returns the selected entries, the names that matched nothing, and the
     names that matched more than one entry.
     """
-    by_alias: dict[str, list[int]] = {}
-    by_folder: dict[str, list[int]] = {}
-    for index, entry in enumerate(repos):
-        folder = Path(entry["path"]).name
-        alias = entry.get("alias")
-        # Only an EXPLICIT alias goes in the alias namespace. An entry
-        # registered without one is addressable by its folder name alone,
-        # so it cannot outrank another entry's deliberate alias.
-        if alias:
-            by_alias.setdefault(alias, []).append(index)
-        by_folder.setdefault(folder, []).append(index)
-
+    resolver = RepoNameResolver(repos)
     wanted: set[int] = set()
     unknown: list[str] = []
     ambiguous: list[str] = []
     for name in names:
-        matches = by_alias.get(name) or by_folder.get(name)
+        matches = resolver.lookup(name)
         if not matches:
             unknown.append(name)
             continue
