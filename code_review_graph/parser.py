@@ -45,6 +45,14 @@ from .constants import (
     release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .infra_references import (
+    DYNAMIC_GITHUB_ACTIONS_TARGET,
+    MAX_INFRA_REFERENCES_PER_FILE,
+    docker_image_target,
+    github_actions_target,
+    is_github_workflow_path,
+    parse_github_uses,
+)
 from .npm_alias_resolver import NpmAliasResolver
 
 try:
@@ -11488,7 +11496,105 @@ class CodeParser:
         file_extra["yaml_duplicate_keys"] = duplicate_summaries
         file_extra["yaml_unsupported_key_count"] = unsupported_key_count
         file_extra["yaml_truncated"] = truncated
+        self._emit_github_actions_references(path, documents, file_path, file_extra, edges)
         return nodes, edges
+
+    def _emit_github_actions_references(
+        self,
+        path: Path,
+        documents: list,
+        file_path: str,
+        file_extra: dict[str, Any],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Record the ``uses:`` references of a workflow or composite action file.
+
+        Only ``jobs.<id>.uses`` (a reusable workflow) and ``steps[].uses`` (an action) are
+        read, and only that one string per entry: ``with``, ``env`` and ``secrets`` are never
+        visited. Each reference is an ``IMPORTS_FROM`` edge from the file to
+        ``external:github-actions:<owner/repo[/path]>`` (the ref stays in ``extra``); a
+        ``./`` reference that names an existing file or action directory points at that file.
+        Capped at ``MAX_INFRA_REFERENCES_PER_FILE``; a malformed entry is skipped.
+        """
+        original = normalize_file_path(path).split("/")
+        github_index = is_github_workflow_path(tuple(part.lower() for part in original))
+        if github_index is None:
+            return
+        repo_dir = "/".join(original[:github_index])
+
+        found: list[tuple[str, str, str, Any]] = []  # (scope, job, uses text, node)
+
+        def add_uses(scope: str, job: str, mapping: object) -> None:
+            if not isinstance(mapping, _YamlMapping):
+                return
+            node = _yaml_get_key(mapping, "uses")
+            text = _yaml_scalar(node) if node is not None else None
+            if text is not None:
+                found.append((scope, job, text, node))
+
+        def add_steps(job: str, mapping: object) -> None:
+            if not isinstance(mapping, _YamlMapping):
+                return
+            steps = _yaml_get_key(mapping, "steps")
+            if isinstance(steps, _YamlSequence):
+                for step in steps.value:
+                    add_uses("step", job, step)
+
+        for document in documents:
+            if not isinstance(document, _YamlMapping):
+                continue
+            jobs = _yaml_get_key(document, "jobs")
+            if isinstance(jobs, _YamlMapping):
+                for job_key, job in jobs.value:
+                    job_id = _yaml_scalar(job_key) or ""
+                    add_uses("job", job_id, job)
+                    add_steps(job_id, job)
+            add_steps("", _yaml_get_key(document, "runs"))
+
+        references: list[dict[str, Any]] = []
+        for scope, job, text, node in found:
+            if len(references) >= MAX_INFRA_REFERENCES_PER_FILE:
+                file_extra["infra_references_truncated"] = True
+                break
+            parts = parse_github_uses(text, scope)
+            if parts is None:
+                continue
+            parts["scope"] = scope
+            if job:
+                parts["job"] = job
+            line = _yaml_line(node)
+            parts["line"] = line
+            target = self._github_actions_target(parts, repo_dir)
+            references.append(parts)
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM", source=file_path, target=target,
+                file_path=file_path, line=line,
+                extra={"resolution": "github_actions_uses", **parts},
+            ))
+        if references:
+            file_extra["github_actions_uses"] = references
+
+    def _github_actions_target(self, parts: dict[str, Any], repo_dir: str) -> str:
+        """Edge target for one parsed ``uses`` value (see ``parse_github_uses``)."""
+        kind = parts["kind"]
+        if kind == "docker":
+            image = parts.get("image")
+            return docker_image_target(image) if image else DYNAMIC_GITHUB_ACTIONS_TARGET
+        if kind == "local":
+            local = parts["local_path"]
+            base = Path(repo_dir) if repo_dir else Path(".")
+            candidate = Path(os.path.normpath(base / local))
+            probe = candidate if candidate.is_absolute() or self._repo_root is None else (
+                self._repo_root / candidate
+            )
+            for name in ("", "action.yml", "action.yaml"):
+                found = probe / name if name else probe
+                if found.is_file():
+                    return normalize_file_path(candidate / name if name else candidate)
+            return local
+        if not parts.get("owner_repo"):
+            return DYNAMIC_GITHUB_ACTIONS_TARGET
+        return github_actions_target(parts["owner_repo"], parts.get("path", ""))
 
     def _parse_json(
         self,
