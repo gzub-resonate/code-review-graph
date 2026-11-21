@@ -146,6 +146,7 @@ class _Index:
         self.types: dict[str, _Type] = {}
         self.file_types: dict[str, list[_Type]] = {}
         self.functions: dict[str, tuple[str, str]] = {}  # qn -> (name, file)
+        self.private: set[str] = set()  # members subclasses cannot see
         self.members: dict[tuple[str, str], list[str]] = {}
         self.nested: dict[tuple[str, str], list[_Type]] = {}
         self.contained_by: dict[str, str] = {}
@@ -162,10 +163,12 @@ class _Index:
             "ORDER BY qualified_name",
         ).fetchall():
             self.all_qns.add(row["qualified_name"])
+            extra = _extra(row["extra"])
             if row["kind"] != "Class":
                 self.functions[row["qualified_name"]] = (row["name"], row["file_path"])
+                if extra.get("scala_private"):
+                    self.private.add(row["qualified_name"])
                 continue
-            extra = _extra(row["extra"])
             kind = extra.get("scala_kind")
             if not isinstance(kind, str):
                 continue
@@ -435,6 +438,8 @@ class _Index:
             return [], False
         seen.add(node.qn)
         own = self.members.get((node.qn, name))
+        if own and depth:
+            own = [qn for qn in own if qn not in self.private]
         if own:
             return sorted(set(own)), False
         parents, unknown = self.parents(node)
@@ -506,6 +511,26 @@ def _declared_type(index: _Index, extra: dict, ctx: _Context) -> list[_Type]:
     return []
 
 
+def _apply_outcome(index: _Index, nodes) -> Optional[_Outcome]:
+    """``Foo(...)``: an object's ``apply``, or a case class's own constructor.
+
+    A case class with an explicit ``apply`` on its companion has two: the one
+    written and the one the compiler adds. Nothing at the call says which.
+    """
+    objects = _objects(nodes)
+    cases = [n for n in nodes if n.kind == "case_class"]
+    explicit = (
+        _members_outcome(index, objects, "apply", "apply", ",".join(o.qn for o in objects))
+        if objects else None
+    )
+    if cases and len(cases) == 1:
+        if explicit is None:
+            return _Outcome([cases[0].qn], "case_class_constructor", cases[0].qn)
+        targets = sorted({*explicit.targets, cases[0].qn})
+        return _Outcome(targets[:_MAX_CANDIDATES], "apply", ambiguous=True)
+    return explicit
+
+
 def _resolve_call(index: _Index, extra: dict, ctx: _Context) -> Optional[_Outcome]:
     form = extra.get("scala_form")
     name = extra.get("scala_name")
@@ -566,12 +591,10 @@ def _resolve_call(index: _Index, extra: dict, ctx: _Context) -> Optional[_Outcom
     outcome = _members_outcome(
         index, objects, name, "object_member", ",".join(sorted(o.qn for o in objects)),
     )
-    if outcome is None and name == "apply":
-        cases = [
-            n for n in index.resolve_type_path(receiver, ctx)[1] if n.kind == "case_class"
-        ]
-        if len(cases) == 1:
-            return _Outcome([cases[0].qn], "case_class_apply", cases[0].qn)
+    if name == "apply":
+        found = index.resolve_type_path(receiver, ctx)[1]
+        if any(n.kind == "case_class" for n in found):
+            return _apply_outcome(index, found)
     return outcome
 
 
@@ -584,17 +607,7 @@ def _resolve_bare(index: _Index, name: str, ctx: _Context) -> Optional[_Outcome]
             return _Outcome(
                 sorted(n.qn for n in nodes)[:_MAX_CANDIDATES], "apply", ambiguous=True,
             )
-        objects = _objects(nodes)
-        outcome = (
-            _members_outcome(index, objects, "apply", "apply", ",".join(o.qn for o in objects))
-            if objects else None
-        )
-        if outcome is not None:
-            return outcome
-        cases = [n for n in nodes if n.kind == "case_class"]
-        if len(cases) == 1:
-            return _Outcome([cases[0].qn], "case_class_constructor", cases[0].qn)
-        return None
+        return _apply_outcome(index, nodes)
     if ctx.unknown_enclosing:
         return None
     # Members of the enclosing types, innermost first.

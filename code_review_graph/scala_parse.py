@@ -132,6 +132,23 @@ def class_extra(node) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def function_extra(node) -> dict:
+    """``extra`` for a Scala ``def``: whether subclasses can see it.
+
+    A plain ``private`` or ``private[this]`` member is not inherited, so a call
+    in a subclass cannot mean it. ``private[pkg]`` is visible inside ``pkg``.
+    """
+    for child in node.children:
+        if child.type != "modifiers":
+            continue
+        for modifier in child.children:
+            if modifier.type == "access_modifier" and _text(modifier).replace(
+                " ", "",
+            ) in ("private", "private[this]"):
+                return {"scala_private": True}
+    return {}
+
+
 def import_specs(node) -> list[dict]:
     """What one ``import`` statement brings in.
 
