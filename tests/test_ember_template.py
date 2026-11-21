@@ -119,6 +119,10 @@ _HOSTILE = {
     "unclosed_tags": "<div " * 100_000,
     "unclosed_quotes_in_tags": "<a b='{{" * 50_000,
     "raw_openers": "{{{{" * 200_000,
+    "raw_blocks_without_closer": "{{{{a}}}}" * 100_000,
+    "raw_blocks_other_closer": "{{{{a}}}} {{{{/b}}}}" * 45_000,
+    "raw_blocks_nested_openers": "{{{{a}}}}{{{{b}}}}{{{{c}}}}" * 33_000,
+    "raw_stray_closers": "{{{{/a}}}}" * 90_000,
 }
 
 
@@ -143,3 +147,9 @@ def test_work_budget_stops_a_file_that_is_all_long_spans() -> None:
     started = time.perf_counter()
     et.scan(chunk * 60)
     assert time.perf_counter() - started < 3.0
+
+
+def test_raw_block_hides_its_body_and_an_unclosed_one_hides_the_rest() -> None:
+    assert _found("{{{{raw}}}}{{ghost-a}}{{{{/raw}}}}{{real-b}}") == [("invocable", "real-b")]
+    assert _found("{{real-a}}{{{{raw}}}}{{ghost-b}}") == [("invocable", "real-a")]
+    assert _found("{{{{a}}}}{{ghost-c}}{{{{/b}}}}") == []

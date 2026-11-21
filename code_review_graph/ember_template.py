@@ -283,10 +283,16 @@ def scan(text: str) -> list[Invocation]:
                     end = text.find("--}}", start + 5)
                     i = n if end < 0 else end + 4
                 elif text.startswith("{{{{", start):
-                    # Raw block: skip to its own ``{{{{/name}}}}``.
+                    # Raw block: skip to its own ``{{{{/name}}}}``. With no such
+                    # closer the rest of the file is raw, so no later opener
+                    # rescans the same tail.
                     named = _RAW_NAME_RE.match(text, start + 4)
-                    close = text.find("{{{{/" + named.group(0), start + 4) if named else -1
-                    end = text.find("}}}}", close if close >= 0 else start + 4)
+                    if named:
+                        close = text.find("{{{{/" + named.group(0), start + 4)
+                        end = text.find("}}}}", close) if close >= 0 else -1
+                    else:
+                        end = text.find("}}}}", start + 4)
+                    charge((n if end < 0 else end) - start)
                     i = n if end < 0 else end + 4
                 else:
                     end = skip(text, start)
