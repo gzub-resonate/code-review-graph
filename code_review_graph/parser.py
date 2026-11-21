@@ -53,10 +53,13 @@ from .infra_references import (
     MAX_DOCKERFILE_BYTES,
     MAX_DOCKERFILE_LINES,
     MAX_INFRA_REFERENCES_PER_FILE,
+    clean_stage_alias,
     docker_image_target,
+    format_docker_image,
     github_actions_target,
     is_dockerfile_name,
     is_github_workflow_path,
+    is_plain_local_path,
     is_reference_text,
     parse_docker_image,
     parse_github_uses,
@@ -11604,7 +11607,9 @@ class CodeParser:
             image = parts.get("image")
             return docker_image_target(image) if image else DYNAMIC_GITHUB_ACTIONS_TARGET
         if kind == "local":
-            local = parts["local_path"]
+            local = parts.get("local_path")
+            if not local:
+                return DYNAMIC_GITHUB_ACTIONS_TARGET
             base = Path(repo_dir) if repo_dir else Path(".")
             return self._confined_local_file(
                 base, local, ("", "action.yml", "action.yaml"),
@@ -11626,7 +11631,8 @@ class CodeParser:
         ``external:docker-image:<name>`` with ``tag``, ``digest`` and ``stage`` in ``extra``;
         ``FROM <stage>`` and ``COPY --from=<stage or index>`` give a ``DEPENDS_ON`` edge from
         stage to stage. An image that uses a build argument (``FROM ${BASE}``) is recorded
-        as dynamic with its raw text and is not resolved. ``ARG``, ``ENV``, ``LABEL`` and
+        as dynamic with no name and is not resolved. The image text itself is never stored:
+        only its name, tag and digest, without credentials or query. ``ARG``, ``ENV``, ``LABEL`` and
         every other instruction are never read.
         """
         file_path = normalize_file_path(path)
@@ -11702,7 +11708,9 @@ class CodeParser:
                 if spec is None:
                     continue
                 raw = text(spec).strip()
-                alias = text(alias_node).strip() if alias_node is not None else ""
+                alias = clean_stage_alias(
+                    text(alias_node).strip() if alias_node is not None else ""
+                )
                 index = len(stages)
                 key = alias.lower()
                 name = f"stage:{alias}" if alias and key not in stage_by_alias else f"stage:{index}"
@@ -11711,7 +11719,8 @@ class CodeParser:
                     line_end=node.end_point[0] + 1, language="dockerfile",
                     extra={
                         "dockerfile_type": "stage", "stage_index": index,
-                        "stage_name": alias, "base_image": raw,
+                        "stage_name": alias,
+                        "base_image": format_docker_image(parse_docker_image(raw)),
                     },
                 )
                 stages.append(stage)
@@ -13558,9 +13567,11 @@ class CodeParser:
         Only ``terraform.source``, ``include.path`` and ``dependency.config_path`` are read.
         ``inputs``, ``locals``, ``mock_outputs`` and every other attribute are not visited. A
         string with an interpolation or a function call (``find_in_parent_folders()``) is
-        recorded as dynamic with its raw text. A local path resolves to the file or module it
-        names, as a ``.tf`` module ``source`` does; a remote source points at
-        ``external:terraform-module:<address>`` with the ``ref`` in ``extra``.
+        recorded as dynamic and its text is not stored. A local path resolves to the file or
+        module it names, as a ``.tf`` module ``source`` does; a remote source points at
+        ``external:terraform-module:<address>`` with the ``ref`` in ``extra``. Credentials and
+        query parameters other than ``ref`` and ``version`` are dropped, and the raw source is
+        never stored.
         """
         attribute = _TERRAGRUNT_REFERENCE_ATTRIBUTES[block_type]
         found = self._terragrunt_attribute(body_node, attribute)
@@ -13568,26 +13579,26 @@ class CodeParser:
             return
         raw, is_literal, attr_line = found
         extra: dict[str, Any] = {
-            "resolution": "terragrunt_reference", "block": block_type, "raw": raw,
+            "resolution": "terragrunt_reference", "block": block_type,
             "dynamic": not is_literal,
         }
         if labels:
             extra["name"] = labels[0]
-        if not is_literal:
-            target = EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
-        elif block_type == "terraform":
+        target = EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        if is_literal and block_type == "terraform":
             parts = parse_terragrunt_source(raw)
             extra.update(
                 source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
             )
             if parts["kind"] == "local":
-                target = self._terragrunt_local_target(raw, file_path)
+                if is_plain_local_path(raw):
+                    target = self._terragrunt_local_target(raw, file_path)
             elif parts["base"]:
                 target = EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
-            else:
-                target = raw
-        else:
+        elif is_literal and is_plain_local_path(raw):
             target = self._terragrunt_local_target(raw, file_path)
+        if target == EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET:
+            extra["dynamic"] = True
         edges.append(EdgeInfo(
             kind="IMPORTS_FROM", source=file_path, target=target,
             file_path=file_path, line=attr_line or line, extra=extra,
