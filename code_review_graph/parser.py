@@ -11948,7 +11948,7 @@ class CodeParser:
                     if target_qualified is None:
                         machine_extra["unresolved_transitions"] += 1
                         return
-                    edge_extra = {"via": via}
+                    edge_extra: dict[str, Any] = {"via": via}
                     if index is not None:
                         edge_extra["index"] = index
                     edges.append(EdgeInfo(
