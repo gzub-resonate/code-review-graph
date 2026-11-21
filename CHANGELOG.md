@@ -6,8 +6,8 @@
 
 - AWS Step Functions state machines are indexed. A file named `*.asl.json` or
   `*.asl` is read as a state machine instead of as generic JSON, so it no longer
-  adds a `JsonPath` node for every key (on two real repositories its 72
-  definitions went from about 20,900 nodes to about 2,900). Each machine is a
+  adds a `JsonPath` node for every key (on two real repositories, 61
+  definitions went from about 20,900 nodes to about 1,500). Each machine is a
   `Class` node and each state a `Function` node, with its type, whether it
   starts the machine or ends it, and, for a Task, the kind of service it calls.
   Parallel branches and Map processors are included, and a state keeps a
