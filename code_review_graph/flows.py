@@ -809,7 +809,7 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
 #: Metadata flags a resolver sets when it rebinds calls in files that were not
 #: reparsed, so callers and entry points can change anywhere. A resolver with
 #: that property adds its key here.
-FLOWS_DIRTY_KEYS = ("csharp_flows_dirty",)
+FLOWS_DIRTY_KEYS = ("csharp_flows_dirty", "scala_flows_dirty")
 
 
 def flows_dirty(store: GraphStore) -> bool:
@@ -839,7 +839,7 @@ def incremental_trace_flows(
     Returns the number of re-traced flows that were stored.
     """
     if flows_dirty(store):
-        # C# rebinding can change callers and entry points in files that were
+        # C# and Scala rebinding can change callers and entry points in files that were
         # never reparsed, so a changed-file set cannot bound the work. Retrace
         # in full until the binder reports a complete affected set.
         return store_flows(store, trace_flows(store, max_depth=max_depth))
