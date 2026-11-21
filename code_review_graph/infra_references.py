@@ -269,6 +269,10 @@ EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET = "external:terragrunt:dynamic"
 #: Target prefix of a remote Terraform module source (git, registry, archive).
 EXTERNAL_TERRAFORM_MODULE_PREFIX = "external:terraform-module:"
 
+#: Target of a remote Terraform ``module`` source that cannot be reduced safely, for example
+#: one with an ambiguous credential. Its text is not stored.
+EXTERNAL_DYNAMIC_TERRAFORM_TARGET = EXTERNAL_TERRAFORM_MODULE_PREFIX + "dynamic"
+
 _GETTER_PREFIX = re.compile(r"^([A-Za-z0-9]+)::")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
