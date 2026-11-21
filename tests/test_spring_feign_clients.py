@@ -305,3 +305,13 @@ def test_same_named_feign_interfaces_in_one_file_keep_distinct_endpoints(
     assert len(endpoints) == 2
     assert len({n.name for n in endpoints}) == 2
     assert len({e.target for e in edges if e.kind == SPRING_FEIGN_EDGE_KIND}) == 2
+
+
+def test_feign_client_interface_is_not_reported_as_dead_code(tmp_path: Path) -> None:
+    from code_review_graph.refactor import find_dead_code
+
+    path, nodes, edges = _parse(tmp_path, CLIENT_SOURCE)
+    with GraphStore(tmp_path / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges, "hash")
+        dead = {d["name"] for d in find_dead_code(store, kind="Class")}
+    assert "BillingClient" not in dead
