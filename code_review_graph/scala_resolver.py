@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TRUST_OUTSIDE_PARENTS = os.environ.get("CRG_SCALA_TRUST_OUTSIDE") == "1"
 _MAX_CANDIDATES = 20
 _MAX_INHERITANCE_DEPTH = 25
 _MAX_CHAIN_DEPTH = 50
@@ -202,6 +204,8 @@ class _Index:
         self.file_types: dict[str, list[_Type]] = {}
         self.functions: dict[str, tuple[str, str]] = {}  # qn -> (name, file)
         self.private: set[str] = set()  # members subclasses cannot see
+        self.overrides: set[str] = set()  # members declared with ``override``
+        self._open_cache: dict[str, bool] = {}
         self.arity: dict[str, tuple[int, float]] = {}  # qn -> (min, max) arguments
         self.members: dict[tuple[str, str], list[str]] = {}
         self.nested: dict[tuple[str, str], list[_Type]] = {}
@@ -225,6 +229,8 @@ class _Index:
                 self.functions[row["qualified_name"]] = (row["name"], row["file_path"])
                 if extra.get("scala_private"):
                     self.private.add(row["qualified_name"])
+                if extra.get("scala_override"):
+                    self.overrides.add(row["qualified_name"])
                 bounds = _arity_bounds(row["params"])
                 if bounds is not None:
                     self.arity[row["qualified_name"]] = bounds
@@ -449,6 +455,27 @@ class _Index:
 
     # -- inheritance and members ------------------------------------------
 
+    def has_outside_ancestor(self, node: _Type) -> bool:
+        """Whether *node* or an in-repository ancestor extends something unknown."""
+        cached = self._open_cache.get(node.qn)
+        if cached is not None:
+            return cached
+        found = False
+        stack = [node]
+        seen: set[str] = set()
+        while stack and len(seen) <= 200:
+            current = stack.pop()
+            if current.qn in seen:
+                continue
+            seen.add(current.qn)
+            parents, unknown = self.parents(current)
+            if unknown:
+                found = True
+                break
+            stack.extend(parents)
+        self._open_cache[node.qn] = found
+        return found
+
     def parents(self, node: _Type) -> tuple[list[_Type], bool]:
         """In-repository parents of a type, and whether any parent is not one."""
         cached = self._parents_cache.get(node.qn)
@@ -553,6 +580,20 @@ def _fits(index: _Index, qns, argc: Optional[int]) -> list[str]:
     ]
 
 
+def _declared_here(index: _Index, owners, found) -> set[str]:
+    """Drop a member an outside parent might overload rather than override.
+
+    When a type extends something outside the repository, a ``def get(a, b)``
+    written without ``override`` can sit next to a ``get`` that parent declares,
+    and the call may mean the parent's. With ``override`` the two are one method.
+    """
+    if _TRUST_OUTSIDE_PARENTS or not found:
+        return set(found)
+    if not any(index.has_outside_ancestor(owner) for owner in owners):
+        return set(found)
+    return {qn for qn in found if qn in index.overrides}
+
+
 def _members_outcome(
     index: _Index, owners, name: str, rule: str, via: str, argc: Optional[int] = None,
 ) -> Optional[_Outcome]:
@@ -564,6 +605,7 @@ def _members_outcome(
     # A declaration that cannot take this many arguments is another overload
     # (often one an out-of-repository parent declares).
     found = set(_fits(index, found, argc))
+    found = _declared_here(index, owners, found)
     if not found:
         return None
     targets = sorted(found)
@@ -710,7 +752,7 @@ def _resolve_bare(
     chain_unknown = False
     for enclosing in ctx.chain:
         found, unknown = index.find_members(enclosing, name)
-        hits = _fits(index, found, argc)
+        hits = sorted(_declared_here(index, [enclosing], _fits(index, found, argc)))
         if found and not hits:
             # Declared here, but not for this many arguments: another overload,
             # most likely an out-of-repository parent's.
