@@ -121,8 +121,8 @@ code-review-graph query callers_of <target>    # Takes every query_graph_tool pa
                                                 #   references_to, callees_of, imports_of, importers_of,
                                                 #   children_of, tests_for, inheritors_of, triggers_of,
                                                 #   triggered_by, publishers_of, listeners_of, advises,
-                                                #   advised_by, handlers_of, endpoints_for, consumers_of,
-                                                #   file_summary, path_to
+                                                #   advised_by, handlers_of, endpoints_for, requests_of,
+                                                #   requesters_of, consumers_of, file_summary, path_to
 code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
 code-review-graph impact [--files F ...] [--depth N] [--max-results N] [--base REF] [--detail-level compact] [--max-files N]
 code-review-graph search <query> [--kind Function] [--limit N]
@@ -535,7 +535,8 @@ code-review-graph impact --files src/auth.py --detail-level minimal
 pattern: str    # callers_of, references_to, callees_of, imports_of, importers_of,
                 # children_of, tests_for, inheritors_of, triggers_of, triggered_by,
                 # publishers_of, listeners_of, advises, advised_by, handlers_of,
-                # endpoints_for, consumers_of, file_summary, path_to
+                # endpoints_for, requests_of, requesters_of, consumers_of,
+                # file_summary, path_to
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"

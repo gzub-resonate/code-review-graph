@@ -423,6 +423,10 @@ IMPORT_CONTEXT_DEFERRED = "deferred"
 #: the sibling, and a file's own package is already loaded before the file is.
 IMPORT_CONTEXT_PARENT_PACKAGE = "parent_package"
 
+#: Edge kind from a Spring Cloud OpenFeign client method to its outbound Endpoint
+#: node. One constant, so the direction can be renamed in one place.
+SPRING_FEIGN_EDGE_KIND = "REQUESTS"
+
 #: Every ``query_graph`` pattern and what it finds. The MCP tool and the CLI
 #: ``query`` command both take these, so a new one reaches both.
 QUERY_PATTERNS = {
@@ -442,6 +446,8 @@ QUERY_PATTERNS = {
     "advised_by": "Find AOP advice methods that intercept a given method",
     "handlers_of": "Find methods that handle an endpoint",
     "endpoints_for": "Find endpoints handled by a method",
+    "requests_of": "Find outbound HTTP endpoints a client method requests",
+    "requesters_of": "Find client methods that request an outbound endpoint",
     "consumers_of": "Find classes that consume a Spring configuration property",
     "file_summary": "Get a summary of all nodes in a file",
     "path_to": "Find how a given symbol or file reaches another",

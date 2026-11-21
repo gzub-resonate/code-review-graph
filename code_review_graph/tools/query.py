@@ -15,6 +15,7 @@ from ..constants import (
     IMPORT_SCOPE_KEY,
     MAX_IMPACT_NODES,
     QUERY_PATTERNS,
+    SPRING_FEIGN_EDGE_KIND,
 )
 from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
@@ -1031,8 +1032,8 @@ def query_graph(
         pattern: Query pattern. One of: callers_of, references_to, callees_of,
                  imports_of, importers_of, children_of, tests_for, inheritors_of,
                  triggers_of, triggered_by, publishers_of, listeners_of,
-                 handlers_of, endpoints_for, consumers_of, advises, advised_by,
-                 file_summary, path_to.
+                 handlers_of, endpoints_for, requests_of, requesters_of,
+                 consumers_of, advises, advised_by, file_summary, path_to.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -1679,6 +1680,26 @@ def query_graph(
                 if endpoint and endpoint.kind == "Endpoint":
                     add_result(node_to_dict(endpoint), edge)
                 elif endpoint is None:
+                    edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "requests_of":
+            for edge in store.get_edges_by_source(qn):
+                if edge.kind != SPRING_FEIGN_EDGE_KIND:
+                    continue
+                endpoint = store.get_node(edge.target_qualified)
+                if endpoint and endpoint.kind == "Endpoint":
+                    add_result(node_to_dict(endpoint), edge)
+                elif endpoint is None:
+                    edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "requesters_of":
+            for edge in store.get_edges_by_target(qn):
+                if edge.kind != SPRING_FEIGN_EDGE_KIND:
+                    continue
+                requester = store.get_node(edge.source_qualified)
+                if requester:
+                    add_result(node_to_dict(requester), edge)
+                else:
                     edges_out.append(edge_to_dict(edge))
 
         elif pattern == "consumers_of":
