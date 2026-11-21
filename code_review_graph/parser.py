@@ -1920,6 +1920,12 @@ _SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
     "EventListener",
 })
 
+# Stereotypes whose ``value`` names the bean
+_SPRING_BEAN_NAME_ANNOTATIONS = frozenset({
+    "Component", "Service", "Repository", "Controller", "RestController",
+    "Configuration",
+})
+
 # Spring DI injection annotations (field/setter/constructor-level)
 _SPRING_INJECT_ANNOTATIONS = frozenset({
     "Autowired", "Inject", "Resource",
@@ -15359,6 +15365,59 @@ class CodeParser:
                     values.extend(self._spring_config_string_literals(argument))
         return values
 
+    def _spring_annotation_literal(self, annotation_node) -> tuple[Optional[str], bool]:
+        """Read the ``value`` argument of a Java annotation as one string literal.
+
+        Returns ``(value, dynamic)``.  ``dynamic`` is true when the annotation
+        names a value that is not a plain string literal (a constant or an
+        expression), so a caller must not guess what it stands for.
+        """
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type == "element_value_pair":
+                    named = [part for part in argument.children if part.is_named]
+                    if len(named) < 2 or named[0].text.decode("utf-8", "replace") != "value":
+                        continue
+                    argument = named[-1]
+                elif not argument.is_named:
+                    continue
+                if argument.type == "string_literal":
+                    text = argument.text.decode("utf-8", errors="replace")
+                    if len(text) >= 2 and "\\" not in text:
+                        return text[1:-1], False
+                return None, True
+        return None, False
+
+    def _spring_qualifier_extra(self, owner_node) -> dict:
+        """``qualifier`` extra for a field or parameter carrying ``@Qualifier``."""
+        for annotation in self._java_annotations_named(owner_node, frozenset({"Qualifier"})):
+            value, _ = self._spring_annotation_literal(annotation)
+            return {"qualifier": value} if value else {"qualifier_dynamic": True}
+        return {}
+
+    def _spring_bean_identity_extra(self, class_node) -> dict:
+        """Bean name and qualifier values declared on a Spring component class."""
+        extra: dict = {}
+        qualifiers: list[str] = []
+        for annotation in self._java_annotations_named(
+            class_node,
+            _SPRING_BEAN_NAME_ANNOTATIONS | frozenset({"Qualifier"}),
+        ):
+            name = self._java_annotation_name(annotation)
+            value, dynamic = self._spring_annotation_literal(annotation)
+            if name == "Qualifier":
+                if value:
+                    qualifiers.append(value)
+            elif value:
+                extra.setdefault("spring_bean_name", value)
+            elif dynamic:
+                extra["spring_bean_name_dynamic"] = True
+        if qualifiers:
+            extra["spring_qualifiers"] = sorted(set(qualifiers))
+        return extra
+
     def _emit_spring_config_edges(
         self,
         class_node,
@@ -15546,6 +15605,7 @@ class CodeParser:
                 "injection_type": injection_type,
                 "field_name": field_name,
             }
+            extra.update(self._spring_qualifier_extra(field_node))
             if import_map is not None:
                 extra["java_type"] = self._spring_java_type(field_type, import_map)
             edges.append(EdgeInfo(
@@ -15587,6 +15647,7 @@ class CodeParser:
                     extra: dict = {"injection_type": "constructor"}
                     if param_name:
                         extra["field_name"] = param_name
+                    extra.update(self._spring_qualifier_extra(param))
                     if import_map is not None:
                         extra["java_type"] = self._spring_java_type(param_type, import_map)
                     edges.append(EdgeInfo(
@@ -16682,6 +16743,7 @@ class CodeParser:
                 extra["spring_stereotype"] = spring_stereotypes[0]
             if class_annotations:
                 extra["spring_annotations"] = class_annotations
+            extra.update(self._spring_bean_identity_extra(child))
             temporal_roles = [
                 a for a in class_annotations if a in _TEMPORAL_INTERFACE_ANNOTATIONS
             ]
