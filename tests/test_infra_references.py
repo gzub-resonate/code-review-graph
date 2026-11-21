@@ -8,6 +8,7 @@ graph stays value-free: only the allowlisted reference strings are stored, never
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -550,3 +551,159 @@ def test_terragrunt_sources_answer_who_uses_module_x(tmp_path: Path) -> None:
         ]
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# Local references never leave the repository or reach an excluded file
+# ---------------------------------------------------------------------------
+
+
+def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
+    """A repository root and a sibling directory outside it holding real files."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "dir").mkdir(parents=True)
+    (outside / "terragrunt.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (outside / "dir/terragrunt.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (outside / "dir/main.tf").write_text('variable "a" {}\n')
+    (outside / "dir/action.yml").write_text("runs:\n  using: composite\n  steps: []\n")
+    return repo, outside
+
+
+def _parse_excluding(
+    root: Path, rel: str, text: str, excluded: set[Path],
+) -> list[EdgeInfo]:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    parser = CodeParser(repo_root=root)
+    parser.exclude_files({str(p) for p in excluded})
+    return parser.parse_bytes(path, path.read_bytes())[1]
+
+
+def _tg_targets(root: Path, body: str) -> list[str]:
+    _nodes, edges = _parse(root, "live/terragrunt.hcl", body)
+    return [e.target for e in _imports(edges)]
+
+
+@pytest.mark.parametrize("attribute", ["include", "dependency", "terraform"])
+def test_terragrunt_path_outside_repo_is_not_resolved(tmp_path: Path, attribute: str) -> None:
+    repo, outside = _make_repo(tmp_path)
+    key = {"include": "path", "dependency": "config_path", "terraform": "source"}[attribute]
+    label = ' "x"' if attribute != "terraform" else ""
+    for raw in (
+        "../../outside/terragrunt.hcl",
+        "../../outside/dir",
+        (outside / "terragrunt.hcl").as_posix(),
+        outside.as_posix() + "/dir",
+    ):
+        body = f'{attribute}{label} {{\n  {key} = "{raw}"\n}}\n'
+        assert _tg_targets(repo, body) == [raw]
+
+
+def test_terragrunt_absolute_path_inside_repo_is_not_probed(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "common.hcl").write_text('locals {\n  a = "b"\n}\n')
+    raw = (repo / "common.hcl").as_posix()
+    assert _tg_targets(repo, f'include "c" {{\n  path = "{raw}"\n}}\n') == [raw]
+
+
+def test_terragrunt_inside_repo_still_resolves_with_children(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "vpc").mkdir()
+    (repo / "vpc/terragrunt.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (repo / "net").mkdir()
+    (repo / "net/main.tf").write_text('variable "a" {}\n')
+    body = (
+        'dependency "v" {\n  config_path = "../vpc"\n}\n'
+        'terraform {\n  source = "../net"\n}\n'
+    )
+    assert _tg_targets(repo, body) == [
+        (repo / "vpc/terragrunt.hcl").as_posix(),
+        (repo / "net/main.tf").as_posix(),
+    ]
+
+
+def test_terragrunt_excluded_files_are_not_resolved(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "hidden").mkdir()
+    (repo / "hidden/terragrunt.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (repo / "secret.hcl").write_text('locals {\n  a = "b"\n}\n')
+    edges = _parse_excluding(
+        repo, "live/terragrunt.hcl",
+        'include "c" {\n  path = "../secret.hcl"\n}\n'
+        'dependency "h" {\n  config_path = "../hidden"\n}\n',
+        {repo / "secret.hcl", repo / "hidden/terragrunt.hcl"},
+    )
+    assert [e.target for e in _imports(edges)] == ["../secret.hcl", "../hidden"]
+
+
+def _symlink(link: Path, target: Path) -> None:
+    try:
+        os.symlink(target, link, target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not available")
+
+
+def test_terragrunt_symlink_leaving_repo_is_not_followed(tmp_path: Path) -> None:
+    repo, outside = _make_repo(tmp_path)
+    _symlink(repo / "link.hcl", outside / "terragrunt.hcl")
+    _symlink(repo / "linkdir", outside / "dir")
+    body = (
+        'include "c" {\n  path = "../link.hcl"\n}\n'
+        'dependency "d" {\n  config_path = "../linkdir"\n}\n'
+    )
+    assert _tg_targets(repo, body) == ["../link.hcl", "../linkdir"]
+
+
+def test_terragrunt_symlink_inside_repo_resolves(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "real.hcl").write_text('locals {\n  a = "b"\n}\n')
+    _symlink(repo / "alias.hcl", repo / "real.hcl")
+    body = 'include "c" {\n  path = "../alias.hcl"\n}\n'
+    assert _tg_targets(repo, body) == [(repo / "alias.hcl").as_posix()]
+
+
+def _gha_targets(root: Path, uses: list[str], excluded: set[Path] | None = None) -> list[str]:
+    text = "jobs:\n  a:\n    steps:\n" + "".join(f"      - uses: {u}\n" for u in uses)
+    edges = _parse_excluding(root, ".github/workflows/ci.yml", text, excluded or set())
+    return [e.target for e in _imports(edges)]
+
+
+def test_github_actions_local_reference_outside_repo_is_not_resolved(tmp_path: Path) -> None:
+    repo, outside = _make_repo(tmp_path)
+    uses = [
+        "./../../../outside/dir",
+        "./../../../outside/dir/action.yml",
+        "./../../../outside/terragrunt.hcl",
+    ]
+    assert _gha_targets(repo, uses) == uses
+
+
+def test_github_actions_local_reference_inside_repo_still_resolves(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / ".github/actions/setup").mkdir(parents=True)
+    (repo / ".github/actions/setup/action.yml").write_text(
+        "runs:\n  using: composite\n  steps: []\n",
+    )
+    assert _gha_targets(repo, ["./.github/actions/setup"]) == [
+        (repo / ".github/actions/setup/action.yml").as_posix(),
+    ]
+
+
+def test_github_actions_excluded_local_reference_is_not_resolved(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / ".github/actions/setup").mkdir(parents=True)
+    action = repo / ".github/actions/setup/action.yml"
+    action.write_text("runs:\n  using: composite\n  steps: []\n")
+    assert _gha_targets(repo, ["./.github/actions/setup"], {action}) == [
+        "./.github/actions/setup",
+    ]
+
+
+def test_github_actions_symlink_leaving_repo_is_not_followed(tmp_path: Path) -> None:
+    repo, outside = _make_repo(tmp_path)
+    (repo / ".github/actions").mkdir(parents=True)
+    _symlink(repo / ".github/actions/ext", outside / "dir")
+    assert _gha_targets(repo, ["./.github/actions/ext"]) == ["./.github/actions/ext"]

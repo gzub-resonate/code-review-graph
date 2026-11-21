@@ -41,7 +41,9 @@ one target and a query by target finds them all.
 A local reference points at the file it names when that file exists in the repository: a
 workflow `uses: ./.github/workflows/x.yml`, a local action directory (its `action.yml`), a
 Terragrunt `include` path, a `dependency` directory (its `terragrunt.hcl`) and a local module
-source. When the file is missing the edge keeps the raw path.
+source. When the file is missing the edge keeps the raw path. Local references are only resolved
+inside the repository (no absolute paths, no `..` or symbolic link that leaves it) and never to an
+excluded or ignored file; any other reference keeps its raw path.
 
 `extra` on these edges:
 

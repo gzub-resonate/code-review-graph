@@ -11606,15 +11606,9 @@ class CodeParser:
         if kind == "local":
             local = parts["local_path"]
             base = Path(repo_dir) if repo_dir else Path(".")
-            candidate = Path(os.path.normpath(base / local))
-            probe = candidate if candidate.is_absolute() or self._repo_root is None else (
-                self._repo_root / candidate
-            )
-            for name in ("", "action.yml", "action.yaml"):
-                found = probe / name if name else probe
-                if found.is_file():
-                    return normalize_file_path(candidate / name if name else candidate)
-            return local
+            return self._confined_local_file(
+                base, local, ("", "action.yml", "action.yaml"),
+            ) or local
         if not parts.get("owner_repo"):
             return DYNAMIC_GITHUB_ACTIONS_TARGET
         return github_actions_target(parts["owner_repo"], parts.get("path", ""))
@@ -13638,15 +13632,52 @@ class CodeParser:
         resolved = self._resolve_module_to_file(raw, file_path, "hcl")
         if resolved:
             return resolved
-        base = Path(file_path).parent
+        return self._confined_local_file(
+            Path(file_path).parent, raw, ("", "terragrunt.hcl", "main.tf"),
+        ) or raw
+
+    def _confined_local_file(
+        self, base: Path, raw: str, children: tuple[str, ...],
+    ) -> Optional[str]:
+        """The existing file *raw* names below *base*, or ``None`` when it is not allowed.
+
+        Used for the local references of infrastructure files. An absolute *raw* is never
+        probed. Each probed path (*raw* itself, then each of *children* inside it) must
+        resolve, symbolic links included, to a file inside the repository root and must not
+        be an excluded file. Without a repository root only a relative path that stays
+        below the working directory is accepted.
+        """
+        if (
+            not raw
+            or Path(raw).is_absolute()
+            or raw.startswith(("/", "\\"))
+            or re.match(r"[A-Za-z]:", raw)
+        ):
+            return None
         candidate = Path(os.path.normpath(base / raw))
-        probe = candidate if candidate.is_absolute() or self._repo_root is None else (
-            self._repo_root / candidate
-        )
-        for name in ("", "terragrunt.hcl", "main.tf"):
-            if (probe / name if name else probe).is_file():
-                return normalize_file_path(candidate / name if name else candidate)
-        return raw
+        root = self._repo_root
+        if root is None:
+            if candidate.is_absolute() or candidate.parts[:1] == (os.pardir,):
+                return None
+            anchor = Path.cwd().resolve()
+        else:
+            anchor = root
+        for name in children:
+            target = candidate / name if name else candidate
+            probe = target if target.is_absolute() else anchor / target
+            try:
+                resolved = probe.resolve()
+                if not _path_is_within(resolved, anchor) or not resolved.is_file():
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if (
+                normalize_file_path(resolved) in self._excluded_files
+                or normalize_file_path(target) in self._excluded_files
+            ):
+                continue
+            return normalize_file_path(target)
+        return None
 
     def _emit_hcl_locals(
         self,
