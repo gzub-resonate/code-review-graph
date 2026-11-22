@@ -429,3 +429,50 @@ def test_impact_tables_know_transitions_and_radius_runs_on_a_state_machine(tmp_p
         assert result["changed_nodes"]
     finally:
         store.close()
+
+
+def _names(result):
+    return sorted(row["name"] for row in result["results"])
+
+
+def test_transition_patterns_list_neighbouring_states(tmp_path):
+    from code_review_graph.tools.query import query_graph
+
+    store = _build(tmp_path)
+    store.close()
+    root = str(tmp_path)
+    # A Choice rule and its Default each hand over to a state.
+    nxt = query_graph("next_states_of", "Route Order", repo_root=root)
+    assert _names(nxt) == ["Fan Out", "Manual Review"]
+    # Both of those, and the Manual Review step, lead into Fan Out.
+    prev = query_graph("previous_states_of", "Fan Out", repo_root=root)
+    assert _names(prev) == ["Manual Review", "Route Order"]
+    # The pattern never mixes in calls, containment or references.
+    assert all(row["kind"] == "Function" for row in nxt["results"] + prev["results"])
+
+
+def test_transition_patterns_are_empty_for_a_state_that_ends_the_machine(tmp_path):
+    from code_review_graph.tools.query import query_graph
+
+    store = _build(tmp_path)
+    store.close()
+    done = query_graph("next_states_of", "Done", repo_root=str(tmp_path))
+    assert done["status"] == "ok"
+    assert done["results"] == []
+
+
+def test_path_to_follows_transitions_between_states(tmp_path):
+    from code_review_graph.tools.query import query_graph
+
+    store = _build(tmp_path)
+    store.close()
+    root = str(tmp_path)
+    # The happy path runs through the whole machine.
+    route = query_graph("path_to", "Validate Order", to="Done", repo_root=root)
+    assert route["status"] == "ok" and route["result_count"] > 0
+    # A Catch handler is a route too.
+    caught = query_graph("path_to", "Validate Order", to="Reject Order", repo_root=root)
+    assert caught["result_count"] > 0
+    # A machine does not run backwards.
+    back = query_graph("path_to", "Done", to="Validate Order", repo_root=root)
+    assert back["result_count"] == 0

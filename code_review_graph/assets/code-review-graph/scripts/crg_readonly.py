@@ -19,6 +19,8 @@ QUERY_PATTERNS = (
     "children_of",
     "tests_for",
     "inheritors_of",
+    "next_states_of",
+    "previous_states_of",
     "triggers_of",
     "triggered_by",
     "publishers_of",

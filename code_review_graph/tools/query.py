@@ -394,6 +394,7 @@ _HOP_DIRECT, _HOP_UNIQUE_NAME, _HOP_SHARED_NAME = range(len(_HOP_CERTAINTY))
 # TESTED_BY stays out: "A is tested by a test that calls B" is no route from A to B.
 _ROUTE_EDGE_KINDS = frozenset({
     "CALLS", "REFERENCES", "INHERITS", "IMPLEMENTS", "IMPORTS_FROM", "CONTAINS",
+    "TRANSITIONS_TO",
 })
 _NAME_MATCH_EDGE_KINDS = frozenset({"CALLS", "REFERENCES", "INHERITS", "IMPLEMENTS"})
 # A bare name more symbols than this share says nothing about any one of them.
@@ -1030,8 +1031,9 @@ def query_graph(
     Args:
         pattern: Query pattern. One of: callers_of, references_to, callees_of,
                  imports_of, importers_of, children_of, tests_for, inheritors_of,
-                 triggers_of, triggered_by, publishers_of, listeners_of,
-                 handlers_of, endpoints_for, consumers_of, advises, advised_by,
+                 next_states_of, previous_states_of, triggers_of, triggered_by,
+                 publishers_of, listeners_of, handlers_of, endpoints_for, consumers_of,
+                 advises, advised_by,
                  file_summary, path_to.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
@@ -1609,6 +1611,28 @@ def query_graph(
                             if ambiguous_base:
                                 child_result["inferred_by"] = "bare_name"
                             add_result(child_result, e)
+
+        elif pattern in ("next_states_of", "previous_states_of"):
+            # A Step Functions state and the states it hands over to, or the
+            # states that hand over to it. Only TRANSITIONS_TO edges count.
+            forward = pattern == "next_states_of"
+            edges = (
+                store.get_edges_by_source(qn) if forward else store.get_edges_by_target(qn)
+            )
+            seen_states: set[str] = set()
+            for edge in edges:
+                if edge.kind != "TRANSITIONS_TO":
+                    continue
+                other_qn = edge.target_qualified if forward else edge.source_qualified
+                # A Choice rule and its Default can name the same state.
+                if other_qn in seen_states:
+                    continue
+                seen_states.add(other_qn)
+                other = store.get_node(other_qn)
+                if other:
+                    add_result(node_to_dict(other), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
 
         elif pattern == "triggers_of":
             for edge in store.get_edges_by_source(qn):

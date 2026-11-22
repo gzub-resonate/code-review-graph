@@ -13,7 +13,10 @@
   Parallel branches and Map processors are included, and a state keeps a
   unique name by the path of the states around it. New `TRANSITIONS_TO` edges
   follow the flow (`via` is `next`, `default`, `choice`, `catch`, `branch` or
-  `map`), and a Task that calls a Lambda function, a nested state machine, an
+  `map`). `query_graph_tool` has two new patterns, `next_states_of` and
+  `previous_states_of`, to list the states a state hands over to and the states
+  that hand over to it, and `path_to` now follows transitions from one state to
+  another. A Task that calls a Lambda function, a nested state machine, an
   ECS task, an SNS topic, an SQS queue, a DynamoDB table or a few other
   resources gets a `REFERENCES` edge to `external:aws-<service>:<name>`. Only
   the resource name is kept: no account ID, region, parameter, path, choice
