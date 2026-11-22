@@ -174,7 +174,44 @@ def _args(call: Any) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
-def static_text(node: Any, consts: dict[str, str], head: bool = True) -> Optional[str]:
+def is_query_suffix(node: Any) -> bool:
+    """Whether an expression is a query string or nothing.
+
+    That is ``''``, ``'?a=1'`` or ``cond ? `?${q}` : ''``.
+
+    Such a piece glued after a path (``/feeds${query}``) is the query part, not
+    a path parameter, so :func:`split_route` drops it with the rest.
+    """
+    node = _unwrap(node)
+    if node is None:
+        return False
+    if node.type == "string":
+        text = _string_literal(node)
+        return text is not None and (text == "" or text[0] in "?#")
+    if node.type == "template_string":
+        parts = [c for c in node.children if c.type != "`"]
+        if not parts:
+            return True
+        return parts[0].type != "template_substitution" and _text(parts[0])[:1] in ("?", "#")
+    if node.type in ("ternary_expression", "conditional_expression"):
+        return all(
+            is_query_suffix(node.child_by_field_name(field))
+            for field in ("consequence", "alternative")
+        )
+    if node.type == "binary_expression":
+        op = node.child_by_field_name("operator")
+        return op is not None and _text(op) == "+" and is_query_suffix(
+            node.child_by_field_name("left"),
+        )
+    return False
+
+
+def static_text(
+    node: Any,
+    consts: dict[str, str],
+    head: bool = True,
+    suffixes: frozenset[str] = frozenset(),
+) -> Optional[str]:
     """Fold a URL expression into text, ``{param}`` for each unknown piece.
 
     Handles string literals, template literals, ``+`` concatenation and
@@ -204,6 +241,10 @@ def static_text(node: Any, consts: dict[str, str], head: bool = True) -> Optiona
                         known = _string_literal(expr)
                     elif expr is not None and expr.type == "identifier":
                         known = consts.get(_text(expr))
+                        if known is None and _text(expr) in suffixes:
+                            known = "?"
+                    elif expr is not None and is_query_suffix(expr):
+                        known = "?"
                 if known is not None:
                     out.append(known)
                 elif head and first:
@@ -218,11 +259,13 @@ def static_text(node: Any, consts: dict[str, str], head: bool = True) -> Optiona
         op = node.child_by_field_name("operator")
         if op is None or _text(op) != "+":
             return None
-        left = static_text(node.child_by_field_name("left"), consts, head)
+        left = static_text(node.child_by_field_name("left"), consts, head, suffixes)
         if left is None:
             return None
         right_node = node.child_by_field_name("right")
-        right = static_text(right_node, consts, head=False)
+        right = "?" if is_query_suffix(right_node) else static_text(
+            right_node, consts, head=False, suffixes=suffixes,
+        )
         if right is None:
             # An unknown trailing piece is one path parameter, like ``${x}``.
             right = "{param}"
@@ -231,6 +274,8 @@ def static_text(node: Any, consts: dict[str, str], head: bool = True) -> Optiona
         name = _text(node)
         if name in consts:
             return consts[name]
+        if not head and name in suffixes:
+            return "?"
         return None if head else "{param}"
     return None if head else "{param}"
 
@@ -323,6 +368,8 @@ class _FileFacts:
 
     def __init__(self) -> None:
         self.consts: dict[str, str] = {}
+        #: names that only ever hold a query string (see ``is_query_suffix``)
+        self.suffixes: frozenset[str] = frozenset()
         #: local axios names -> (literal baseURL or None, baseURL given but not literal)
         self.instances: dict[str, tuple[Optional[str], bool]] = {}
         self.axios_names: set[str] = {"axios"}
@@ -360,15 +407,48 @@ def _import_bindings(root: Any, facts: _FileFacts) -> None:
             facts.axios_names.add(local)
 
 
+def _bound_names(node: Any) -> list[str]:
+    """Names a parameter list or arrow function binds, for the query-suffix check."""
+    names: list[str] = []
+    if node.type == "formal_parameters":
+        for child in node.children:
+            if child.type == "identifier":
+                names.append(_text(child))
+            elif child.type in ("required_parameter", "optional_parameter", "assignment_pattern"):
+                target = child.child_by_field_name("pattern") or child.child_by_field_name("left")
+                if target is not None and target.type == "identifier":
+                    names.append(_text(target))
+    elif node.type == "arrow_function":
+        single = node.child_by_field_name("parameter")
+        if single is not None and single.type == "identifier":
+            names.append(_text(single))
+    return names
+
+
 def _collect(root: Any, facts: _FileFacts, source: bytes) -> None:
     _import_bindings(root, facts)
+    # name -> one flag per binding: is it a ``const`` holding only a query string?
+    bindings: dict[str, list[bool]] = {}
     for node in _walk(root):
         kind = node.type
         if kind == "call_expression":
             facts.calls.append(node)
+        elif kind in ("formal_parameters", "arrow_function"):
+            for bound in _bound_names(node):
+                bindings.setdefault(bound, []).append(False)
         elif kind == "variable_declarator":
             name_node = node.child_by_field_name("name")
             value = _unwrap(node.child_by_field_name("value"))
+            if name_node is not None and name_node.type == "identifier":
+                parent = node.parent
+                is_const = (
+                    parent is not None
+                    and parent.type == "lexical_declaration"
+                    and _text(parent.children[0]) == "const"
+                )
+                bindings.setdefault(_text(name_node), []).append(
+                    bool(is_const and value is not None and is_query_suffix(value)),
+                )
             if name_node is None or name_node.type != "identifier" or value is None:
                 continue
             name = _text(name_node)
@@ -402,6 +482,11 @@ def _collect(root: Any, facts: _FileFacts, source: bytes) -> None:
                 literal = _string_literal(_unwrap(node.child_by_field_name("right")))
                 if literal is not None:
                     facts.defaults_base[left[0]] = literal
+        if kind == "assignment_expression":
+            target = node.child_by_field_name("left")
+            if target is not None and target.type == "identifier":
+                bindings.setdefault(_text(target), []).append(False)
+    facts.suffixes = frozenset(name for name, flags in bindings.items() if all(flags))
 
 
 def _is_internal_import(spec: str) -> bool:
@@ -428,7 +513,10 @@ def _build_hit(
     instance: Optional[str] = None,
     inferred: bool = False,
 ) -> Optional[ClientHit]:
-    folded = static_text(url_node, facts.consts) if url_node is not None else None
+    folded = (
+        static_text(url_node, facts.consts, suffixes=facts.suffixes)
+        if url_node is not None else None
+    )
     line = call.start_point[0] + 1
     end_line = call.end_point[0] + 1
     if folded is None:
@@ -1037,6 +1125,27 @@ def _model_name(path: Path) -> Optional[tuple[str, Path, bool]]:
     return None
 
 
+_FRAGMENT_MODEL_RE = re.compile(
+    r"""from\s+['"]ember-data-model-fragments/fragment['"]"""
+    r"""|\bextends\s+(?:\w+\.)?Fragment\b"""
+    r"""|\b(?:\w+\.)?Fragment\.extend\b"""
+)
+
+
+def is_fragment_model(source: bytes) -> bool:
+    """Whether an Ember model file defines an ``ember-data-model-fragments`` fragment.
+
+    A fragment is embedded in the record that owns it and has no adapter or
+    URL of its own, so the store never requests it.  A normal model that merely
+    *uses* fragments (``fragment(...)`` or ``fragmentArray(...)`` attributes
+    from ``ember-data-model-fragments/attributes``) is not one.
+    """
+    if b"Fragment" not in source and b"ember-data-model-fragments/fragment" not in source:
+        return False
+    text = _strip_comments(source.decode("utf-8", errors="replace"))
+    return bool(_FRAGMENT_MODEL_RE.search(text))
+
+
 def ember_model_info(path: Path) -> Optional[tuple[str, AdapterInfo]]:
     """Model name and adapter facts of an Ember model file, else ``None``.
 
@@ -1150,7 +1259,7 @@ def extract(
         return _qualified(node.name, file_path, node.parent_name), node.name
 
     # -- Ember Data ---------------------------------------------------
-    model = ember_model_info(path)
+    model = None if is_fragment_model(source) else ember_model_info(path)
     if model is not None:
         model_name, adapter = model
         for index, (method, route, dynamic) in enumerate(ember_model_routes(model_name, adapter)):

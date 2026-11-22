@@ -18,6 +18,19 @@
   route such as a Next.js `[...path]` proxy matches only by exact method and
   literal prefix, with `confidence: "low"`. A variable URL is never guessed.
   Rebuild a graph to index existing JavaScript; see `docs/COMMANDS.md`.
+- JavaScript and TypeScript calls now try the caller's own repository first: a
+  relative URL goes to the origin that served the page, so a frontend's own
+  Next.js route no longer matches a sibling frontend's route. Several handlers
+  of one path in one repository are `matched` (`reason`
+  `several_handlers_in_repo`) instead of `ambiguous`. A query string glued to
+  the path (`/feeds${query}`) is dropped when the name only ever holds a query
+  string, and Ember Data fragment models, which are never requested, no longer
+  produce endpoints. Rebuild a graph to index the changes.
+- FastAPI and Flask routes are indexed as server endpoints, with
+  `APIRouter(prefix=...)`, `Blueprint(url_prefix=...)`, `include_router` and
+  `register_blueprint` prefixes joined across files, so a JavaScript caller or
+  another service can match them. Non-literal prefixes and paths are never
+  guessed. Rebuild a graph to index existing Python; see `docs/COMMANDS.md`.
 - `cross_repo_requests_tool` reports a call whose route matches a server route
   except for letter case (for example `/v1/attributeGroups` against
   `/v1/attributegroups`) as `case_mismatch` instead of `no_route_match`. The row

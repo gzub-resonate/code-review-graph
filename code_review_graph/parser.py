@@ -32,7 +32,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
-from . import ember_extract, ember_template, js_api_extract
+from . import ember_extract, ember_template, js_api_extract, py_api_extract
 from . import scala_parse as _scala_parse
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
@@ -4576,6 +4576,12 @@ class CodeParser:
                 nodes, edges,
             )
 
+        if language == "python":
+            self._emit_py_api_endpoints(
+                tree.root_node, source, path, file_path_str, language, test_file,
+                nodes, edges,
+            )
+
         if language == "elixir":
             nodes, edges = self._merge_elixir_clauses(nodes, edges)
         if language == "ruby" and test_file:
@@ -5035,6 +5041,32 @@ class CodeParser:
             )
         except (RecursionError, ValueError) as exc:  # pragma: no cover - defensive
             logger.warning("JS API extraction skipped for %s: %s", file_path, exc)
+
+    def _emit_py_api_endpoints(
+        self,
+        root,
+        source: bytes,
+        path: Path,
+        file_path: str,
+        language: str,
+        is_test: bool,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit FastAPI/Flask route ``Endpoint`` nodes for a Python file."""
+        rel_path = file_path
+        if self._repo_root is not None:
+            try:
+                rel_path = normalize_file_path(path.resolve().relative_to(self._repo_root))
+            except (ValueError, OSError):
+                rel_path = file_path
+        try:
+            py_api_extract.extract(
+                root, source, file_path, rel_path, nodes, edges,
+                NodeInfo, EdgeInfo, language, is_test,
+            )
+        except (RecursionError, ValueError) as exc:  # pragma: no cover - defensive
+            logger.warning("Python route extraction skipped for %s: %s", file_path, exc)
 
     def _stamp_ember_roles(
         self,

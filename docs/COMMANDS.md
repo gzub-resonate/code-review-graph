@@ -955,11 +955,16 @@ Every row has an `origin`: `feign` for a Spring client method, `js` for a
 JavaScript or TypeScript call. Feign rows are classified exactly as above.
 
 JavaScript and TypeScript calls (`origin: "js"`) have no service name, so they
-are matched by HTTP method and normalised route against the server endpoints of
-every registered repository except the caller's. A row has a `client_kind`
+are matched by HTTP method and normalised route. A relative URL goes to the
+origin that served the page, so the server endpoints of the caller's own
+repository are searched first (its Next.js `app/api` routes, an Express server
+beside the client); only when they have no match does the search widen to every
+other registered repository. A row has a `client_kind`
 (`axios`, `fetch`, `jquery`, `ember-ajax` or `ember-data`). One matching
-location is `matched`, several (usually in several repositories) are
-`ambiguous` with the candidate repositories, none is `no_route_match`. A call
+location, or several in one repository (`reason: "several_handlers_in_repo"`,
+for example handlers of one path that differ by `params=`), is `matched`;
+several repositories are `ambiguous` with the candidate repositories; none is
+`no_route_match`. A call
 is `unmatchable` with one of these reasons: `non_literal_url` (a variable or
 computed URL, or a template or concatenation that starts with an unknown
 piece), `absolute_url` (a full `https://...` URL or an absolute `baseURL`),
@@ -973,6 +978,30 @@ a call with the same HTTP method and a literal prefix that is a whole leading
 path, with at least one more segment (none for `[[...path]]`), and only when no
 exact route fits; a catch-all at the root matches nothing. Its candidate has
 `catch_all: true`.
+
+A query string glued to the path (`` `/feeds${query}` `` where `query` is
+`cond ? `?${q}` : ''`) is dropped with the rest of the query, but only when every
+declaration of that name in the file is a `const` holding an empty or `?...`
+string; a parameter or any other binding of the same name keeps it a path
+parameter. An Ember Data model that extends `Fragment` from
+`ember-data-model-fragments` is skipped, because a fragment lives inside its
+owner record and is never requested; a model that only uses `fragment(...)`
+attributes still is a resource.
+
+Python servers are indexed too, so a frontend or another service can reach
+them. FastAPI and Starlette-style routers (`APIRouter`, `FastAPI`) and Flask
+(`Flask`, `Blueprint`) routes are read from `@router.get/post/put/patch/delete/head/options`,
+`@app.api_route(path, methods=[...])` and `@app.route(path, methods=[...])`
+(default `GET`), with Flask `<int:id>` turned into `{id}` and a trailing
+`{name:path}` or `<path:name>` read as a catch-all. A route's full path is the
+prefix of every router above it plus its own path: `APIRouter(prefix=...)`,
+`Blueprint(url_prefix=...)` and the `prefix=` or `url_prefix=` of
+`include_router` and `register_blueprint`, followed across files through
+`import` and `from ... import` (relative ones too). A router mounted twice
+gives a route for each mount. A prefix or path that is not a string literal is
+never guessed: the route is left out. Routes in test, fixture and example
+directories are ignored; class-based Flask views and `add_url_rule` are not
+read.
 
 What the parser records for JavaScript and TypeScript (all of it is a plain
 `Endpoint` node: client ones have `role: "client"` and a `REQUESTS` edge from

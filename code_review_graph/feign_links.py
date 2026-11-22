@@ -35,10 +35,13 @@ The rules, in the order they apply:
    match: a server that really is case-sensitive does not serve it.
 
 JavaScript and TypeScript calls (``origin == "js"``) have no service name.
-:func:`link_js_call` matches them by HTTP method and normalised route against
-the server endpoints of every registered repository except the caller's, and
-reports ``ambiguous`` when more than one location (usually more than one
-repository) fits.  A call that is not a statically known route is
+:func:`link_js_call` matches them by HTTP method and normalised route.  A
+relative URL goes to the origin that served the page, so the server endpoints
+of the caller's own repository are searched first; only when they have no
+match does the search widen to every other registered repository.  One
+location, or several in one repository, is ``matched`` (``reason``
+``several_handlers_in_repo`` for the latter); several repositories are
+``ambiguous``.  A call that is not a statically known route is
 ``unmatchable`` for one of: ``non_literal_url``, ``absolute_url``,
 ``method_dynamic``, ``placeholder_in_route``.  A server route that takes the
 rest of the path (a Next.js ``[...path]`` route, an Express ``*``) matches
@@ -57,6 +60,7 @@ __all__ = [
     "AMBIGUOUS",
     "CASE_MISMATCH",
     "CASE_MISMATCH_REASON",
+    "SAME_REPO_REASON",
     "MATCHED",
     "NO_ROUTE_MATCH",
     "NO_TARGET_REPO",
@@ -89,6 +93,9 @@ STATUSES: tuple[str, ...] = (
 
 #: The reason a ``case_mismatch`` result carries.
 CASE_MISMATCH_REASON = "route_differs_by_case"
+
+#: A ``matched`` result whose candidates are several handlers in one repository.
+SAME_REPO_REASON = "several_handlers_in_repo"
 
 #: The parser renders a route piece it could not resolve as this marker.
 _UNRESOLVED_MARKER = "<unresolved>"
@@ -405,26 +412,38 @@ class ServerIndex:
             self.folded.setdefault(shape.lower(), []).append(server)
 
 
-def link_js_call(call: ClientCall, index: ServerIndex) -> LinkResult:
-    """Classify a JavaScript/TypeScript call against every server endpoint.
+def _one_repo(candidates: Sequence[ServerEndpoint]) -> bool:
+    return len({c.origin or c.repo for c in candidates}) == 1
 
-    Exact routes win: a wildcard route is considered only when no exact route
-    of the right method fits, must have the same HTTP method (a server that
-    accepts every method does not count), a literal prefix that is a whole
-    leading path segment run of the call, and at least one more segment
-    unless the wildcard is optional.  Such a match has ``confidence`` ``low``.
-    When nothing fits, a server route that differs only in letter case gives
-    ``case_mismatch`` (see the module notes) rather than ``no_route_match``.
-    Call :func:`unmatchable_reason` first.
+
+def _js_result(
+    candidates: tuple[ServerEndpoint, ...],
+    reason: Optional[str] = None,
+    confidence: str = "high",
+) -> LinkResult:
+    """``matched`` for one location or several in one repo, else ``ambiguous``.
+
+    Several handlers of one path in one repository (they differ by ``params=``
+    or ``produces=``, say) answer which repository the call reaches, so they
+    are a match that lists every handler; ``ambiguous`` is for a path two or
+    more repositories serve.
     """
+    if len(candidates) == 1:
+        return LinkResult(MATCHED, reason, candidates, confidence)
+    if _one_repo(candidates):
+        return LinkResult(MATCHED, reason or SAME_REPO_REASON, candidates, confidence)
+    return LinkResult(AMBIGUOUS, reason, candidates, confidence)
+
+
+def _route_hits(call: ClientCall, index: ServerIndex) -> Optional[LinkResult]:
+    """Exact route first, then a wildcard route; ``None`` when neither fits."""
     wanted = normalize_route(call.route)
     found: dict[object, ServerEndpoint] = {}
     for server in index.exact.get(wanted, ()):
         if _method_matches(call.http_method, server.http_method):
             found.setdefault(_location_key(server, wanted), server)
     if found:
-        candidates = _sorted_candidates(found)
-        return LinkResult(MATCHED if len(candidates) == 1 else AMBIGUOUS, candidates=candidates)
+        return _js_result(_sorted_candidates(found))
     method = call.http_method.upper()
     for prefix, server in index.catch_all:
         if server.http_method.upper() != method:
@@ -433,17 +452,53 @@ def link_js_call(call: ClientCall, index: ServerIndex) -> LinkResult:
         if below or (server.optional_catch_all and wanted == prefix):
             found.setdefault(_location_key(server, prefix + "/**"), server)
     if not found:
-        for server in index.folded.get(wanted.lower(), ()):
-            if _method_matches(call.http_method, server.http_method):
-                found.setdefault(_location_key(server, normalize_route(server.route)), server)
-        if not found:
-            return LinkResult(NO_ROUTE_MATCH)
-        return LinkResult(
-            CASE_MISMATCH, reason=CASE_MISMATCH_REASON,
-            candidates=_sorted_candidates(found), confidence="low",
-        )
-    candidates = _sorted_candidates(found)
+        return None
+    return _js_result(_sorted_candidates(found), "catch_all_route", "low")
+
+
+def _case_hits(call: ClientCall, index: ServerIndex) -> Optional[LinkResult]:
+    """A ``case_mismatch`` lead from the case-folded routes, else ``None``."""
+    found: dict[object, ServerEndpoint] = {}
+    for server in index.folded.get(normalize_route(call.route).lower(), ()):
+        if _method_matches(call.http_method, server.http_method):
+            found.setdefault(_location_key(server, normalize_route(server.route)), server)
+    if not found:
+        return None
     return LinkResult(
-        MATCHED if len(candidates) == 1 else AMBIGUOUS,
-        reason="catch_all_route", candidates=candidates, confidence="low",
+        CASE_MISMATCH, CASE_MISMATCH_REASON, _sorted_candidates(found), "low",
     )
+
+
+def link_js_call(
+    call: ClientCall, index: ServerIndex, own: Optional[ServerIndex] = None,
+) -> LinkResult:
+    """Classify a JavaScript/TypeScript call against the server endpoints.
+
+    *index* holds the endpoints of the other registered repositories and *own*
+    those of the caller's own repository.  A relative URL goes to the origin
+    that served the page, so a route the caller's repository itself serves
+    (its Next.js ``app/api`` routes, an Express server beside the client)
+    wins over the same route in any other repository, whatever the kind of
+    match; only when the caller's repository has nothing does the search
+    widen to *index*.
+
+    In each pool exact routes win: a wildcard route is considered only when
+    no exact route of the right method fits, must have the same HTTP method (a
+    server that accepts every method does not count), a literal prefix that is
+    a whole leading path segment run of the call, and at least one more segment
+    unless the wildcard is optional.  Such a match has ``confidence`` ``low``.
+    One location, or several in one repository, is ``matched``; several
+    repositories are ``ambiguous``.  When nothing fits, a server route that
+    differs only in letter case gives ``case_mismatch`` (see the module notes)
+    rather than ``no_route_match``.  Call :func:`unmatchable_reason` first.
+    """
+    pools = [pool for pool in (own, index) if pool is not None]
+    for pool in pools:
+        result = _route_hits(call, pool)
+        if result is not None:
+            return result
+    for pool in pools:
+        lead = _case_hits(call, pool)
+        if lead is not None:
+            return lead
+    return LinkResult(NO_ROUTE_MATCH)

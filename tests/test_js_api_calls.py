@@ -250,6 +250,63 @@ export const b = (q: any) => q.get('/y');
     assert clients(nodes) == [] and servers(nodes) == []
 
 
+def test_a_query_string_glued_to_the_path_is_not_a_path_parameter(tmp_path):
+    """``/feeds${query}`` where ``query`` is ``cond ? `?...` : ''`` is the feeds route."""
+    nodes, _ = parse(tmp_path, "lib/feeds.ts", """
+import apiClient from './apiClient';
+export async function a(id?: string) {
+  const query = id ? `?${new URLSearchParams({ id })}` : '';
+  return apiClient.get(`/v1/admin/feeds${query}`);
+}
+export async function b(waveId?: string) {
+  const params = waveId ? `?wave_id=${encodeURIComponent(waveId)}` : '';
+  return apiClient.get(`/v1/cleanroom/waves/diff${params}`);
+}
+export async function c(qs: string) {
+  const queryPart = qs ? `?${qs}` : '';
+  const url = `/v1/admin/users/all${queryPart}`;
+  return apiClient.get(url);
+}
+export async function d(qs: string) {
+  return apiClient.get(`/v1/inline${qs ? `?${qs}` : ''}`);
+}
+export async function e() {
+  const q = '?x=1';
+  return apiClient.get('/v1/concat' + q);
+}
+""")
+    assert {r for _, r in sigs(clients(nodes))} >= {
+        "/v1/admin/feeds", "/v1/cleanroom/waves/diff", "/v1/inline", "/v1/concat",
+    }
+    assert not [n for n in clients(nodes) if "{param}" in n.extra["route"] and "/v1/admin/feeds" in n.extra["route"]]
+
+
+def test_only_a_name_that_always_holds_a_query_string_is_a_suffix(tmp_path):
+    nodes, _ = parse(tmp_path, "lib/guard.ts", """
+import apiClient from './apiClient';
+export async function one(id: string) {
+  const suffix = id ? `/${id}` : '';
+  return apiClient.get(`/v1/items${suffix}`);
+}
+export async function two(suffix: string) {
+  return apiClient.get(`/v1/things${suffix}`);
+}
+const query = cond ? '?a=1' : '';
+export async function three(query: string) {
+  return apiClient.get(`/v1/shadow${query}`);
+}
+export async function four() {
+  let q = '?a=1';
+  q = other();
+  return apiClient.get(`/v1/reassigned${q}`);
+}
+""")
+    assert sigs(clients(nodes)) == [
+        ("GET", "/v1/items{param}"), ("GET", "/v1/reassigned{param}"),
+        ("GET", "/v1/shadow{param}"), ("GET", "/v1/things{param}"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Ember Data
 # ---------------------------------------------------------------------------
@@ -279,6 +336,37 @@ def test_ember_models_map_to_rest_adapter_routes(tmp_path):
     assert {e.source for e in requests} == {nodes[0].name}
     assert all(e.extra["confidence"] == 0.6 and e.extra["confidence_tier"] == "INFERRED" for e in requests)
     assert all(n.extra["inferred"] and n.extra["client_kind"] == "ember-data" for n in clients(nodes))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import Fragment from 'ember-data-model-fragments/fragment';\n"
+        "import { attr } from '@ember-data/model';\n"
+        "export default Fragment.extend({ name: attr('string') });\n",
+        "import MF from 'ember-data-model-fragments';\n"
+        "export default MF.Fragment.extend({ name: DS.attr('string') });\n",
+        "import Fragment from 'ember-data-model-fragments/fragment';\n"
+        "export default class Threshold extends Fragment { }\n",
+    ],
+)
+def test_ember_fragment_models_are_not_http_resources(tmp_path, source):
+    """A fragment lives inside its owner record and is never fetched on its own."""
+    write(tmp_path, "app/adapters/application.js", _APP_ADAPTER)
+    nodes, edges = parse(tmp_path, "app/models/threshold-filter.js", source)
+    assert clients(nodes) == [] and edges_of(edges, "REQUESTS") == []
+
+
+def test_a_model_that_only_uses_fragments_is_still_a_resource(tmp_path):
+    write(tmp_path, "app/adapters/application.js", _APP_ADAPTER)
+    source = (
+        "import DS from 'ember-data';\n"
+        "import { fragmentArray } from 'ember-data-model-fragments/attributes';\n"
+        "// import Fragment from 'ember-data-model-fragments/fragment';\n"
+        "export default DS.Model.extend({ bars: fragmentArray('story-bar-chart') });\n"
+    )
+    nodes, _ = parse(tmp_path, "app/models/story.js", source)
+    assert len(clients(nodes)) == 5
 
 
 def test_ember_irregular_and_regular_plurals(tmp_path):
@@ -580,13 +668,62 @@ def test_exact_route_beats_a_catch_all(tmp_path, registry):
     assert "confidence" not in row
 
 
-def test_client_repo_is_excluded_from_its_own_targets(tmp_path, registry):
+def test_a_route_the_caller_serves_itself_is_its_own_target(tmp_path, registry):
     make_repo(tmp_path, registry, "solo", {
         "app/x/route.ts": "export async function GET() {}\n",
         "a.ts": "import axios from 'axios';\nexport const h = () => axios.get('/x');\n",
     })
     (row,) = cross_repo_requests_func(repos=["solo"])["results"]
-    assert row["status"] == "no_route_match"
+    assert row["status"] == "matched"
+    assert row["candidates"][0]["repo"] == "solo"
+
+
+def test_own_route_beats_the_same_route_in_a_sibling_repo(tmp_path, registry):
+    """A relative URL goes to the origin that served the page, not to a sibling frontend."""
+    route = "export async function GET() {}\n"
+    make_repo(tmp_path, registry, "sibling", {"app/api/config/client/route.ts": route})
+    make_repo(tmp_path, registry, "web", {
+        "app/api/config/client/route.ts": route,
+        "a.ts": "export const c = () => fetch('/api/config/client');\n",
+    })
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert row["status"] == "matched"
+    assert [c["repo"] for c in row["candidates"]] == ["web"]
+
+
+def test_own_catch_all_beats_a_sibling_catch_all(tmp_path, registry):
+    route = "export async function GET() {}\n"
+    make_repo(tmp_path, registry, "sibling", {"app/api/proxy/[...path]/route.ts": route})
+    make_repo(tmp_path, registry, "web", {
+        "app/api/proxy/[...path]/route.ts": route,
+        "a.ts": "export const c = () => fetch('/api/proxy/agent/dsp');\n",
+    })
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert [c["repo"] for c in row["candidates"]] == ["web"]
+    assert row["reason"] == "catch_all_route" and row["confidence"] == "low"
+
+
+def test_a_call_the_caller_does_not_serve_still_reaches_other_repos(tmp_path, registry):
+    make_repo(tmp_path, registry, "svc", {"app/api/health/route.ts": "export async function GET() {}\n"})
+    make_repo(tmp_path, registry, "web", {
+        "app/api/other/route.ts": "export async function GET() {}\n",
+        "a.ts": "export const c = () => fetch('/api/health');\n",
+    })
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert row["status"] == "matched" and row["candidates"][0]["repo"] == "svc"
+
+
+def test_link_js_call_several_handlers_in_one_repo_is_a_match():
+    two = [
+        fl.ServerEndpoint("s", "A.java", 49, "GET", "/v3/admin/tags", origin="/r/s"),
+        fl.ServerEndpoint("s", "A.java", 64, "GET", "/v3/admin/tags", origin="/r/s"),
+    ]
+    mk = lambda r: fl.ClientCall(repo="c", file=None, line=1, http_method="GET", route=r, origin="js")  # noqa: E731
+    result = fl.link_js_call(mk("/v3/admin/tags"), fl.ServerIndex(two))
+    assert (result.status, result.reason, result.confidence) == (fl.MATCHED, "several_handlers_in_repo", "high")
+    assert [c.line for c in result.candidates] == [49, 64]
+    other = two + [fl.ServerEndpoint("t", "B.java", 5, "GET", "/v3/admin/tags", origin="/r/t")]
+    assert fl.link_js_call(mk("/v3/admin/tags"), fl.ServerIndex(other)).status == fl.AMBIGUOUS
 
 
 def test_ember_data_rows_are_low_confidence_matches(tmp_path, registry):
