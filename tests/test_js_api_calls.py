@@ -726,6 +726,72 @@ def test_link_js_call_several_handlers_in_one_repo_is_a_match():
     assert fl.link_js_call(mk("/v3/admin/tags"), fl.ServerIndex(other)).status == fl.AMBIGUOUS
 
 
+def _vcall(route, method="GET"):
+    return fl.ClientCall(
+        repo="c", file=None, line=1, http_method=method, route=route, origin="js",
+    )
+
+
+def _vserver(route, method="GET", repo="s", line=1):
+    return fl.ServerEndpoint(repo, "A.py", line, method, route, origin=f"/r/{repo}")
+
+
+def test_variable_matches_literal_segment_at_low_confidence():
+    index = fl.ServerIndex([_vserver("/agents/planner/threads")])
+    result = fl.link_js_call(_vcall("/agents/{name}/threads"), index)
+    assert (result.status, result.reason, result.confidence) == (
+        fl.MATCHED, fl.VARIABLE_LITERAL_REASON, "low",
+    )
+    assert [c.route for c in result.candidates] == ["/agents/planner/threads"]
+
+
+def test_variable_literal_needs_equal_method_and_segment_count():
+    index = fl.ServerIndex([_vserver("/agents/planner/threads", "POST")])
+    assert fl.link_js_call(_vcall("/agents/{n}/threads"), index).status == fl.NO_ROUTE_MATCH
+    index = fl.ServerIndex([_vserver("/agents/planner/threads/extra")])
+    assert fl.link_js_call(_vcall("/agents/{n}/threads"), index).status == fl.NO_ROUTE_MATCH
+
+
+def test_variable_literal_is_case_sensitive():
+    index = fl.ServerIndex([_vserver("/agents/planner/Threads")])
+    assert fl.link_js_call(_vcall("/agents/{n}/threads"), index).status != fl.MATCHED
+
+
+def test_variable_literal_rejects_mostly_variable_calls():
+    index = fl.ServerIndex([_vserver("/agents/planner/threads")])
+    assert fl.link_js_call(_vcall("/{a}/{b}/threads"), index).status == fl.NO_ROUTE_MATCH
+    assert fl.link_js_call(_vcall("/{a}/{b}/{c}"), index).status == fl.NO_ROUTE_MATCH
+
+
+def test_variable_literal_never_beats_an_exact_route():
+    index = fl.ServerIndex([
+        _vserver("/agents/{id}/threads", line=1),
+        _vserver("/agents/planner/threads", line=2),
+    ])
+    result = fl.link_js_call(_vcall("/agents/{n}/threads"), index)
+    assert result.reason != fl.VARIABLE_LITERAL_REASON
+    assert [c.line for c in result.candidates] == [1]
+
+
+def test_variable_literal_too_many_routes_is_no_match():
+    servers = [_vserver(f"/agents/a{i}/threads", line=i) for i in range(11)]
+    assert fl.link_js_call(_vcall("/agents/{n}/threads"), fl.ServerIndex(servers)).status == (
+        fl.NO_ROUTE_MATCH
+    )
+    ok = fl.link_js_call(_vcall("/agents/{n}/threads"), fl.ServerIndex(servers[:10]))
+    assert (ok.status, ok.reason) == (fl.MATCHED, fl.VARIABLE_LITERAL_REASON)
+
+
+def test_variable_literal_several_repos_is_ambiguous_and_own_pool_first():
+    a = _vserver("/agents/x/threads", repo="s")
+    b = _vserver("/agents/y/threads", repo="t")
+    result = fl.link_js_call(_vcall("/agents/{n}/threads"), fl.ServerIndex([a, b]))
+    assert (result.status, result.confidence) == (fl.AMBIGUOUS, "low")
+    own = fl.ServerIndex([b])
+    result = fl.link_js_call(_vcall("/agents/{n}/threads"), fl.ServerIndex([a, b]), own=own)
+    assert result.status == fl.MATCHED and result.candidates[0].repo == "t"
+
+
 def test_ember_data_rows_are_low_confidence_matches(tmp_path, registry):
     make_repo(tmp_path, registry, "audience-api", {
         "server.js": "const express = require('express');\nconst app = express();\n"

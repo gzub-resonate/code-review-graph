@@ -47,6 +47,16 @@ location, or several in one repository, is ``matched`` (``reason``
 rest of the path (a Next.js ``[...path]`` route, an Express ``*``) matches
 only by exact method and literal prefix, and only when no exact route fits;
 that match is reported with ``confidence`` ``low``.
+
+Last of all, a JavaScript call with no other match may still reach a server
+route whose fixed segments stand where the call has a variable: a client that
+builds ``/agents/${name}/threads`` finds the server's ``/agents/planner/threads``.
+It needs the same number of segments, at least two segments the call spells
+out, and an equal method, and it is reported with the reason
+``variable_matches_literal`` and ``confidence`` ``low``.  When more than
+``_MAX_VARIABLE_ROUTES`` routes fit, the variable is too open to say anything
+and the call stays ``no_route_match``.  Only calls that would otherwise be
+``no_route_match`` can change.
 """
 
 from __future__ import annotations
@@ -66,6 +76,7 @@ __all__ = [
     "NO_TARGET_REPO",
     "STATUSES",
     "UNMATCHABLE",
+    "VARIABLE_LITERAL_REASON",
     "ClientCall",
     "LinkResult",
     "ServerEndpoint",
@@ -96,6 +107,17 @@ CASE_MISMATCH_REASON = "route_differs_by_case"
 
 #: A ``matched`` result whose candidates are several handlers in one repository.
 SAME_REPO_REASON = "several_handlers_in_repo"
+
+#: The reason of a match where a variable in the call stands against a fixed
+#: segment of the server route (always ``confidence`` ``low``).
+VARIABLE_LITERAL_REASON = "variable_matches_literal"
+
+#: A variable may only stand against a literal when the call spells out at
+#: least this many other segments, so ``/{id}/x`` never matches half the server.
+_MIN_FIXED_SEGMENTS = 2
+
+#: More server routes than this fit a call's variable: it is too open to report.
+_MAX_VARIABLE_ROUTES = 10
 
 #: The parser renders a route piece it could not resolve as this marker.
 _UNRESOLVED_MARKER = "<unresolved>"
@@ -387,6 +409,11 @@ def _catch_all_prefix(route: str) -> str:
     return normalize_route(head)
 
 
+def _segments(shape: str) -> tuple[str, ...]:
+    """The path segments of a normalised route: ``/a/{}/b`` -> ``("a", "{}", "b")``."""
+    return () if shape == "/" else tuple(shape.strip("/").split("/"))
+
+
 class ServerIndex:
     """Server endpoints indexed by normalised route, for many lookups.
 
@@ -400,6 +427,9 @@ class ServerIndex:
         self.catch_all: list[tuple[str, ServerEndpoint]] = []
         #: The same exact routes, keyed with case ignored, for ``case_mismatch`` leads.
         self.folded: dict[str, list[ServerEndpoint]] = {}
+        #: The exact routes as segments, grouped by segment count, for calls whose
+        #: variable stands against a fixed server segment.
+        self.by_length: dict[int, list[tuple[tuple[str, ...], ServerEndpoint]]] = {}
         for server in servers:
             if server.catch_all:
                 prefix = _catch_all_prefix(server.route)
@@ -410,6 +440,8 @@ class ServerIndex:
             shape = normalize_route(server.route)
             self.exact.setdefault(shape, []).append(server)
             self.folded.setdefault(shape.lower(), []).append(server)
+            segments = _segments(shape)
+            self.by_length.setdefault(len(segments), []).append((segments, server))
 
 
 def _one_repo(candidates: Sequence[ServerEndpoint]) -> bool:
@@ -469,6 +501,33 @@ def _case_hits(call: ClientCall, index: ServerIndex) -> Optional[LinkResult]:
     )
 
 
+def _variable_hits(call: ClientCall, index: ServerIndex) -> Optional[LinkResult]:
+    """Server routes whose fixed segments stand where the call has a variable.
+
+    Every segment of the call must equal the server's, except that a variable
+    (``{}``) in the call also fits a fixed server segment.  Nothing is guessed
+    from a call that is mostly variable (fewer than ``_MIN_FIXED_SEGMENTS``
+    fixed segments) or from a variable so open that more than
+    ``_MAX_VARIABLE_ROUTES`` routes fit.  Returns ``None`` then, and when
+    nothing fits.
+    """
+    wanted = _segments(normalize_route(call.route))
+    fixed = sum(1 for segment in wanted if segment != "{}")
+    if fixed < _MIN_FIXED_SEGMENTS or fixed == len(wanted):
+        return None
+    found: dict[object, ServerEndpoint] = {}
+    shapes: set[tuple[str, ...]] = set()
+    for segments, server in index.by_length.get(len(wanted), ()):
+        if not _method_matches(call.http_method, server.http_method):
+            continue
+        if all(want == "{}" or want == have for want, have in zip(wanted, segments)):
+            found.setdefault(_location_key(server, "/" + "/".join(segments)), server)
+            shapes.add(segments)
+    if not found or len(shapes) > _MAX_VARIABLE_ROUTES:
+        return None
+    return _js_result(_sorted_candidates(found), VARIABLE_LITERAL_REASON, "low")
+
+
 def link_js_call(
     call: ClientCall, index: ServerIndex, own: Optional[ServerIndex] = None,
 ) -> LinkResult:
@@ -490,7 +549,10 @@ def link_js_call(
     One location, or several in one repository, is ``matched``; several
     repositories are ``ambiguous``.  When nothing fits, a server route that
     differs only in letter case gives ``case_mismatch`` (see the module notes)
-    rather than ``no_route_match``.  Call :func:`unmatchable_reason` first.
+    rather than ``no_route_match``.  Failing that, a variable in the call may
+    stand against a fixed server segment (``variable_matches_literal``, low
+    confidence; see :func:`_variable_hits`).  Call :func:`unmatchable_reason`
+    first.
     """
     pools = [pool for pool in (own, index) if pool is not None]
     for pool in pools:
@@ -501,4 +563,8 @@ def link_js_call(
         lead = _case_hits(call, pool)
         if lead is not None:
             return lead
+    for pool in pools:
+        variable = _variable_hits(call, pool)
+        if variable is not None:
+            return variable
     return LinkResult(NO_ROUTE_MATCH)

@@ -699,7 +699,7 @@ def cross_repo_requests_func(
                         row["client_kind"] = _sanitize_name(call.client_kind)
                     row_notes = list(call.notes)
                     if result.confidence == "low":
-                        row_notes.append("catch_all_route")
+                        row_notes.append(result.reason or "catch_all_route")
                     if row_notes and result.status in (fl.MATCHED, fl.AMBIGUOUS):
                         row["confidence"] = "low"
                         row["confidence_notes"] = row_notes

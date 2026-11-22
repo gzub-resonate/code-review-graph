@@ -950,6 +950,12 @@ How a call is classified:
   `low`), with those endpoints as `candidates`. It is a lead to check, not a
   match: a case-sensitive server does not serve it. Only a call that would
   otherwise be `no_route_match` can become one.
+- For a JavaScript or TypeScript call that still has no match, a `{name}` in the call may
+  stand against a fixed server segment (`/agents/{name}/threads` reaches
+  `/agents/planner/threads`): reason `variable_matches_literal`, `confidence` `low`.
+  The call needs the same segment count, an equal method and at least two segments it
+  spells out, and more than 10 matching server routes is too open to report. Only a
+  call that would otherwise be `no_route_match` can change.
 
 Every row has an `origin`: `feign` for a Spring client method, `js` for a
 JavaScript or TypeScript call. Feign rows are classified exactly as above.

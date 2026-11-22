@@ -31,6 +31,13 @@
   `register_blueprint` prefixes joined across files, so a JavaScript caller or
   another service can match them. Non-literal prefixes and paths are never
   guessed. Rebuild a graph to index existing Python; see `docs/COMMANDS.md`.
+- `cross_repo_requests_tool` matches a JavaScript or TypeScript call whose variable
+  segment stands against a fixed server segment (`/agents/{name}/threads` against
+  `/agents/planner/threads`). It is the last rule tried, so only calls that were
+  `no_route_match` can change. It needs the same segment count, an equal method and
+  at least two segments the call spells out, and is skipped when more than 10 server
+  routes fit. The row has the reason `variable_matches_literal` and
+  `confidence: "low"`.
 - `cross_repo_requests_tool` reports a call whose route matches a server route
   except for letter case (for example `/v1/attributeGroups` against
   `/v1/attributegroups`) as `case_mismatch` instead of `no_route_match`. The row

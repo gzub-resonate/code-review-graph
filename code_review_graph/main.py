@@ -1533,6 +1533,9 @@ async def cross_repo_requests_tool(
     ``unmatchable`` with a ``reason`` (placeholder service name, absolute
     ``url``, ``URI`` argument, or a route piece that could not be resolved).
     Nothing is guessed.
+    A JavaScript call with no other match may still be ``matched`` at low
+    confidence (reason ``variable_matches_literal``) when its variable stands
+    against a fixed server segment.
 
     JavaScript and TypeScript calls (axios, fetch, jQuery, Ember ajax and Ember
     Data) have no service name and are matched by method and route against the
