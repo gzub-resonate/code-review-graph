@@ -49,6 +49,7 @@ from .custom_languages import CustomLanguage, load_custom_languages
 from .infra_references import (
     DYNAMIC_GITHUB_ACTIONS_TARGET,
     EXTERNAL_DYNAMIC_DOCKER_TARGET,
+    EXTERNAL_DYNAMIC_TERRAFORM_TARGET,
     EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET,
     EXTERNAL_TERRAFORM_MODULE_PREFIX,
     MAX_DOCKERFILE_BYTES,
@@ -67,6 +68,7 @@ from .infra_references import (
     parse_terragrunt_source,
 )
 from .npm_alias_resolver import NpmAliasResolver
+from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
 
 try:
     import yaml as _yaml  # type: ignore[import-untyped]
@@ -1816,7 +1818,16 @@ _TERRAGRUNT_REFERENCE_ATTRIBUTES = {
     "terraform": "source",
     "include": "path",
     "dependency": "config_path",
+    "dependencies": "paths",
 }
+
+# What a directory named by a Terragrunt reference stands for, in order. ``*.tf`` is the
+# first Terraform file by name, for a module that has no ``main.tf``.
+_TERRAGRUNT_CHILDREN = ("", "terragrunt.hcl", "main.tf")
+_TERRAFORM_CHILDREN = ("", "terragrunt.hcl", "main.tf", "*.tf")
+
+# Most ``dependencies.paths`` entries one block adds.
+_MAX_TERRAGRUNT_DEPENDENCY_PATHS = 100
 
 # Patterns that indicate a test function
 _TEST_PATTERNS = [
@@ -13552,11 +13563,29 @@ class CodeParser:
         if block_type == "module":
             src = self._hcl_get_attribute_string(body_node, "source")
             if src:
-                resolved = self._resolve_module_to_file(src, file_path, "hcl")
-                edges.append(EdgeInfo(
-                    kind="IMPORTS_FROM", source=file_path, target=resolved or src,
-                    file_path=file_path, line=line_start,
-                ))
+                parts = parse_terragrunt_source(src)
+                if parts["kind"] == "local":
+                    resolved = self._resolve_module_to_file(src, file_path, "hcl")
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM", source=file_path, target=resolved or src,
+                        file_path=file_path, line=line_start,
+                    ))
+                else:
+                    # A registry, git or archive source: only its address and ref are kept,
+                    # never a credential or query value that the raw string may carry.
+                    target = EXTERNAL_DYNAMIC_TERRAFORM_TARGET
+                    extra: dict[str, Any] = {
+                        "resolution": "terraform_module", "dynamic": not parts["base"],
+                    }
+                    if parts["base"]:
+                        target = EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
+                        extra.update(
+                            source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
+                        )
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM", source=file_path, target=target,
+                        file_path=file_path, line=line_start, extra=extra,
+                    ))
 
         if emit_refs:
             provider_attributes = (
@@ -13580,22 +13609,68 @@ class CodeParser:
         edges: list[EdgeInfo],
         line: int,
     ) -> None:
-        """Emit the one reference a Terragrunt ``terraform``, ``include`` or ``dependency`` names.
+        """Emit the references a Terragrunt ``terraform``, ``include``, ``dependency`` or
+        ``dependencies`` block names.
 
-        Only ``terraform.source``, ``include.path`` and ``dependency.config_path`` are read.
-        ``inputs``, ``locals``, ``mock_outputs`` and every other attribute are not visited. A
-        string with an interpolation or a function call (``find_in_parent_folders()``) is
-        recorded as dynamic and its text is not stored. A local path resolves to the file or
-        module it names, as a ``.tf`` module ``source`` does; a remote source points at
+        Only ``terraform.source``, ``include.path``, ``dependency.config_path`` and
+        ``dependencies.paths`` are read. ``inputs``, ``mock_outputs`` and every other attribute
+        are not visited. A local path resolves to the file or module it names, as a ``.tf``
+        module ``source`` does; a remote source points at
         ``external:terraform-module:<address>`` with the ``ref`` in ``extra``. Credentials and
         query parameters other than ``ref`` and ``version`` are dropped, and the raw source is
         never stored.
+
+        An expression (``find_in_parent_folders()``, ``"${get_repo_root()}/m"``, a ``local``) is
+        reduced by :class:`TerragruntEvaluator` from the files alone: nothing is run, no
+        environment variable is read and no file outside the repository is opened. What it
+        reduces to is used once, to find the target, and is never stored. When it cannot be
+        reduced, or names a file that is not in the repository, the edge is ``dynamic`` with a
+        coarse ``dynamic_reason`` and no text.
         """
         attribute = _TERRAGRUNT_REFERENCE_ATTRIBUTES[block_type]
-        found = self._terragrunt_attribute(body_node, attribute)
-        if found is None:
+        expr, attr_line = self._terragrunt_attribute(body_node, attribute)
+        if expr is None:
             return
-        raw, is_literal, attr_line = found
+        entries: Optional[list[tuple[Any, int]]]
+        if block_type == "dependencies":
+            entries = self._terragrunt_path_list(expr)
+            if entries is None:  # not a list written out: one reference that stays dynamic
+                self._append_terragrunt_edge(
+                    block_type, labels, None, False, file_path, edges, attr_line or line,
+                    reason="unsupported_function",
+                )
+                return
+        else:
+            entries = [(expr, attr_line or line)]
+        evaluator: Optional[TerragruntEvaluator] = None
+        for entry, entry_line in entries:
+            if evaluator is None and not self._hcl_is_literal_string(entry):
+                evaluator = self._terragrunt_evaluator(body_node, file_path)
+            self._append_terragrunt_edge(
+                block_type, labels, entry, True, file_path, edges, entry_line,
+                evaluator=evaluator,
+            )
+
+    def _append_terragrunt_edge(
+        self,
+        block_type: str,
+        labels: list[str],
+        expr,
+        has_expr: bool,
+        file_path: str,
+        edges: list[EdgeInfo],
+        line: int,
+        *,
+        evaluator: Optional[TerragruntEvaluator] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        raw = ""
+        is_literal = False
+        if has_expr:
+            found = self._terragrunt_expression_text(expr)
+            if found is None:
+                return
+            raw, is_literal = found
         extra: dict[str, Any] = {
             "resolution": "terragrunt_reference", "block": block_type,
             "dynamic": not is_literal,
@@ -13603,34 +13678,117 @@ class CodeParser:
         if labels:
             extra["name"] = labels[0]
         target = EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
-        if is_literal and block_type == "terraform":
+        value: Optional[str] = None
+        if has_expr and not is_literal:
+            if evaluator is None:
+                reason = "not_found"
+            else:
+                value, reason = evaluator.evaluate(expr)
+        if value is not None:
+            target = self._terragrunt_static_target(block_type, value, file_path, extra)
+            if target == EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET:
+                reason = reason or "not_found"
+            else:
+                extra["resolved_statically"] = True
+                extra["dynamic"] = False
+        elif is_literal and block_type == "terraform":
             parts = parse_terragrunt_source(raw)
             extra.update(
                 source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
             )
             if parts["kind"] == "local":
                 if is_plain_local_path(raw):
-                    target = self._terragrunt_local_target(raw, file_path)
+                    target = self._terragrunt_local_target(raw, file_path, _TERRAFORM_CHILDREN)
             elif parts["base"]:
                 target = EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
         elif is_literal and is_plain_local_path(raw):
-            target = self._terragrunt_local_target(raw, file_path)
+            target = self._terragrunt_local_target(raw, file_path, _TERRAGRUNT_CHILDREN)
         if target == EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET:
             extra["dynamic"] = True
+            if reason in DYNAMIC_REASONS:
+                extra["dynamic_reason"] = reason
         edges.append(EdgeInfo(
             kind="IMPORTS_FROM", source=file_path, target=target,
-            file_path=file_path, line=attr_line or line, extra=extra,
+            file_path=file_path, line=line, extra=extra,
         ))
 
-    @staticmethod
-    def _terragrunt_attribute(
-        body_node, attr_name: str,
-    ) -> Optional[tuple[str, bool, int]]:
-        """``(text, is_literal, line)`` of attribute *attr_name*, or ``None`` if absent.
+    def _terragrunt_static_target(
+        self, block_type: str, value: str, file_path: str, extra: dict[str, Any],
+    ) -> str:
+        """The target of a statically evaluated reference, or the dynamic target.
 
-        A plain quoted string is literal. Any other expression is returned as its source text
-        with ``is_literal`` false; one that is not a reference-shaped string is dropped.
+        *value* is used here and not kept. A remote ``terraform.source`` is reduced exactly
+        like a written-out one (no credentials, only ``ref`` and ``version``). A local path
+        must name an existing file inside the repository.
         """
+        children: tuple[str, ...]
+        if block_type == "terraform":
+            parts = parse_terragrunt_source(value)
+            extra.update(
+                source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
+            )
+            if parts["kind"] != "local" and not os.path.isabs(value):
+                if parts["base"]:
+                    return EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
+                return EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+            extra["source_kind"] = "local"
+            children = _TERRAFORM_CHILDREN
+        else:
+            children = _TERRAGRUNT_CHILDREN
+        if not is_plain_local_path(value):
+            return EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        base = Path(file_path).parent
+        raw = value
+        if os.path.isabs(value):
+            anchor = base if base.is_absolute() else (self._repo_root or Path.cwd()) / base
+            try:
+                raw = os.path.relpath(value, os.path.realpath(anchor))
+            except ValueError:
+                return EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        found = self._confined_local_file(base, raw, children)
+        return found if found else EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+
+    def _terragrunt_evaluator(self, body_node, file_path: str) -> Optional[TerragruntEvaluator]:
+        """An evaluator for the file *body_node* is in, or ``None`` without a repository root."""
+        if self._repo_root is None:
+            return None
+        root = body_node
+        while root.parent is not None:
+            root = root.parent
+        parser = self._get_parser("hcl")
+        if parser is None:
+            return None
+
+        def parse(data: bytes):
+            return parser.parse(data).root_node
+
+        def excluded(resolved: Path) -> bool:
+            return normalize_file_path(resolved) in self._excluded_files
+
+        return TerragruntEvaluator(self._repo_root, Path(file_path), root, parse, excluded)
+
+    @staticmethod
+    def _hcl_is_literal_string(expr) -> bool:
+        literal = _hcl_child(expr, "literal_value")
+        string_lit = _hcl_child(literal, "string_lit") if literal is not None else None
+        return string_lit is not None and _hcl_child(string_lit, "template_literal") is not None
+
+    @staticmethod
+    def _terragrunt_path_list(expr) -> Optional[list[tuple[Any, int]]]:
+        """The ``(expression, line)`` of each entry of a written-out list, else ``None``."""
+        collection = _hcl_child(expr, "collection_value")
+        tup = _hcl_child(collection, "tuple") if collection is not None else None
+        if tup is None:
+            return None
+        return [
+            (child, child.start_point[0] + 1)
+            for child in tup.children
+            if child.type == "expression"
+        ][:_MAX_TERRAGRUNT_DEPENDENCY_PATHS]
+
+    @staticmethod
+    def _terragrunt_attribute(body_node, attr_name: str) -> tuple[Optional[Any], int]:
+        """``(expression node, line)`` of attribute *attr_name*, or ``(None, 0)`` if absent."""
         for attr in body_node.children:
             if attr.type != "attribute":
                 continue
@@ -13638,32 +13796,42 @@ class CodeParser:
             expr = _hcl_child(attr, "expression")
             if key is None or expr is None or _hcl_text(key) != attr_name:
                 continue
-            literal = _hcl_child(expr, "literal_value")
-            string_lit = _hcl_child(literal, "string_lit") if literal is not None else None
-            template = (
-                _hcl_child(string_lit, "template_literal") if string_lit is not None else None
-            )
-            if template is not None:
-                text, is_literal = _hcl_text(template).strip(), True
-            else:
-                text, is_literal = _hcl_text(expr).strip(), False
-            if not is_reference_text(text):
-                return None
-            return text, is_literal, attr.start_point[0] + 1
-        return None
+            return expr, attr.start_point[0] + 1
+        return None, 0
 
-    def _terragrunt_local_target(self, raw: str, file_path: str) -> str:
+    @staticmethod
+    def _terragrunt_expression_text(expr) -> Optional[tuple[str, bool]]:
+        """``(text, is_literal)`` of an expression, or ``None`` if it is not reference-shaped.
+
+        A plain quoted string is literal. Any other expression is returned as its source text
+        with ``is_literal`` false, only so that the caller can tell it apart; the text is
+        never stored. One that is not a reference-shaped string is dropped.
+        """
+        literal = _hcl_child(expr, "literal_value")
+        string_lit = _hcl_child(literal, "string_lit") if literal is not None else None
+        template = (
+            _hcl_child(string_lit, "template_literal") if string_lit is not None else None
+        )
+        if template is not None:
+            text, is_literal = _hcl_text(template).strip(), True
+        else:
+            text, is_literal = _hcl_text(expr).strip(), False
+        if not is_reference_text(text):
+            return None
+        return text, is_literal
+
+    def _terragrunt_local_target(
+        self, raw: str, file_path: str, children: tuple[str, ...],
+    ) -> str:
         """The in-repo file a relative Terragrunt path names, else the raw text.
 
-        A path to a directory (a module, or a dependency's config) names the
-        ``terragrunt.hcl`` or ``main.tf`` inside it when one exists.
+        A path to a directory (a module, or a dependency's config) names the first of
+        *children* inside it that exists.
         """
         resolved = self._resolve_module_to_file(raw, file_path, "hcl")
         if resolved:
             return resolved
-        return self._confined_local_file(
-            Path(file_path).parent, raw, ("", "terragrunt.hcl", "main.tf"),
-        ) or raw
+        return self._confined_local_file(Path(file_path).parent, raw, children) or raw
 
     def _confined_local_file(
         self, base: Path, raw: str, children: tuple[str, ...],
@@ -13692,6 +13860,10 @@ class CodeParser:
         else:
             anchor = root
         for name in children:
+            if name == "*.tf":
+                name = self._first_terraform_file(candidate, anchor)
+                if not name:
+                    continue
             target = candidate / name if name else candidate
             probe = target if target.is_absolute() else anchor / target
             try:
@@ -13707,6 +13879,26 @@ class CodeParser:
                 continue
             return normalize_file_path(target)
         return None
+
+    @staticmethod
+    def _first_terraform_file(directory: Path, anchor: Path) -> str:
+        """The name of the first ``*.tf`` file (by name) in *directory*, or ``""``.
+
+        Sorted, so the answer does not depend on the order the file system lists entries.
+        At most 5,000 entries are looked at.
+        """
+        probe = directory if directory.is_absolute() else anchor / directory
+        names: list[str] = []
+        try:
+            with os.scandir(probe) as entries:
+                for count, entry in enumerate(entries):
+                    if count >= 5_000:
+                        return ""
+                    if entry.name.endswith(".tf") and entry.is_file():
+                        names.append(entry.name)
+        except OSError:
+            return ""
+        return min(names) if names else ""
 
     def _emit_hcl_locals(
         self,

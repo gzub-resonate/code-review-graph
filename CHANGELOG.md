@@ -34,6 +34,17 @@
   never stored, and neither are other values from these files. Run
   `code-review-graph build` once to add these to an existing graph. See
   [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md).
+- Terragrunt references written as expressions now point at the file or module
+  they name: `find_in_parent_folders()`, `get_parent_terragrunt_dir("root")`,
+  `get_repo_root()`, same-file `locals` and exposed `include` locals are worked
+  out from the files, so most `include`, `terraform.source` and `dependency`
+  references that were `dynamic` now have a target. `dependencies { paths }`
+  entries are recorded too. A reference that cannot be resolved (`get_env`,
+  `run_cmd`, `sops_*`, `var.*`) stays `dynamic` and says why in
+  `dynamic_reason`. Nothing is run, no environment variable is read, and no
+  file outside the repository is opened. Registry and git `module` sources in
+  `.tf` files are now stored as `external:terraform-module:` targets without
+  credentials. Run `code-review-graph build` once to update an existing graph.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
