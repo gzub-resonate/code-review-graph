@@ -31,7 +31,7 @@ Exposes 31 tools (each registered in main.py with a ``_tool`` suffix):
 28. traverse_graph        - BFS/DFS traversal from best-matching node
 29. run_postprocess       - flows, communities and FTS for an existing graph
 30. get_minimal_context   - compact task-scoped entry point (call this first)
-31. cross_repo_requests   - join Spring Feign calls to the endpoints they reach
+31. cross_repo_requests   - join Spring Feign and JS/TS calls to the endpoints they reach
 """
 
 from __future__ import annotations

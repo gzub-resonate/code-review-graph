@@ -4,6 +4,20 @@
 
 ### Added
 
+- JavaScript, TypeScript and Ember frontends now take part in the cross-repo
+  join. The parser records HTTP calls with a statically known route (`axios`
+  and `axios.create` instances, `fetch`, `$.ajax`, Ember `ajax`) as client
+  `Endpoint` nodes with `REQUESTS` edges, derives the routes an Ember Data
+  model uses from its adapter's `namespace` (low confidence), and records
+  served routes (Next.js app and pages routers, Express, Koa, Fastify and
+  Hono style `app.get('/x', handler)`) as server `Endpoint` nodes with `HANDLES`
+  edges. `cross_repo_requests_tool` matches these calls by method and route
+  against every other registered repository, reports `ambiguous` with the
+  candidate repositories when several fit, and gives each row an `origin`
+  (`feign` or `js`); the new `origin` argument narrows to one. A catch-all
+  route such as a Next.js `[...path]` proxy matches only by exact method and
+  literal prefix, with `confidence: "low"`. A variable URL is never guessed.
+  Rebuild a graph to index existing JavaScript; see `docs/COMMANDS.md`.
 - New `cross_repo_requests_tool` answers "which endpoint does this Feign call
   reach?" across your registered repositories. For each outbound Spring Feign
   call it names the controller endpoint in the repository the service name

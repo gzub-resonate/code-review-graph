@@ -1519,8 +1519,9 @@ async def cross_repo_requests_tool(
     status: Optional[str] = None,
     limit: int = 20,
     max_results: int = 50,
+    origin: Optional[str] = None,
 ) -> dict:
-    """Join outbound Spring Feign calls to the endpoints they reach in other repos.
+    """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
 
     Lists the Feign client calls of the registered repos and, for each, the
     controller endpoint in the repo its service name points at, found by HTTP
@@ -1530,6 +1531,13 @@ async def cross_repo_requests_tool(
     service name) or ``unmatchable`` with a ``reason`` (placeholder service
     name, absolute ``url``, ``URI`` argument, or a route piece that could not
     be resolved). Nothing is guessed.
+
+    JavaScript and TypeScript calls (axios, fetch, jQuery, Ember ajax and Ember
+    Data) have no service name and are matched by method and route against the
+    endpoints of every other registered repo; each row has an ``origin`` of
+    ``feign`` or ``js``. A match through a catch-all route such as a Next.js
+    ``[...path]`` proxy, or through a naming convention, has ``confidence``
+    ``low``.
 
     Args:
         repos: Optional aliases or folder names of the client repos to list
@@ -1542,12 +1550,13 @@ async def cross_repo_requests_tool(
         limit: Maximum rows per client repo. Default: 20.
         max_results: Maximum rows overall, at most 100. ``counts`` and
             ``total`` cover every call that passed the filters. Default: 50.
+        origin: Only ``feign`` or only ``js`` calls. Default: both.
     """
     return await _offload(
         "cross_repo_requests_tool",
         lambda: cross_repo_requests_func(
             repos=repos, service=service, route=route, status=status,
-            limit=limit, max_results=max_results,
+            limit=limit, max_results=max_results, origin=origin,
         ),
         None,
         provenance=False,

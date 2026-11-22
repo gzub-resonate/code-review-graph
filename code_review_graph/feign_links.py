@@ -27,6 +27,17 @@ The rules, in the order they apply:
    ``no_route_match``.  Mapping annotations that list the same route twice
    index twice at one source location, so matches are counted per source
    location, not per node.
+
+JavaScript and TypeScript calls (``origin == "js"``) have no service name.
+:func:`link_js_call` matches them by HTTP method and normalised route against
+the server endpoints of every registered repository except the caller's, and
+reports ``ambiguous`` when more than one location (usually more than one
+repository) fits.  A call that is not a statically known route is
+``unmatchable`` for one of: ``non_literal_url``, ``absolute_url``,
+``method_dynamic``, ``placeholder_in_route``.  A server route that takes the
+rest of the path (a Next.js ``[...path]`` route, an Express ``*``) matches
+only by exact method and literal prefix, and only when no exact route fits;
+that match is reported with ``confidence`` ``low``.
 """
 
 from __future__ import annotations
@@ -46,8 +57,10 @@ __all__ = [
     "ClientCall",
     "LinkResult",
     "ServerEndpoint",
+    "ServerIndex",
     "TargetResolution",
     "link_call",
+    "link_js_call",
     "normalize_route",
     "normalize_service_name",
     "resolve_service",
@@ -89,6 +102,14 @@ class ClientCall:
     route_dynamic: bool = False
     url_literal: bool = False
     url_from_argument: bool = False
+    #: ``"feign"`` (a Spring client method) or ``"js"`` (a JavaScript/TypeScript call).
+    origin: str = "feign"
+    #: For ``origin == "js"``: ``axios``, ``fetch``, ``jquery``, ``ember-ajax`` or ``ember-data``.
+    client_kind: Optional[str] = None
+    method_dynamic: bool = False
+    absolute_url: bool = False
+    #: Why the call is only a likely match (for example ``ember_data_convention``).
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,6 +124,10 @@ class ServerEndpoint:
     #: Identifies the repository beyond its display name (the registry path),
     #: so sibling checkouts that share a name are not merged into one match.
     origin: str = ""
+    #: The route ends in a rest-of-path wildcard (``/api/proxy/{...path}``).
+    catch_all: bool = False
+    #: The wildcard may also match nothing (``[[...path]]``).
+    optional_catch_all: bool = False
 
 
 @dataclass(frozen=True)
@@ -131,6 +156,8 @@ class LinkResult:
     status: str
     reason: Optional[str] = None
     candidates: tuple[ServerEndpoint, ...] = ()
+    #: ``"low"`` when the match rests on a wildcard server route.
+    confidence: str = "high"
 
 
 def normalize_service_name(name: str) -> str:
@@ -189,8 +216,20 @@ def unmatchable_reason(call: ClientCall) -> Optional[str]:
 
     Checked in this order, so each call has one reason:
     ``service_unresolved``, ``url_from_argument``, ``url_literal``,
-    ``route_dynamic``, ``placeholder_in_route``.
+    ``route_dynamic``, ``placeholder_in_route``.  A JavaScript call has its
+    own list: ``non_literal_url``, ``absolute_url``, ``method_dynamic``,
+    ``placeholder_in_route``.
     """
+    if call.origin == "js":
+        if call.route_dynamic:
+            return "non_literal_url"
+        if call.absolute_url:
+            return "absolute_url"
+        if call.method_dynamic:
+            return "method_dynamic"
+        if "${" in call.route or _UNRESOLVED_MARKER in call.route:
+            return "placeholder_in_route"
+        return None
     if call.service_unresolved or not call.service:
         return "service_unresolved"
     if call.url_from_argument:
@@ -260,7 +299,7 @@ def link_call(
     wanted = normalize_route(call.route)
     by_location: dict[tuple[str, str, Optional[str], Optional[int], str, str], ServerEndpoint] = {}
     for server in servers:
-        if not _method_matches(call.http_method, server.http_method):
+        if server.catch_all or not _method_matches(call.http_method, server.http_method):
             continue
         shape = normalize_route(server.route)
         if shape != wanted:
@@ -279,3 +318,84 @@ def link_call(
     if len(candidates) == 1:
         return LinkResult(MATCHED, candidates=candidates)
     return LinkResult(AMBIGUOUS, candidates=candidates)
+
+
+def _location_key(
+    server: ServerEndpoint, shape: str,
+) -> tuple[str, str, Optional[str], Optional[int], str, str]:
+    return (
+        server.origin, server.repo, server.file, server.line,
+        server.http_method.upper(), shape,
+    )
+
+
+def _sorted_candidates(found: Mapping[object, ServerEndpoint]) -> tuple[ServerEndpoint, ...]:
+    return tuple(sorted(
+        found.values(),
+        key=lambda s: (s.repo, s.file or "", s.line or 0, s.http_method, s.route),
+    ))
+
+
+def _catch_all_prefix(route: str) -> str:
+    """The literal part of a wildcard route, normalised: ``/a/{...p}`` -> ``/a``."""
+    cut = route.find("{...")
+    head = route if cut == -1 else route[:cut]
+    star = head.find("*")
+    if star != -1:
+        head = head[:star]
+    return normalize_route(head)
+
+
+class ServerIndex:
+    """Server endpoints indexed by normalised route, for many lookups.
+
+    Building it is one pass; :func:`link_js_call` then answers each call
+    without scanning every endpoint.  Wildcard (catch-all) routes are kept
+    apart: they are consulted only when no exact route fits.
+    """
+
+    def __init__(self, servers: Iterable[ServerEndpoint]) -> None:
+        self.exact: dict[str, list[ServerEndpoint]] = {}
+        self.catch_all: list[tuple[str, ServerEndpoint]] = []
+        for server in servers:
+            if server.catch_all:
+                prefix = _catch_all_prefix(server.route)
+                # A root wildcard would match every route; it matches none.
+                if prefix != "/":
+                    self.catch_all.append((prefix, server))
+                continue
+            self.exact.setdefault(normalize_route(server.route), []).append(server)
+
+
+def link_js_call(call: ClientCall, index: ServerIndex) -> LinkResult:
+    """Classify a JavaScript/TypeScript call against every server endpoint.
+
+    Exact routes win: a wildcard route is considered only when no exact route
+    of the right method fits, must have the same HTTP method (a server that
+    accepts every method does not count), a literal prefix that is a whole
+    leading path segment run of the call, and at least one more segment
+    unless the wildcard is optional.  Such a match has ``confidence`` ``low``.
+    Call :func:`unmatchable_reason` first.
+    """
+    wanted = normalize_route(call.route)
+    found: dict[object, ServerEndpoint] = {}
+    for server in index.exact.get(wanted, ()):
+        if _method_matches(call.http_method, server.http_method):
+            found.setdefault(_location_key(server, wanted), server)
+    if found:
+        candidates = _sorted_candidates(found)
+        return LinkResult(MATCHED if len(candidates) == 1 else AMBIGUOUS, candidates=candidates)
+    method = call.http_method.upper()
+    for prefix, server in index.catch_all:
+        if server.http_method.upper() != method:
+            continue
+        below = wanted.startswith(prefix + "/")
+        if below or (server.optional_catch_all and wanted == prefix):
+            found.setdefault(_location_key(server, prefix + "/**"), server)
+    if not found:
+        return LinkResult(NO_ROUTE_MATCH)
+    candidates = _sorted_candidates(found)
+    return LinkResult(
+        MATCHED if len(candidates) == 1 else AMBIGUOUS,
+        reason="catch_all_route", candidates=candidates, confidence="low",
+    )

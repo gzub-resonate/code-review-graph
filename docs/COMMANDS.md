@@ -914,10 +914,11 @@ route: str | None            # Only calls whose route equals this or lies below 
 status: str | None           # matched | ambiguous | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
+origin: str | None           # feign | js; default: both
 ```
 
-Joins each outbound Spring Feign call to the server endpoint it reaches in
-another registered repository. It is computed on every call from the graphs
+Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
+call, to the server endpoint it reaches in another registered repository. It is computed on every call from the graphs
 that already exist, opened read-only; nothing is stored, so no rebuild is
 needed beyond a graph that already indexes Feign clients. Each row has the
 calling repo, file and line, the HTTP method, route and service name, a
@@ -944,6 +945,70 @@ How a call is classified:
   trailing slash and treating every `{name}` as one wildcard segment. Case is
   kept. A `{name}` in the call does not match a fixed segment on the server.
   One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
+
+Every row has an `origin`: `feign` for a Spring client method, `js` for a
+JavaScript or TypeScript call. Feign rows are classified exactly as above.
+
+JavaScript and TypeScript calls (`origin: "js"`) have no service name, so they
+are matched by HTTP method and normalised route against the server endpoints of
+every registered repository except the caller's. A row has a `client_kind`
+(`axios`, `fetch`, `jquery`, `ember-ajax` or `ember-data`). One matching
+location is `matched`, several (usually in several repositories) are
+`ambiguous` with the candidate repositories, none is `no_route_match`. A call
+is `unmatchable` with one of these reasons: `non_literal_url` (a variable or
+computed URL, or a template or concatenation that starts with an unknown
+piece), `absolute_url` (a full `https://...` URL or an absolute `baseURL`),
+`method_dynamic` (the method is not a literal) or `placeholder_in_route`.
+A match carries `confidence: "low"` and `confidence_notes` when it rests on a
+guess: `ember_data_convention` (the route was derived from a model name),
+`receiver_inferred` (an instance imported from another file, recognised by its
+name), `base_url_not_literal`, or `catch_all_route`. A server route that takes
+the rest of the path (a Next.js `[...path]` route, an Express `*`) matches only
+a call with the same HTTP method and a literal prefix that is a whole leading
+path, with at least one more segment (none for `[[...path]]`), and only when no
+exact route fits; a catch-all at the root matches nothing. Its candidate has
+`catch_all: true`.
+
+What the parser records for JavaScript and TypeScript (all of it is a plain
+`Endpoint` node: client ones have `role: "client"` and a `REQUESTS` edge from
+the enclosing function, server ones a `HANDLES` edge from the handler):
+
+- Calls: `axios.get/post/put/patch/delete/head/options(url)`,
+  `axios({method, url})`, `axios.request`, instances from `axios.create`
+  (their `baseURL` is applied only when it is a string literal in the same
+  file, or set by `instance.defaults.baseURL = '...'`), `fetch(url, {method})`,
+  `$.ajax`, `$.getJSON`, `$.get`, `$.post`, and Ember `this.ajax`,
+  `this.ajax.request` and `ajax`. The URL may be a string, a template literal
+  (each `${expr}` becomes `{param}`), a `+` concatenation, or a same-file
+  top-level `const` string; a leading unknown piece is never guessed. A call
+  whose URL cannot be read is recorded as unmatchable only for a certain HTTP
+  client (axios, `$.ajax`, Ember ajax, `fetch`), never for an imported
+  instance. Test files are skipped.
+- Ember Data: a model under `app/models` (or `addon/models`, or a pods
+  `model.js`) becomes `GET /<ns>/<types>`, `GET /<ns>/<types>/{id}`,
+  `POST /<ns>/<types>`, `PUT /<ns>/<types>/{id}` and `DELETE /<ns>/<types>/{id}`,
+  from the literal `namespace` of `adapters/application` and the model's own
+  adapter (which may also set a literal `pathForType`). The edges are
+  `INFERRED` at 0.6. A `RESTAdapter` camelizes the plural (`blogPosts`) and
+  updates with `PUT`; a `JSONAPIAdapter` dasherizes (`blog-posts`) and
+  updates with `PATCH`. A `host` is recorded but not used; `urlFor*` hooks are
+  ignored; a non-literal `namespace` or `pathForType` makes the model
+  unmatchable. Plurals follow the regular rules (`y` to `ies`, `s`/`x`/`z`/`ch`/`sh`
+  to `es`, otherwise `s`) with a short irregular list (`person`, `child`, `man`,
+  `woman`, `mouse`, `foot`, `tooth`, `goose`, `ox`) and uncountables such as
+  `sheep` and `series`; any other irregular noun is wrong. The adapter files are
+  read from disk when the model is parsed, so an adapter edit shows after the
+  model is parsed again.
+- Servers: Next.js app router `route.ts|js` exports (`GET`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `HEAD`, `OPTIONS`; the path comes from the directory,
+  `[id]` becomes `{id}`, `(group)` and `@slot` directories are dropped,
+  `[...path]` and `[[...path]]` are catch-alls), the pages router under
+  `pages/api` (methods read from `req.method` comparisons, otherwise `ANY`), and
+  `app.get('/x', handler)` style calls in files that load Express, Koa, Fastify,
+  Hono, restify, Hapi, polka or connect (also `router.route('/x').get(...)`
+  and `fastify.route({method, url})`). `:id` becomes `{id}`. `app.use('/prefix',
+  router)` mounting is not followed, so a mounted router's routes are
+  recorded without the prefix.
 
 `repos` selects the calling repositories only; targets are always looked up
 across the whole registry. Names that match no entry are returned in

@@ -200,7 +200,8 @@ def test_component_class_links_to_its_classic_template(classic) -> None:
 def test_routes_become_endpoints_handled_by_route_controller_template(classic) -> None:
     root, conn = classic
     endpoints = {json.loads(r["extra"])["route_name"]: r["qualified_name"]
-                 for r in conn.execute("SELECT * FROM nodes WHERE kind = 'Endpoint'")}
+                 for r in conn.execute("SELECT * FROM nodes WHERE kind = 'Endpoint'")
+                 if "route_name" in json.loads(r["extra"])}
     assert set(endpoints) == {"projects", "projects.show", "archive", "about", "legacy-reports"}
     handlers = {}
     for s, t, e, tier in _edges(conn, root, "HANDLES"):
