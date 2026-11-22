@@ -3359,6 +3359,7 @@ class TestGDScriptParsing:
         item_contains = {t for s, t in contains if s.endswith("::Item")}
         assert any(t.endswith("::Item.promote") for t in item_contains)
 
+
 class TestJuliaParsing:
     def setup_method(self):
         self.parser = CodeParser()
@@ -3519,6 +3520,7 @@ class TestJuliaParsing:
             "show" in e.source and e.target == "Base"
             for e in refs
         )
+
 
 class TestRescriptParser:
     def setup_method(self):
@@ -3826,6 +3828,7 @@ class TestRescriptCrossModuleResolver:
         # Second run should find nothing new — all already resolved.
         assert second["calls_resolved"] == 0
         assert second["imports_resolved"] == 0
+
 
 class TestNixParsing:
     """Flake-aware Nix parser — see the Nix language-support epic."""
@@ -4395,6 +4398,7 @@ class TestVerilogParsing:
         file_nodes = [n for n in self.nodes if n.kind == "File"]
         assert len(file_nodes) == 1
         assert file_nodes[0].language == "verilog"
+
 
 class TestSQLParsing:
     def setup_method(self):
@@ -5626,6 +5630,7 @@ class TestZigParsing:
         for node in self.nodes:
             assert node.language == "zig"
 
+
 class TestHCLParsing:
     """HCL / Terraform parser — closes #199."""
 
@@ -6392,3 +6397,28 @@ class TestAslParsing:
         assert state.line_start == state.line_end
         parallel = self.states["sample/Fan Out"]
         assert parallel.line_end - parallel.line_start > 20
+
+
+class TestEmberTemplateParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.path = FIXTURES / "ember" / "classic" / "app" / "templates" / "projects.hbs"
+        self.nodes, self.edges = self.parser.parse_file(self.path)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(self.path) == "handlebars"
+        assert self.parser.detect_language(Path("x.handlebars")) is None
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert file_nodes[0].language == "handlebars"
+
+    def test_invocations_are_imports_with_placeholders(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert targets == {
+            "ember:component:task-card",
+            "ember:invocable:project-link",
+            "ember:modifier:did-render-thing",
+            "ember:invocable:t",
+        }
+
+    def test_no_grammar_is_needed_and_no_extra_nodes_are_made(self):
+        assert [n.kind for n in self.nodes] == ["File"]

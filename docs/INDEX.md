@@ -9,6 +9,7 @@
 - [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md): add a language through `.code-review-graph/languages.toml`
 - [REPO_ALIASES.md](REPO_ALIASES.md): give a registered repository a second name through `repo-aliases.toml`
 - [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md): GitHub Actions, Dockerfile and Terragrunt references as external edges
+- [EMBER.md](EMBER.md): what the graph knows about Ember.js apps, how names are bound, and what it cannot see
 - [architecture.md](architecture.md): system design and data flow
 - [schema.md](schema.md): node and edge types, SQLite tables (including flows, communities, FTS5)
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md): `code-review-graph doctor`, then common problems and fixes, including Windows/WSL

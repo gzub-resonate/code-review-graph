@@ -1,0 +1,8 @@
+{{!-- {{commented-out-widget}} --}}
+<h1>{{t "classic.title.secret"}}</h1>
+{{#each this.model as |project|}}
+  <TaskCard @task={{project}} class="row {{if project.active 'on'}}" />
+  {{project-link project}}
+{{/each}}
+<div {{did-render-thing this.go}}></div>
+{{yield}}

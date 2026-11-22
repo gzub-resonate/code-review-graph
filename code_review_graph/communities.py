@@ -90,6 +90,11 @@ def _naming_members(members: list[GraphNode]) -> list[GraphNode]:
     return production_members or members
 
 
+def _top_by_count(counts: Counter[str]) -> tuple[str, int]:
+    """Most common entry; a tie goes to the smaller name, never to member order."""
+    return min(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
 def _generate_community_name(members: list[GraphNode]) -> str:
     """Generate a meaningful name for a community of nodes.
 
@@ -112,7 +117,7 @@ def _generate_community_name(members: list[GraphNode]) -> str:
     class_names = [m.name for m in naming_members if m.kind == "Class"]
     if class_names:
         class_counts = Counter(class_names)
-        top_class, top_count = class_counts.most_common(1)[0]
+        top_class, top_count = _top_by_count(class_counts)
         if top_count > len(naming_members) * 0.4:
             if prefix:
                 return f"{prefix}-{_to_slug(top_class)}"
@@ -148,7 +153,7 @@ def _extract_file_prefix(file_paths: list[str]) -> str:
             parts.append(stem)
 
     counts = Counter(parts)
-    top_part, _ = counts.most_common(1)[0]
+    top_part, _ = _top_by_count(counts)
     return _to_slug(top_part)
 
 
@@ -165,7 +170,8 @@ def _extract_keywords(members: list[GraphNode]) -> list[str]:
 
     if not word_counts:
         return []
-    return [w for w, _ in word_counts.most_common(5)]
+    ranked = sorted(word_counts.items(), key=lambda item: (-item[1], item[0]))
+    return [w for w, _ in ranked[:5]]
 
 
 def _split_name(name: str) -> list[str]:
