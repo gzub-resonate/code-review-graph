@@ -947,36 +947,40 @@ def _strip_comments(text: str) -> str:
     """Drop ``/* */`` blocks and whole-line ``//`` comments in one linear pass.
 
     An unterminated ``/*`` removes the rest of the text.  Quotes are not
-    tracked, which is the same approximation the earlier regexes made.
+    tracked, which is the same approximation the earlier regexes made.  Each
+    blank run at the start of a line is measured once.
     """
     out: list[str] = []
     i = 0
     n = len(text)
     line_start = True
     while i < n:
+        if line_start:
+            j = i
+            while j < n and text[j] in " \t\r":
+                j += 1
+            if text.startswith("//", j):
+                nl = text.find("\n", j)
+                if nl == -1:
+                    break
+                i = nl
+                continue
+            out.append(text[i:j])
+            i = j
+            line_start = False
+            if i >= n:
+                break
         if text.startswith("/*", i):
             end = text.find("*/", i + 2)
             if end == -1:
                 break
             i = end + 2
             continue
-        if line_start and text.startswith("//", _skip_blanks(text, i)):
-            nl = text.find("\n", i)
-            if nl == -1:
-                break
-            i = nl
-            continue
         ch = text[i]
         out.append(ch)
-        line_start = ch == "\n" or (line_start and ch in " \t\r")
+        line_start = ch == "\n"
         i += 1
     return "".join(out)
-
-
-def _skip_blanks(text: str, i: int) -> int:
-    while i < len(text) and text[i] in " \t\r":
-        i += 1
-    return i
 
 
 def _read_adapter(path: Path) -> Optional[str]:

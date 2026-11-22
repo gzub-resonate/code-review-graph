@@ -730,3 +730,15 @@ def test_strip_comments_keeps_code_and_drops_comments():
     assert "x" not in out.replace("namespace", "")
     assert "whole line" not in out
     assert "namespace: 'v1'" in out
+
+
+def test_strip_comments_is_linear_on_long_blank_runs():
+    import time
+
+    from code_review_graph.js_api_extract import _strip_comments
+
+    for blank in (" ", "\r", "\t"):
+        text = blank * 190_000 + "x"
+        start = time.perf_counter()
+        _strip_comments(text)
+        assert time.perf_counter() - start < 2.0
