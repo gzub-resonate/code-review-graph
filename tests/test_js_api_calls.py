@@ -705,3 +705,28 @@ export async function load(id: string) {
 }
 """)
     assert sigs(clients(nodes)) == [("GET", "/v3/tags/{param}"), ("POST", "/v3/tags")]
+
+
+def test_strip_comments_is_linear_on_unterminated_blocks():
+    import time
+
+    from code_review_graph.js_api_extract import _strip_comments
+
+    hostile = "/* " * 60_000
+    start = time.perf_counter()
+    assert _strip_comments(hostile) == ""
+    assert time.perf_counter() - start < 2.0
+    blanks = "\n" * 150_000
+    start = time.perf_counter()
+    _strip_comments(blanks)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_strip_comments_keeps_code_and_drops_comments():
+    from code_review_graph.js_api_extract import _strip_comments
+
+    text = "a /* x */ b\n  // whole line\nnamespace: 'v1' // tail\n"
+    out = _strip_comments(text)
+    assert "x" not in out.replace("namespace", "")
+    assert "whole line" not in out
+    assert "namespace: 'v1'" in out

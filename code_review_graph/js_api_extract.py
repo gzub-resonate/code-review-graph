@@ -917,12 +917,10 @@ def pluralize_model(model_name: str, dasherized: bool) -> str:
     return f"{prefix}/{plural}" if prefix else plural
 
 
-_COMMENT_BLOCK_RE = re.compile(r"/\*.*?\*/", re.S)
-_COMMENT_LINE_RE = re.compile(r"(?m)^\s*//.*$")
 _NAMESPACE_RE = re.compile(r"""\bnamespace\s*[:=]\s*(?:(['"])([^'"]*)\1|(\S))""")
 _PATH_FOR_TYPE_RE = re.compile(r"\bpathForType\b")
 _PATH_FOR_TYPE_LITERAL_RE = re.compile(
-    r"""pathForType[^{=]*(?:\{|=>)\s*(?:\{\s*)?(?:return\s+)?(['"])([^'"]+)\1"""
+    r"""pathForType[^{=]{0,200}(?:\{|=>)\s*(?:\{\s*)?(?:return\s+)?(['"])([^'"]+)\1"""
 )
 _ADAPTER_KIND_RE = re.compile(r"\b(RESTAdapter|JSONAPIAdapter)\b")
 _HOST_RE = re.compile(r"""\bhost\s*[:=]\s*(['"])([^'"]*)\1""")
@@ -942,15 +940,53 @@ class AdapterInfo:
     explicit_base: bool = False
 
 
+_MAX_ADAPTER_BYTES = 200_000
+
+
+def _strip_comments(text: str) -> str:
+    """Drop ``/* */`` blocks and whole-line ``//`` comments in one linear pass.
+
+    An unterminated ``/*`` removes the rest of the text.  Quotes are not
+    tracked, which is the same approximation the earlier regexes made.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    line_start = True
+    while i < n:
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end == -1:
+                break
+            i = end + 2
+            continue
+        if line_start and text.startswith("//", _skip_blanks(text, i)):
+            nl = text.find("\n", i)
+            if nl == -1:
+                break
+            i = nl
+            continue
+        ch = text[i]
+        out.append(ch)
+        line_start = ch == "\n" or (line_start and ch in " \t\r")
+        i += 1
+    return "".join(out)
+
+
+def _skip_blanks(text: str, i: int) -> int:
+    while i < len(text) and text[i] in " \t\r":
+        i += 1
+    return i
+
+
 def _read_adapter(path: Path) -> Optional[str]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    if len(text) > 500_000:
+    if len(text) > _MAX_ADAPTER_BYTES:
         return None
-    text = _COMMENT_BLOCK_RE.sub("", text)
-    return _COMMENT_LINE_RE.sub("", text)
+    return _strip_comments(text)
 
 
 def _apply_adapter(text: str, info: AdapterInfo) -> None:
