@@ -440,6 +440,8 @@ QUERY_PATTERNS = {
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
+    "next_states_of": "Find the Step Functions states a state hands over to",
+    "previous_states_of": "Find the Step Functions states that hand over to a state",
     "triggers_of": "Find methods invoked by a scheduler or other trigger",
     "triggered_by": "Find schedulers or other triggers that invoke a method",
     "publishers_of": "Find methods that publish an event",
