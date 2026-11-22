@@ -272,6 +272,22 @@ def _run_python_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _flows_dirty(store: GraphStore) -> bool:
+    from .flows import flows_dirty
+    return flows_dirty(store)
+
+
+def _run_scala_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Scala import and call resolver, swallowing any failure so
+    it never fails a build."""
+    try:
+        from .scala_resolver import resolve_scala_calls
+        return resolve_scala_calls(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Scala resolver failed: %s", exc)
+        return None
+
+
 def _run_rescript_resolver(store: GraphStore) -> Optional[dict]:
     """Run the ReScript cross-module resolver, swallowing any failure so
     build never fails because of it. Returns stats or None on error.
@@ -3127,6 +3143,7 @@ def full_build(
     # Post-processing cannot redo these, so they run while the marker still
     # says in progress: a process killed here gets a full rebuild.
     python_stats = _run_python_resolver(store)
+    scala_stats = _run_scala_resolver(store)
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
     aop_stats = _run_aop_resolver(store)
@@ -3156,6 +3173,7 @@ def full_build(
         "total_edges": total_edges,
         "errors": errors,
         "python_resolution": python_stats,
+        "scala_resolution": scala_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "aop_resolution": aop_stats,
@@ -3247,6 +3265,7 @@ def incremental_update(
             "errors": rebuilt["errors"],
             "identity_rebuild": True,
             "python_resolution": rebuilt["python_resolution"],
+            "scala_resolution": rebuilt["scala_resolution"],
             "rescript_resolution": rebuilt["rescript_resolution"],
             "spring_resolution": rebuilt["spring_resolution"],
             "event_resolution": rebuilt["event_resolution"],
@@ -3631,6 +3650,11 @@ def incremental_update(
     )
     python_stats = _run_python_resolver(store) if python_changed else None
 
+    scala_changed = has_graph_changes and any(
+        path.endswith(".scala") for path in candidate_paths
+    )
+    scala_stats = _run_scala_resolver(store) if scala_changed else None
+
     rescript_changed = has_graph_changes and any(
         rp.endswith((".res", ".resi")) for rp in all_files
     )
@@ -3717,6 +3741,7 @@ def incremental_update(
         "errors": errors,
         "freshness_advanced": freshness_advanced,
         "python_resolution": python_stats,
+        "scala_resolution": scala_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "aop_resolution": aop_stats,
@@ -5047,7 +5072,7 @@ def _create_watch_handler(
                         files_updated > 0
                         # A project file change parses nothing but can rebind
                         # C# calls in unchanged files; the binder marks flows.
-                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                        or (changed_files and _flows_dirty(store))
                     ):
                         postprocess_result = on_files_updated(store)
                         _raise_watch_postprocess_warnings(postprocess_result)

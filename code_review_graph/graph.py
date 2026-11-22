@@ -563,6 +563,7 @@ _RESOLVER_BOUND_KEYS = (
     "ember_resolved",
     INHERITED_ENDPOINT_KEY,
     "rescript_open_module",
+    "scala_resolved",
     "scoped_resolved",
     "spring_resolved",
     "temporal_resolved",
@@ -1663,8 +1664,15 @@ class GraphStore:
                     f"FROM edges WHERE kind = ? AND {column} = ? AND {other} != ?",
                     (kind, base, base),
                 ).fetchall():
-                    if row["id"] not in handled:
-                        settle(row, column, _load_collision_extra(row["extra"]), base)
+                    if row["id"] in handled:
+                        continue
+                    collision_extra = _load_collision_extra(row["extra"])
+                    if "scala_resolved" in collision_extra:
+                        # ``scala_resolver`` bound this call from declarations
+                        # and scopes: a ``new Foo`` reaches the class, never its
+                        # companion object.
+                        continue
+                    settle(row, column, collision_extra, base)
 
         if not updates:
             return 0
@@ -4096,7 +4104,12 @@ class GraphStore:
                 ambiguity_supported: list[str] = []
             else:
                 inherited_through = None
-                imported_files = import_targets.get(context_file, set())
+                # Scala imports name types, not call targets: a call is only
+                # bound by ``scala_resolver``, which reads scopes and receivers.
+                imported_files = (
+                    set() if caller_language == "scala"
+                    else import_targets.get(context_file, set())
+                )
                 # A module receiver names its file outright; when that module
                 # only re-exports the name, the parser stamps the defining
                 # file, which the call site never imports itself.

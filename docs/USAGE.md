@@ -329,6 +329,14 @@ methods use the full chain too (`Alpha.Same.run` and `Beta.Same.run`). C# names 
 namespace and the full containing-type path. Local calls stay in that lexical class. Rebuild
 an existing graph to replace rows created with colliding identities.
 
+Scala calls are linked across files from declarations and scopes, not from names alone:
+`Foo.bar(...)` where `Foo` is an object, `new Foo(...)`, `Foo(...)` for a companion `apply` or
+a case class, a call on a value declared as `Foo`, and a bare call to a member the enclosing
+type inherits or an import brings in. Imports resolve through package clauses, renames and
+wildcards, and an import of something outside the repository stays external. A call that
+several declarations could mean is listed as ambiguous, and a library name is never linked.
+Rebuild an existing Scala graph once to record what the resolver reads.
+
 Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
 Their imports, calls, and references alone do not keep application symbols alive in
 dead-code reports. Normal application callers and ordinary test evidence still count.
