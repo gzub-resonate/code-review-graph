@@ -1331,6 +1331,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".yml": "yaml",
     ".yaml": "yaml",
     ".json": "json",
+    ".asl": "asl",
     ".robot": "robot",
     ".resource": "robot",
     ".liquid": "liquid",
@@ -3441,6 +3442,139 @@ _JSON_VALUE_TYPES = {
     "string": "string",
     "true": "boolean",
 }
+
+# ---------------------------------------------------------------------------
+# Amazon States Language (AWS Step Functions)
+# ---------------------------------------------------------------------------
+# State machines are plain JSON, so the structural parser reads them with the
+# bundled JSON grammar. Only names and shape enter the graph: never ``Parameters``,
+# ``InputPath``/``OutputPath``/``ResultPath``, ``Choice`` variables or values, or
+# ``Comment`` text. From a resource ARN only the resource name survives.
+_ASL_STATE_TYPES = frozenset({
+    "Task", "Choice", "Parallel", "Map", "Wait", "Pass", "Succeed", "Fail",
+})
+# Unquoted ``${key}`` template variables (Terraform ``templatefile``, Terragrunt)
+# make a definition invalid JSON until it is rendered. Quote them so the shape
+# can still be read; a quoted string is matched first and left alone.
+_ASL_UNQUOTED_PLACEHOLDER_RE = re.compile(
+    rb'"(?:[^"\\\n]|\\.)*"|\$\{[^}"\n]{0,256}\}',
+)
+_ASL_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_.\-]{0,127})\}")
+_ASL_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,256}")
+_ASL_SERVICE_RE = re.compile(r"[a-z0-9][a-z0-9\-]{0,39}")
+_ASL_ACTION_RE = re.compile(r"[A-Za-z0-9]{1,64}(?:\.sync(?::2)?|\.waitForTaskToken)?")
+_ASL_OPTIMIZED_RESOURCE_RE = re.compile(r"arn:[a-z\-]+:states:::(.+)")
+# Optimized integrations (and the Lambda ARN form) whose Parameters name the
+# thing a Task calls. Value: the Parameters fields to read, in order, with the
+# external-target kind for each. Fields whose value is a path or an intrinsic
+# are dynamic and keep no text.
+_ASL_TARGET_FIELDS: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
+    ("lambda", "invoke"): (("FunctionName", "function"),),
+    ("states", "startExecution"): (("StateMachineArn", "state-machine"),),
+    ("ecs", "runTask"): (("TaskDefinition", "task-definition"), ("Cluster", "cluster")),
+    ("sns", "publish"): (("TopicArn", "topic"),),
+    ("sqs", "sendMessage"): (("QueueUrl", "queue"),),
+    ("dynamodb", "getItem"): (("TableName", "table"),),
+    ("dynamodb", "putItem"): (("TableName", "table"),),
+    ("dynamodb", "updateItem"): (("TableName", "table"),),
+    ("dynamodb", "deleteItem"): (("TableName", "table"),),
+    ("batch", "submitJob"): (("JobDefinition", "job-definition"),),
+    ("glue", "startJobRun"): (("JobName", "job"),),
+    ("codebuild", "startBuild"): (("ProjectName", "project"),),
+}
+_ASL_EXTERNAL_PREFIX = {
+    "lambda": "aws-lambda", "states": "aws-states", "ecs": "aws-ecs",
+    "sns": "aws-sns", "sqs": "aws-sqs", "dynamodb": "aws-dynamodb",
+    "batch": "aws-batch", "glue": "aws-glue", "codebuild": "aws-codebuild",
+}
+# ARN resource part -> name, by target kind: the prefix before the name.
+_ASL_ARN_RESOURCE_PREFIX = {
+    "function": "function:", "state-machine": "stateMachine:",
+    "task-definition": "task-definition/", "cluster": "cluster/",
+    "table": "table/", "job-definition": "job-definition/",
+}
+
+
+class _AslObj(dict):
+    """A JSON object read for ASL, with the lines it spans."""
+
+    __slots__ = ("line_start", "line_end")
+
+    def __init__(self, line_start: int, line_end: int) -> None:
+        super().__init__()
+        self.line_start = line_start
+        self.line_end = line_end
+
+
+def _asl_quote_placeholders(source: bytes) -> bytes:
+    """Quote unquoted ``${key}`` template variables so the JSON grammar accepts them."""
+    if b"${" not in source:
+        return source
+
+    def _quote(match: re.Match[bytes]) -> bytes:
+        text = match.group(0)
+        return text if text.startswith(b'"') else b'"' + text + b'"'
+
+    return _ASL_UNQUOTED_PLACEHOLDER_RE.sub(_quote, source)
+
+
+def _sanitize_asl_name(name: str) -> str:
+    """Drop control characters from a state or machine name and cap its length."""
+    return re.sub(r"[\x00-\x1f\x7f]", "", name)[:256]
+
+
+def _asl_encode_segment(name: str) -> str:
+    """Escape the characters an ASL path uses as separators."""
+    return (
+        name.replace("%", "%25").replace("/", "%2F")
+        .replace("[", "%5B").replace("]", "%5D")
+    )
+
+
+def _asl_placeholder_keys(text: str) -> list[str]:
+    """Return the ``${key}`` names in *text*, sorted and without repeats."""
+    return sorted(set(_ASL_PLACEHOLDER_RE.findall(text)))
+
+
+def _asl_name_from_value(
+    value: str, target_kind: str,
+) -> tuple[Optional[str], list[str]]:
+    """Reduce one literal Parameters value to a resource name.
+
+    Returns ``(name, placeholder_keys)``. *name* is ``None`` when the name part is
+    not a plain literal; *placeholder_keys* then holds the ``${key}`` names found
+    in the name part only, never the partition, region or account.
+    """
+    text = value.strip()
+    if text.startswith("arn:"):
+        parts = text.split(":", 5)
+        if len(parts) < 6:
+            return None, []
+        resource = parts[5]
+        prefix = _ASL_ARN_RESOURCE_PREFIX.get(target_kind, "")
+        if prefix:
+            if not resource.startswith(prefix):
+                return None, []
+            resource = resource[len(prefix):]
+        elif "/" in resource:
+            resource = resource.rsplit("/", 1)[-1]
+    elif text.startswith(("https://", "http://")):
+        resource = text.rstrip("/").rsplit("/", 1)[-1]
+    else:
+        resource = text
+    if target_kind in ("table",) and "/" in resource:
+        resource = resource.split("/", 1)[0]
+    # A version, alias or revision is a qualifier on the name, not part of it.
+    if target_kind in ("function", "task-definition", "job-definition"):
+        resource = resource.split(":", 1)[0]
+    elif target_kind == "state-machine":
+        resource = resource.split(":", 1)[0]
+    if "${" in resource:
+        return None, _asl_placeholder_keys(resource)
+    if _ASL_NAME_RE.fullmatch(resource) is None:
+        return None, []
+    return resource, []
+
 # Folders whose JSON is data for a test, a demo or the docs, not settings for
 # the project. On vega, ``docs/`` alone held 168 example specs and data sets
 # that would have become 12,725 paths.
@@ -3878,6 +4012,14 @@ class CodeParser:
     _MAX_JSON_NODES = 1_000
     _MAX_JSON_OCCURRENCE_SAMPLES = 50
     _MAX_JSON_OBJECT_KEYS = 200
+    _MAX_ASL_BYTES = 1_048_576
+    _MAX_ASL_JSON_DEPTH = 64
+    _MAX_ASL_JSON_NODES = 200_000
+    _MAX_ASL_STATES = 2_000
+    _MAX_ASL_NESTING = 8
+    _MAX_ASL_LIST_ITEMS = 500
+    _MAX_ASL_OBJECT_KEYS = 2_000
+    _MAX_ASL_STRING_BYTES = 4_096
     # Ruby load-root discovery reads a handful of repository-root scripts.
     _RUBY_MANIFEST_SCAN_MAX = 10
     _RUBY_MANIFEST_MAX_BYTES = 256 * 1024
@@ -4059,6 +4201,9 @@ class CodeParser:
             return "blade"
         if is_dockerfile_name(path.name):
             return "dockerfile"
+        # A Step Functions definition is JSON, but it is a state machine, not data.
+        if path.name.lower().endswith((".asl.json", ".asl")):
+            return "asl"
         suffix = path.suffix.lower()
         lang = self._extension_map.get(suffix)
         if lang == "yaml" and _is_ansible_path(path):
@@ -4315,6 +4460,10 @@ class CodeParser:
             if _yaml is None:
                 return [], []
             return self._parse_yaml(path, source)
+
+        # Step Functions state machines: states and transitions, never values.
+        if language == "asl":
+            return self._parse_asl(path, source)
 
         # JSON: the same value-free paths, and data files stay out.
         if language == "json":
@@ -11789,6 +11938,385 @@ class CodeParser:
         nodes.extend(stages)
         if truncated:
             file_extra["infra_references_truncated"] = True
+        return nodes, edges
+
+    @staticmethod
+    def _asl_string(node: Any) -> Optional[str]:
+        """Decode one JSON string node, or ``None`` when it is oversized or malformed."""
+        raw = node.text
+        if raw is None or len(raw) > CodeParser._MAX_ASL_STRING_BYTES:
+            return None
+        try:
+            decoded = json.loads(raw.decode("utf-8", errors="replace"))
+        except ValueError:
+            return None
+        return decoded if isinstance(decoded, str) else None
+
+    def _asl_read_value(
+        self, node: Any, depth: int, budget: list[int], problems: set[str],
+    ) -> Any:
+        """Turn a JSON node into plain Python, bounded in depth and size.
+
+        Numbers become ``0`` because no number is ever read; strings are kept
+        only up to ``_MAX_ASL_STRING_BYTES``.
+        """
+        budget[0] -= 1
+        if budget[0] < 0:
+            problems.add("truncated")
+            return None
+        if depth > self._MAX_ASL_JSON_DEPTH:
+            problems.add("truncated")
+            return None
+        kind = node.type
+        if kind == "string":
+            return self._asl_string(node)
+        if kind == "true":
+            return True
+        if kind == "false":
+            return False
+        if kind == "number":
+            return 0
+        if kind == "array":
+            items: list[Any] = []
+            for child in node.named_children:
+                if child.type == "comment":
+                    continue
+                if len(items) >= self._MAX_ASL_LIST_ITEMS:
+                    problems.add("truncated")
+                    break
+                items.append(self._asl_read_value(child, depth + 1, budget, problems))
+            return items
+        if kind == "object":
+            obj = _AslObj(node.start_point[0] + 1, node.end_point[0] + 1)
+            for pair in node.named_children:
+                if pair.type != "pair":
+                    continue
+                key_node = pair.child_by_field_name("key")
+                value_node = pair.child_by_field_name("value")
+                if key_node is None or value_node is None or key_node.type != "string":
+                    continue
+                key = self._asl_string(key_node)
+                if key is None:
+                    continue
+                if key in obj:
+                    problems.add("duplicate_keys")
+                    continue
+                if len(obj) >= self._MAX_ASL_OBJECT_KEYS:
+                    problems.add("truncated")
+                    break
+                obj[key] = self._asl_read_value(value_node, depth + 1, budget, problems)
+            return obj
+        return None
+
+    def _asl_task_target(
+        self, state: dict, resource: Any,
+    ) -> tuple[dict[str, Any], Optional[tuple[str, str, str]]]:
+        """Describe what a Task calls, without keeping any value.
+
+        Returns ``(extra, edge)``: *extra* holds ``resource_kind`` and, for a target
+        that cannot be named, ``target_dynamic`` and the ``${key}`` names; *edge* is
+        ``(target, resource_kind, target_kind)`` when a literal name was found.
+        """
+        extra: dict[str, Any] = {}
+        if not isinstance(resource, str):
+            return extra, None
+        service = ""
+        action = ""
+        fields: tuple[tuple[str, str], ...] = ()
+        arn_parts = resource.split(":", 5)
+        if len(arn_parts) == 6 and arn_parts[0] == "arn" and arn_parts[2] == "lambda":
+            # A Lambda function ARN used directly as the Resource.
+            name, keys = _asl_name_from_value(resource, "function")
+            extra["resource_kind"] = "lambda"
+            if name is not None:
+                return extra, (f"external:aws-lambda:{name}", "lambda", "function")
+            extra["target_dynamic"] = True
+            if keys:
+                extra["target_placeholders"] = keys
+            return extra, None
+        optimized = _ASL_OPTIMIZED_RESOURCE_RE.fullmatch(resource)
+        if optimized is not None:
+            integration = optimized.group(1)
+            if integration.startswith("aws-sdk:"):
+                sdk_service = integration.split(":")[1] if integration.count(":") >= 2 else ""
+                if _ASL_SERVICE_RE.fullmatch(sdk_service):
+                    extra["resource_kind"] = f"aws-sdk:{sdk_service}"
+                return extra, None
+            pieces = integration.split(":", 1)
+            service = pieces[0]
+            action = pieces[1] if len(pieces) > 1 else ""
+            if _ASL_SERVICE_RE.fullmatch(service) is None:
+                return extra, None
+            extra["resource_kind"] = service
+            if _ASL_ACTION_RE.fullmatch(action):
+                extra["resource_action"] = action
+            base_action = action.split(".", 1)[0]
+            fields = _ASL_TARGET_FIELDS.get((service, base_action), ())
+        elif "${" in resource:
+            keys = _asl_placeholder_keys(resource)
+            extra["resource_kind"] = "dynamic"
+            extra["target_dynamic"] = True
+            if keys:
+                extra["target_placeholders"] = keys
+            return extra, None
+        else:
+            return extra, None
+        if not fields:
+            return extra, None
+        params = state.get("Parameters")
+        if not isinstance(params, dict):
+            params = state.get("Arguments")
+        if not isinstance(params, dict):
+            return extra, None
+        dynamic_keys: set[str] = set()
+        saw_dynamic = False
+        for field_name, target_kind in fields:
+            if field_name in params and isinstance(params[field_name], str):
+                name, keys = _asl_name_from_value(params[field_name], target_kind)
+                if name is not None:
+                    prefix = _ASL_EXTERNAL_PREFIX.get(service)
+                    if prefix is not None:
+                        if len(fields) > 1:
+                            extra["target_kind"] = target_kind
+                        return extra, (f"external:{prefix}:{name}", service, target_kind)
+                saw_dynamic = True
+                dynamic_keys.update(keys)
+            elif field_name in params or f"{field_name}.$" in params:
+                # A non-string value or a path (``Field.$``) names nothing statically.
+                saw_dynamic = True
+        if saw_dynamic:
+            extra["target_dynamic"] = True
+            if dynamic_keys:
+                extra["target_placeholders"] = sorted(dynamic_keys)
+        return extra, None
+
+    def _parse_asl(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index an Amazon States Language (Step Functions) state machine.
+
+        A file node, one ``Class`` node for the machine and one ``Function`` node per
+        state, nested Parallel branches and Map processors included. Flow becomes
+        ``TRANSITIONS_TO`` edges (``extra.via`` is ``next``, ``default``, ``choice``,
+        ``catch``, ``branch`` or ``map``); a Task that calls a nameable resource gets a
+        ``REFERENCES`` edge to ``external:aws-<service>:<name>``. Values never enter the
+        graph. An unreadable or oversized definition keeps only its file node.
+        """
+        file_path = normalize_file_path(path)
+        file_extra: dict[str, Any] = {
+            "config_format": "asl",
+            "values_indexed": False,
+            "asl_problem": None,
+        }
+        nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="asl",
+            is_test=_is_test_file(file_path),
+            extra=file_extra,
+        )]
+        edges: list[EdgeInfo] = []
+        if len(source) > self._MAX_ASL_BYTES:
+            file_extra["asl_problem"] = "too_large"
+            return nodes, edges
+        json_parser = self._get_parser("json")
+        if json_parser is None:
+            file_extra["asl_problem"] = "no_json_grammar"
+            return nodes, edges
+        tree = json_parser.parse(_asl_quote_placeholders(source))
+        root = tree.root_node
+        if root.has_error:
+            file_extra["asl_problem"] = "invalid_json"
+            return nodes, edges
+        values = [c for c in root.named_children if c.type != "comment"]
+        problems: set[str] = set()
+        budget = [self._MAX_ASL_JSON_NODES]
+        document = (
+            self._asl_read_value(values[0], 0, budget, problems) if len(values) == 1 else None
+        )
+        if not isinstance(document, _AslObj) or not isinstance(document.get("States"), dict):
+            file_extra["asl_problem"] = "not_a_state_machine"
+            return nodes, edges
+
+        name = path.name
+        for suffix in (".asl.json", ".asl"):
+            if name.lower().endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        machine = _sanitize_asl_name(name) or "state-machine"
+        machine_extra: dict[str, Any] = {
+            "asl_format": True,
+            "state_count": 0,
+            "unresolved_transitions": 0,
+        }
+        query_language = document.get("QueryLanguage")
+        if query_language in ("JSONPath", "JSONata"):
+            machine_extra["query_language"] = query_language
+        machine_qualified = f"{file_path}::{machine}"
+        nodes.append(NodeInfo(
+            kind="Class",
+            name=machine,
+            file_path=file_path,
+            line_start=document.line_start,
+            line_end=document.line_end,
+            language="asl",
+            extra=machine_extra,
+        ))
+        edges.append(EdgeInfo(
+            kind="CONTAINS", source=file_path, target=machine_qualified,
+            file_path=file_path, line=document.line_start,
+        ))
+
+        seen_identities: set[str] = set()
+
+        def read_machine(
+            definition: _AslObj, prefix: str, parent_qualified: str, depth: int,
+        ) -> None:
+            states = definition.get("States")
+            if not isinstance(states, _AslObj):
+                return
+            start_at = definition.get("StartAt")
+            qualified_by_name: dict[str, str] = {}
+            ordered: list[tuple[str, _AslObj, str]] = []
+            for raw_name, state in states.items():
+                if not isinstance(state, _AslObj):
+                    continue
+                state_name = _sanitize_asl_name(raw_name)
+                identity = f"{machine}/{prefix}{_asl_encode_segment(state_name)}"
+                if identity in seen_identities:
+                    problems.add("collision")
+                    continue
+                if len(seen_identities) >= self._MAX_ASL_STATES:
+                    problems.add("truncated")
+                    break
+                seen_identities.add(identity)
+                qualified_by_name[state_name] = f"{file_path}::{identity}"
+                ordered.append((state_name, state, qualified_by_name[state_name]))
+            for state_name, state, qualified in ordered:
+                state_type = state.get("Type")
+                if state_type not in _ASL_STATE_TYPES:
+                    state_type = "Unknown"
+                extra: dict[str, Any] = {
+                    "state_type": state_type,
+                    "is_start": isinstance(start_at, str)
+                    and _sanitize_asl_name(start_at) == state_name,
+                    "end": state.get("End") is True or state_type in ("Succeed", "Fail"),
+                }
+                target_edge = None
+                if state_type == "Task":
+                    task_extra, target_edge = self._asl_task_target(
+                        state, state.get("Resource"),
+                    )
+                    extra.update(task_extra)
+                state_ql = state.get("QueryLanguage")
+                if state_ql in ("JSONPath", "JSONata"):
+                    extra["query_language"] = state_ql
+                identity = qualified[len(file_path) + 2:]
+                nodes.append(NodeInfo(
+                    kind="Function",
+                    name=state_name,
+                    file_path=file_path,
+                    line_start=state.line_start,
+                    line_end=state.line_end,
+                    language="asl",
+                    extra=extra,
+                    identity_name=identity,
+                ))
+                machine_extra["state_count"] += 1
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=parent_qualified, target=qualified,
+                    file_path=file_path, line=state.line_start,
+                ))
+                if target_edge is not None:
+                    target, resource_kind, target_kind = target_edge
+                    edge_extra: dict[str, Any] = {"resource_kind": resource_kind}
+                    if "target_kind" in extra:
+                        edge_extra["target_kind"] = extra["target_kind"]
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES", source=qualified, target=target,
+                        file_path=file_path, line=state.line_start, extra=edge_extra,
+                    ))
+
+                def transition(
+                    next_name: Any, via: str, line: int, index: Optional[int] = None,
+                ) -> None:
+                    if not isinstance(next_name, str):
+                        return
+                    target_qualified = qualified_by_name.get(_sanitize_asl_name(next_name))
+                    if target_qualified is None:
+                        machine_extra["unresolved_transitions"] += 1
+                        return
+                    edge_extra: dict[str, Any] = {"via": via}
+                    if index is not None:
+                        edge_extra["index"] = index
+                    edges.append(EdgeInfo(
+                        kind="TRANSITIONS_TO", source=qualified, target=target_qualified,
+                        file_path=file_path, line=line, extra=edge_extra,
+                    ))
+
+                transition(state.get("Next"), "next", state.line_start)
+                if state_type == "Choice":
+                    transition(state.get("Default"), "default", state.line_start)
+                    choices = state.get("Choices")
+                    for index, rule in enumerate(choices if isinstance(choices, list) else []):
+                        if isinstance(rule, _AslObj):
+                            transition(rule.get("Next"), "choice", rule.line_start, index)
+                catches = state.get("Catch")
+                for index, rule in enumerate(catches if isinstance(catches, list) else []):
+                    if isinstance(rule, _AslObj):
+                        transition(rule.get("Next"), "catch", rule.line_start, index)
+
+                if depth + 1 >= self._MAX_ASL_NESTING:
+                    if state_type in ("Parallel", "Map"):
+                        problems.add("truncated")
+                    continue
+                inner_prefix = f"{prefix}{_asl_encode_segment(state_name)}"
+                if state_type == "Parallel":
+                    branches = state.get("Branches")
+                    for index, branch in enumerate(branches if isinstance(branches, list) else []):
+                        if isinstance(branch, _AslObj):
+                            read_branch(
+                                branch, f"{inner_prefix}[{index}]/", qualified,
+                                "branch", index, depth + 1,
+                            )
+                elif state_type == "Map":
+                    processor = state.get("ItemProcessor")
+                    if not isinstance(processor, _AslObj):
+                        processor = state.get("Iterator")
+                    if isinstance(processor, _AslObj):
+                        read_branch(
+                            processor, f"{inner_prefix}[map]/", qualified,
+                            "map", None, depth + 1,
+                        )
+
+        def read_branch(
+            definition: _AslObj, prefix: str, owner: str, via: str,
+            index: Optional[int], depth: int,
+        ) -> None:
+            read_machine(definition, prefix, owner, depth)
+            start_at = definition.get("StartAt")
+            if not isinstance(start_at, str):
+                return
+            start_name = _asl_encode_segment(_sanitize_asl_name(start_at))
+            start_identity = f"{machine}/{prefix}{start_name}"
+            if start_identity not in seen_identities:
+                return
+            edge_extra: dict[str, Any] = {"via": via}
+            if index is not None:
+                edge_extra["index"] = index
+            edges.append(EdgeInfo(
+                kind="TRANSITIONS_TO", source=owner, target=f"{file_path}::{start_identity}",
+                file_path=file_path, line=definition.line_start, extra=edge_extra,
+            ))
+
+        read_machine(document, "", machine_qualified, 0)
+        if problems & {"truncated", "collision"}:
+            file_extra["asl_problem"] = "truncated"
+        if "duplicate_keys" in problems:
+            machine_extra["duplicate_keys"] = True
         return nodes, edges
 
     def _parse_json(

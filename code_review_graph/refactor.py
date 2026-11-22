@@ -2182,6 +2182,11 @@ def find_dead_code(
         if node.extra.get("verilog_kind"):
             continue
 
+        # A Step Functions state machine and its states run when the service
+        # executes them, so no CALLS edge reaches one: it is not dead code.
+        if node.language == "asl":
+            continue
+
         # The XSLT processor picks a template with a match from the input
         # document, named or not, so nothing calling it says nothing about
         # whether it runs.

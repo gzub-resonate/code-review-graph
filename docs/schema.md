@@ -158,7 +158,7 @@ hold no line number, so a name used twice is one node, and `extra.lines` lists e
 `CONTAINS` connects the file to each one. Search finds `Output` nodes only with `kind="Output"`.
 
 ### JsonPath
-A key or array shape parsed from a `.json` file, in the same value-free shape as `YamlPath`: array items share one `[*]` path, an object with more than 200 keys is a table whose keys share one `.*` path, and values never enter the graph. Comments and trailing commas are accepted. Responses expose the same fields as `YamlPath`, without `document_index` or the YAML alias fields, under a nested `json` object.
+A key or array shape parsed from a `.json` file (not a `*.asl.json` state machine, see Step Functions state machines below), in the same value-free shape as `YamlPath`: array items share one `[*]` path, an object with more than 200 keys is a table whose keys share one `.*` path, and values never enter the graph. Comments and trailing commas are accepted. Responses expose the same fields as `YamlPath`, without `document_index` or the YAML alias fields, under a nested `json` object.
 
 Some JSON files keep only their `File` node, and its `json` object says why:
 
@@ -169,6 +169,50 @@ Some JSON files keep only their `File` node, and its `json` object says why:
 | truncated | Files over 256 KB. A file cut at 1,000 paths or 32 levels keeps the paths before the cut and carries the same mark |
 
 Lock files (`package-lock.json`, `npm-shrinkwrap.json`, `*.lock.json`, `project.assets.json`) and `*.min.json` are ignored by default. Search ranks JSON files and paths below code unless the query asks for them with `kind="JsonPath"`, a `$` path or a `.json` file name.
+
+### Step Functions state machines
+A file named `*.asl.json` or `*.asl` is an Amazon States Language definition and is read as a
+state machine, never as generic JSON (language `asl`, no `JsonPath` nodes). Its `File` node has
+`extra.config_format = "asl"`, `values_indexed: false` and `asl_problem`, which is `null`, or
+`invalid_json`, `too_large` (over 1 MiB), `not_a_state_machine` (no `States` object) or
+`truncated` (over 2,000 states, 8 levels of nested Parallel or Map, or a list or object over its
+cap; the states read before the cut are kept). A definition with `${key}` template variables
+outside quotes, which is not valid JSON until it is rendered, is read with those variables
+quoted. A file marked `invalid_json`, `too_large` or `not_a_state_machine` keeps no state.
+
+| Node | Kind | Name | `extra` |
+|---|---|---|---|
+| State machine | `Class` | The file name without `.asl.json` or `.asl` | `state_count`, `unresolved_transitions` (a `Next`, `Default`, `Choices` or `Catch` that names no state), `query_language` (`JSONPath` or `JSONata`, when the file sets it), `duplicate_keys` |
+| State | `Function` | The state's name | `state_type` (`Task`, `Choice`, `Parallel`, `Map`, `Wait`, `Pass`, `Succeed`, `Fail`, or `Unknown`), `is_start`, `end` (true for `End: true`, `Succeed` and `Fail`), `query_language` (a state that sets its own), and for a Task `resource_kind`, `resource_action`, `target_kind`, `target_dynamic` and `target_placeholders` |
+
+A state's qualified name is `<file>::<machine>/<path>`. The path is the state name, preceded by
+the enclosing state and the branch for a nested one: `orders/Fan Out[0]/Reserve Stock` for the
+first Parallel branch of `Fan Out`, `orders/Process Items[map]/Price Item` for a Map processor.
+`/`, `[`, `]` and `%` in a state name are written `%2F`, `%5B`, `%5D` and `%25`, so the same name
+in two branches never collides. A state has no parent class and no `CALLS` edge: nothing calls a
+state, so dead-code detection skips every `asl` node.
+
+`resource_kind` is the service in an optimized integration (`lambda`, `states`, `ecs`, `sns`,
+`sqs`, `dynamodb`, `batch`, `glue`, `codebuild`, `elasticmapreduce`, ..., or `aws-sdk:<service>`),
+`lambda` for a Lambda function ARN used directly as the `Resource`, and `dynamic` for a
+`${placeholder}` `Resource`. `resource_action` is the integration's action, such as
+`startExecution.sync:2`. `target_kind` is `task-definition` or `cluster` for an ECS Task, which
+can name either.
+
+`REFERENCES` from a Task goes to `external:aws-<service>:<name>` (`aws-lambda`, `aws-states`,
+`aws-ecs`, `aws-sns`, `aws-sqs`, `aws-dynamodb`, `aws-batch`, `aws-glue`, `aws-codebuild`) when
+the name is a plain literal. The name is read from the ARN, the Lambda `FunctionName`, the
+`StateMachineArn`, the ECS `TaskDefinition` (else `Cluster`), the `TopicArn`, the `QueueUrl`,
+the `TableName`, the `JobDefinition`, the `JobName` or the `ProjectName`; the partition,
+region, account ID, alias, version and revision are dropped. When the name is a `${key}` template
+variable, an intrinsic function (`States.Format(...)`), a JSONPath (`Field.$`) or a JSONata
+expression, there is no edge: the state gets `target_dynamic: true` and, for `${key}`, the key
+names in `target_placeholders`. No other value from `Parameters`, `Arguments`, `InputPath`,
+`OutputPath`, `ResultPath`, `Choices`, `Comment`, `Error` or `Cause` is read into the graph.
+These targets name no node, so `target_resolution` is `unresolved` for them by construction.
+
+`CONTAINS` joins the file to the machine, the machine to its top-level states, and a Parallel or
+Map state to the states of its branches and processor.
 
 ## Edge Types
 
@@ -206,7 +250,8 @@ names the class the call went through. Both are `INFERRED`.
 | IMPLEMENTS | implementing class -> interface | |
 | CONTAINS | file -> class or function; class -> method | Structural containment |
 | TESTED_BY | function -> test function | |
-| REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment |
+| REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment. A Step Functions Task state points at `external:aws-<service>:<name>` for what it calls |
+| TRANSITIONS_TO | Step Functions state -> the state that runs next, or a Parallel or Map state -> the first state of a branch or processor | `extra.via` is `next`, `default`, `choice`, `catch`, `branch` or `map`; `extra.index` is the position in `Choices`, `Catch` or `Branches`. A Parallel or Map state's own `Next` and `Catch` carry the flow after its branches finish |
 | DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives, Dockerfile stage to the earlier stage it starts from or copies from |
 | INJECTS | Spring bean -> injected field or constructor parameter type (`extra.qualifier` holds a literal `@Qualifier` value; class nodes carry `spring_bean_name` and `spring_qualifiers`) | Spring enrichment |
 | CONSUMES | `@KafkaListener` / `@KafkaHandler` method -> `kafka:<topic>` | Spring Kafka enrichment |
@@ -232,6 +277,7 @@ names the class the call went through. Both are `INFERRED`.
 /absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier # aggregated YAML path in document 0
 /absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12    # alias or anchor identity
 /absolute/path/to/package.json::json:$.scripts.build            # JSON path
+/absolute/path/to/orders.asl.json::orders/Fan Out[0]/Reserve Stock # Step Functions state
 /absolute/path/to/routes.ts::handle:S1a2b3c4d5e6f              # second same-named definition in a file
 ```
 

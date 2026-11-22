@@ -1,0 +1,94 @@
+{
+  "Comment": "Synthetic order pipeline used by the parser tests.",
+  "StartAt": "Validate Order",
+  "States": {
+    "Validate Order": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:validate-order:live",
+      "Parameters": {"orderId.$": "$.orderId", "apiToken": "tok-FAKE-1234"},
+      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Reject Order"}],
+      "Next": "Route Order"
+    },
+    "Route Order": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.total", "NumericGreaterThan": 1000, "Next": "Manual Review"},
+        {"Variable": "$.priority", "StringEquals": "express", "Next": "Fan Out"}
+      ],
+      "Default": "Fan Out"
+    },
+    "Manual Review": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {"FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:request-review", "Payload": {"token.$": "$$.Task.Token"}},
+      "Next": "Fan Out"
+    },
+    "Fan Out": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Reserve Stock",
+          "States": {
+            "Reserve Stock": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {"TableName": "inventory"},
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Notify Customer",
+          "States": {
+            "Notify Customer": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {"TopicArn": "arn:aws:sns:us-east-1:123456789012:order-events", "Message.$": "States.Format('Order {}', $.orderId)"},
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "Process Items"
+    },
+    "Process Items": {
+      "Type": "Map",
+      "ItemsPath": "$.items",
+      "ItemProcessor": {
+        "ProcessorConfig": {"Mode": "INLINE"},
+        "StartAt": "Price Item",
+        "States": {
+          "Price Item": {
+            "Type": "Task",
+            "Resource": "${price_item_arn}",
+            "Next": "Pause"
+          },
+          "Pause": {"Type": "Wait", "Seconds": 5, "Next": "Tag Item"},
+          "Tag Item": {"Type": "Pass", "Result": {"tagged": true}, "End": true}
+        }
+      },
+      "Next": "Start Fulfilment"
+    },
+    "Start Fulfilment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::states:startExecution.sync:2",
+      "Parameters": {"StateMachineArn": "arn:aws:states:us-east-1:123456789012:stateMachine:fulfilment-flow"},
+      "Next": "Run Packer"
+    },
+    "Run Packer": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {"Cluster": "packing-cluster", "TaskDefinition": "${packer_task_definition}"},
+      "Next": "Notify Dynamic"
+    },
+    "Notify Dynamic": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {"TopicArn": "States.Format('arn:aws:sns:us-east-1:123456789012:{}', $.topic)"},
+      "Next": "Done"
+    },
+    "Reject Order": {"Type": "Fail", "Error": "OrderRejected", "Cause": "secret cause text"},
+    "Done": {"Type": "Succeed"}
+  }
+}
