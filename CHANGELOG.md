@@ -4,6 +4,13 @@
 
 ### Added
 
+- `cross_repo_requests_tool` reports a call whose route matches a server route
+  except for letter case (for example `/v1/attributeGroups` against
+  `/v1/attributegroups`) as `case_mismatch` instead of `no_route_match`. The row
+  names those endpoints as `candidates`, has `confidence: "low"` and the reason
+  `route_differs_by_case`. It is a lead to check, not a match; matching stays
+  case-sensitive and only calls that were `no_route_match` can change. Filter
+  with `status="case_mismatch"`.
 - `cross_repo_requests_tool` now joins JavaScript and TypeScript calls to the
   server endpoints they reach. A call names no service, so it is matched by
   HTTP method and route, first against the caller's own repository (a relative

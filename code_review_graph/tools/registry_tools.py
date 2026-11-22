@@ -439,7 +439,8 @@ def cross_repo_requests_func(
         route: Only calls whose route equals this or lies below it, compared
             after normalisation.
         status: Only rows with this status: ``matched``, ``ambiguous``,
-            ``no_route_match``, ``no_target_repo`` or ``unmatchable``.
+            ``case_mismatch``, ``no_route_match``, ``no_target_repo`` or
+            ``unmatchable``.
         limit: Maximum rows per client repo (default 20).
         max_results: Maximum rows returned overall (default 50, capped at
             100). ``counts`` and ``total`` cover every call that passed the
@@ -653,6 +654,8 @@ def cross_repo_requests_func(
                     if row_notes and result.status in (fl.MATCHED, fl.AMBIGUOUS):
                         row["confidence"] = "low"
                         row["confidence_notes"] = row_notes
+                if result.status == fl.CASE_MISMATCH:
+                    row["confidence"] = "low"
                 if result.reason:
                     row["reason"] = result.reason
                 if resolution is not None and resolution.how:

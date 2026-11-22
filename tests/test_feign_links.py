@@ -256,7 +256,7 @@ def test_every_status_and_reason(world):
     assert rows[3]["target_resolution"] == "exact"
     assert rows[4]["status"] == "matched"
     assert rows[4]["candidates"][0]["route"] == "/orders/{orderId}"
-    assert rows[5]["status"] == "no_route_match"
+    assert rows[5]["status"] == "no_route_match"  # wrong method: still no lead
     assert rows[6]["status"] == "ambiguous" and rows[6]["candidates_total"] == 2
     assert rows[7]["status"] == "no_target_repo"
     assert rows[7]["reason"] == "service_not_registered"
@@ -265,8 +265,9 @@ def test_every_status_and_reason(world):
     assert rows[11]["reason"] == "url_from_argument"
     assert rows[12]["reason"] == "placeholder_in_route"
     assert rows[13]["reason"] == "route_dynamic"
+    assert rows[14]["status"] == "case_mismatch"  # "/Orders" against the "/orders" controller
     assert result["counts"] == {
-        "matched": 2, "no_route_match": 2, "ambiguous": 1,
+        "matched": 2, "case_mismatch": 1, "no_route_match": 1, "ambiguous": 1,
         "no_target_repo": 1, "unmatchable": 5,
     }
     assert result["total"] == 11
@@ -276,9 +277,12 @@ def test_every_status_and_reason(world):
 
 def test_route_case_is_not_folded_so_wrong_case_never_matches(world):
     row = by_route(cross_repo_requests_func(repos=["web"], route="/Orders"))[("GET", "/Orders")]
-    # The service name folds to the repo; the route differs only in case.
+    # The service name folds to the repo; the route differs only in case, so it
+    # is a lead (``case_mismatch``) and never a match.
     assert row["target_resolution"] == "normalized"
-    assert row["status"] == "no_route_match"
+    assert row["status"] == "case_mismatch"
+    assert row["confidence"] == "low" and row["reason"] == "route_differs_by_case"
+    assert row["candidates"][0]["route"] == "/orders"
 
 
 def test_alias_and_alias_file_resolve_service_names(tmp_path, registry):
@@ -491,3 +495,32 @@ def test_only_feign_clients_are_listed(tmp_path, registry):
     ])
     result = cross_repo_requests_func()
     assert [r["client_line"] for r in result["results"]] == [1]
+
+
+def test_case_only_difference_is_a_case_mismatch_lead():
+    """A route that differs only in letter case is a low-confidence lead, not a match."""
+    result = fl.link_call(_call(route="/Orders"), [_server("/orders")])
+    assert result.status == fl.CASE_MISMATCH
+    assert result.reason == fl.CASE_MISMATCH_REASON
+    assert result.confidence == "low"
+    assert [c.route for c in result.candidates] == ["/orders"]
+
+
+def test_case_mismatch_keeps_method_and_catch_all_rules():
+    call = _call(route="/Orders")
+    assert fl.link_call(call, [_server("/orders", "POST")]).status == fl.NO_ROUTE_MATCH
+    assert fl.link_call(call, [_server("/orders", "ANY")]).status == fl.CASE_MISMATCH
+    wild = fl.ServerEndpoint("s", "A.java", 1, "GET", "/orders", catch_all=True)
+    assert fl.link_call(call, [wild]).status == fl.NO_ROUTE_MATCH
+
+
+def test_exact_match_wins_over_a_case_variant():
+    result = fl.link_call(
+        _call(route="/orders"), [_server("/Orders", line=1), _server("/orders", line=2)],
+    )
+    assert result.status == fl.MATCHED and result.confidence == "high"
+    assert [c.route for c in result.candidates] == ["/orders"]
+
+
+def test_case_mismatch_is_listed_among_the_statuses():
+    assert fl.CASE_MISMATCH in fl.STATUSES

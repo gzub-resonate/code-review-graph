@@ -249,6 +249,7 @@ export const b = (q: any) => q.get('/y');
     assert clients(nodes) == [] and servers(nodes) == []
 
 
+
 def test_a_query_string_glued_to_the_path_is_not_a_path_parameter(tmp_path):
     """``/feeds${query}`` where ``query`` is ``cond ? `?...` : ''`` is the feeds route."""
     nodes, _ = parse(tmp_path, "lib/feeds.ts", """
@@ -305,6 +306,10 @@ export async function four() {
         ("GET", "/v1/shadow{param}"), ("GET", "/v1/things{param}"),
     ]
 
+
+# ---------------------------------------------------------------------------
+# Ember Data
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Server routes
@@ -734,6 +739,51 @@ export async function load(id: string) {
 }
 """)
     assert sigs(clients(nodes)) == [("GET", "/v3/tags/{param}"), ("POST", "/v3/tags")]
+
+
+def test_link_js_call_case_mismatch_only_replaces_no_route_match():
+    idx = fl.ServerIndex([
+        fl.ServerEndpoint("s", "a.java", 1, "GET", "/v1/attributegroups", origin="s"),
+        fl.ServerEndpoint("s", "a.java", 2, "POST", "/v1/attributegroups", origin="s"),
+        fl.ServerEndpoint("s", "b.java", 3, "ANY", "/v1/Ping", origin="s"),
+    ])
+    mk = lambda m, r: fl.ClientCall(repo="c", file=None, line=1, http_method=m, route=r, origin="js")  # noqa: E731
+    lead = fl.link_js_call(mk("GET", "/v1/attributeGroups"), idx)
+    assert (lead.status, lead.reason, lead.confidence) == (
+        fl.CASE_MISMATCH, "route_differs_by_case", "low",
+    )
+    assert [c.line for c in lead.candidates] == [1]
+    assert fl.link_js_call(mk("DELETE", "/v1/attributeGroups"), idx).status == fl.NO_ROUTE_MATCH
+    assert fl.link_js_call(mk("GET", "/v1/ping"), idx).status == fl.CASE_MISMATCH
+    assert fl.link_js_call(mk("GET", "/v1/attributegroups"), idx).status == fl.MATCHED
+    assert fl.link_js_call(mk("GET", "/v1/other"), idx).status == fl.NO_ROUTE_MATCH
+
+
+def test_catch_all_still_beats_a_case_lead():
+    idx = fl.ServerIndex([
+        fl.ServerEndpoint("gw", "r.ts", 1, "GET", "/api/{...p}", origin="gw", catch_all=True),
+        fl.ServerEndpoint("s", "a.java", 2, "GET", "/api/Health", origin="s"),
+    ])
+    call = fl.ClientCall(repo="c", file=None, line=1, http_method="GET", route="/api/health", origin="js")
+    result = fl.link_js_call(call, idx)
+    assert result.status == fl.MATCHED and result.reason == "catch_all_route"
+
+
+def test_case_mismatch_row_and_status_filter(tmp_path, registry):
+    make_repo(tmp_path, registry, "svc", {"app/v1/attributegroups/route.ts": "export async function GET() {}\n"})
+    make_repo(tmp_path, registry, "web", {
+        "a.ts": "import axios from 'axios';\nexport const h = () => axios.get('/v1/attributeGroups');\n",
+    })
+    result = cross_repo_requests_func(repos=["web"])
+    (row,) = result["results"]
+    assert row["status"] == "case_mismatch"
+    assert row["reason"] == "route_differs_by_case"
+    assert row["confidence"] == "low"
+    assert row["candidates"][0]["repo"] == "svc"
+    assert "1 case_mismatch" in result["summary"]
+    only = cross_repo_requests_func(repos=["web"], status="case_mismatch")
+    assert only["results"] == [row]
+    assert cross_repo_requests_func(repos=["web"], status="no_route_match")["results"] == []
 
 
 def test_link_js_call_several_handlers_in_one_repo_is_a_match():
