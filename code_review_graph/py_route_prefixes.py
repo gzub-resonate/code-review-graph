@@ -24,6 +24,10 @@ __all__ = ["MAX_VARIANTS", "PrefixResolver", "RouterMap", "module_files"]
 
 MAX_VARIANTS = 8
 _MAX_DEPTH = 8
+#: Routers one resolver may expand before it gives up (the rest are unknown).
+#: A repository can describe mounts that fan out at every level; this bounds
+#: the work whatever shape it has.
+_MAX_VISITS = 2_000
 
 
 @dataclass(frozen=True)
@@ -89,10 +93,17 @@ class PrefixResolver:
         for rmap in maps.values():
             for mount in rmap.mounts:
                 child = self._child(rmap, mount.get("child") or {})
-                if child is not None:
-                    self.parents.setdefault(child, []).append(
-                        (rmap.file, str(mount.get("parent")), mount.get("prefix")),
-                    )
+                if child is None:
+                    continue
+                entry = (rmap.file, str(mount.get("parent")), mount.get("prefix"))
+                known = self.parents.setdefault(child, [])
+                if entry not in known:
+                    known.append(entry)
+        self._memo: dict[tuple[str, str], list[Optional[str]]] = {}
+        self._visits = 0
+        #: Counts answers cut short by a cycle, the depth limit or the budget,
+        #: which depend on the path taken and so must not be cached.
+        self._cuts = 0
 
     def _import_file(self, rmap: RouterMap, local: str) -> Optional[tuple[str, str]]:
         """``(file, name)`` an ``import``-bound local name points at."""
@@ -135,23 +146,40 @@ class PrefixResolver:
                     return hop[0], hop[1], prefix if prefix is None else str(prefix)
         return file, var, ""
 
+    def _cut(self) -> list[Optional[str]]:
+        self._cuts += 1
+        return [None]
+
     def prefixes(
         self, file: str, var: str, seen: tuple[tuple[str, str], ...] = (),
     ) -> list[Optional[str]]:
         file, var, own = self._own(file, var)
         if own is None:
             return [None]
-        if (file, var) in seen or len(seen) >= _MAX_DEPTH:
-            return [None]
-        mounted = self.parents.get((file, var))
+        key = (file, var)
+        if key in seen or len(seen) >= _MAX_DEPTH:
+            return self._cut()
+        if key in self._memo:
+            return self._memo[key]
+        if self._visits >= _MAX_VISITS:
+            return self._cut()
+        self._visits += 1
+        mounted = self.parents.get(key)
         if not mounted:
             return [join_path(own) if own else ""]
+        cuts_before = self._cuts
         out: list[Optional[str]] = []
         for parent_file, parent_var, mount_prefix in mounted:
+            if len(out) >= MAX_VARIANTS:
+                break
             if mount_prefix is None:
                 out.append(None)
                 continue
-            for above in self.prefixes(parent_file, parent_var, (*seen, (file, var))):
+            for above in self.prefixes(parent_file, parent_var, (*seen, key)):
                 out.append(None if above is None else join_path(above, mount_prefix, own))
-        unique = list(dict.fromkeys(out))
-        return unique[:MAX_VARIANTS]
+                if len(out) >= MAX_VARIANTS:
+                    break
+        unique = list(dict.fromkeys(out))[:MAX_VARIANTS]
+        if self._cuts == cuts_before:
+            self._memo[key] = unique
+        return unique

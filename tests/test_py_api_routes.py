@@ -375,3 +375,44 @@ def test_tool_returns_unresolved_marker_unescaped(tmp_path, registry):
     (row,) = cross_repo_requests_func(repos=["ui"])["results"]
     assert row["status"] == "unmatchable"
     assert row["route"] == "<unresolved>"
+
+
+def test_resolver_work_is_bounded_on_a_fan_out_of_mounts():
+    """Many routers mounted in many places must not blow up the join."""
+    width, depth = 6, 12
+    maps = {}
+    for level in range(depth):
+        file = f"l{level}.py"
+        routers = {f"r{k}": ["fastapi", f"/p{level}{k}"] for k in range(width)}
+        mounts = []
+        if level + 1 < depth:
+            for k in range(width):
+                for j in range(width):
+                    mounts.append({
+                        "parent": f"r{k}",
+                        "child": {"obj": "nxt", "attr": f"r{j}"},
+                        "prefix": f"/m{k}{j}",
+                    })
+        maps[file] = prefixes.RouterMap(
+            file, routers, mounts, {"nxt": [f"l{level + 1}", None, 0]},
+        )
+    resolver = prefixes.PrefixResolver(maps, list(maps))
+    result = resolver.prefixes(f"l{depth - 1}.py", "r0")
+    assert len(result) <= prefixes.MAX_VARIANTS
+    assert resolver._visits <= 2_000
+
+
+def test_resolver_memoises_a_shared_parent():
+    shared = prefixes.RouterMap(
+        "top.py", {"top": ["fastapi", "/v1"]},
+        [
+            {"parent": "top", "child": {"var": "mid"}, "prefix": "/a"},
+            {"parent": "top", "child": {"var": "mid"}, "prefix": "/a"},
+        ],
+        {},
+    )
+    mid = prefixes.RouterMap("top.py", {"top": ["fastapi", "/v1"], "mid": ["fastapi", ""]},
+                             shared.mounts, {})
+    resolver = prefixes.PrefixResolver({"top.py": mid}, ["top.py"])
+    assert resolver.prefixes("top.py", "mid") == ["/v1/a"]
+    assert resolver.parents[("top.py", "mid")] == [("top.py", "top", "/a")]
