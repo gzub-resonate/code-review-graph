@@ -1527,10 +1527,12 @@ async def cross_repo_requests_tool(
     controller endpoint in the repo its service name points at, found by HTTP
     method and route. Read-only and computed on every call; nothing is stored.
     A call is ``matched`` (one endpoint), ``ambiguous`` (several),
-    ``no_route_match``, ``no_target_repo`` (no registered repo carries the
-    service name) or ``unmatchable`` with a ``reason`` (placeholder service
-    name, absolute ``url``, ``URI`` argument, or a route piece that could not
-    be resolved). Nothing is guessed.
+    ``case_mismatch`` (no exact route, but one that differs only in letter
+    case: a low-confidence lead, not a match), ``no_route_match``,
+    ``no_target_repo`` (no registered repo carries the service name) or
+    ``unmatchable`` with a ``reason`` (placeholder service name, absolute
+    ``url``, ``URI`` argument, or a route piece that could not be resolved).
+    Nothing is guessed.
 
     JavaScript and TypeScript calls (axios, fetch, jQuery, Ember ajax and Ember
     Data) have no service name and are matched by method and route against the

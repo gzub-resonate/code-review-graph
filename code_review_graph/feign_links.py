@@ -27,6 +27,12 @@ The rules, in the order they apply:
    ``no_route_match``.  Mapping annotations that list the same route twice
    index twice at one source location, so matches are counted per source
    location, not per node.
+5. Routes are compared case-sensitively, because servers do (``/Users`` and
+   ``/users`` are different routes).  A call with no exact match whose route
+   equals a server route once case is ignored is reported as
+   ``case_mismatch`` instead of ``no_route_match``, with those endpoints as
+   ``candidates`` and ``confidence`` ``low``.  It is a lead to check, never a
+   match: a server that really is case-sensitive does not serve it.
 
 JavaScript and TypeScript calls (``origin == "js"``) have no service name.
 :func:`link_js_call` matches them by HTTP method and normalised route against
@@ -49,6 +55,8 @@ from typing import Optional
 
 __all__ = [
     "AMBIGUOUS",
+    "CASE_MISMATCH",
+    "CASE_MISMATCH_REASON",
     "MATCHED",
     "NO_ROUTE_MATCH",
     "NO_TARGET_REPO",
@@ -71,12 +79,16 @@ MATCHED = "matched"
 AMBIGUOUS = "ambiguous"
 NO_TARGET_REPO = "no_target_repo"
 NO_ROUTE_MATCH = "no_route_match"
+CASE_MISMATCH = "case_mismatch"
 UNMATCHABLE = "unmatchable"
 
 #: Every status a call can have, in the order a summary lists them.
 STATUSES: tuple[str, ...] = (
-    MATCHED, AMBIGUOUS, NO_ROUTE_MATCH, NO_TARGET_REPO, UNMATCHABLE,
+    MATCHED, AMBIGUOUS, CASE_MISMATCH, NO_ROUTE_MATCH, NO_TARGET_REPO, UNMATCHABLE,
 )
+
+#: The reason a ``case_mismatch`` result carries.
+CASE_MISMATCH_REASON = "route_differs_by_case"
 
 #: The parser renders a route piece it could not resolve as this marker.
 _UNRESOLVED_MARKER = "<unresolved>"
@@ -211,6 +223,11 @@ def normalize_route(route: str) -> str:
     return text
 
 
+def _fold_route(route: str) -> str:
+    """:func:`normalize_route` with case ignored, for ``case_mismatch`` leads."""
+    return normalize_route(route).lower()
+
+
 def unmatchable_reason(call: ClientCall) -> Optional[str]:
     """Return why ``call`` cannot be joined to a server endpoint, or ``None``.
 
@@ -314,10 +331,27 @@ def link_call(
         key=lambda s: (s.repo, s.file or "", s.line or 0, s.http_method, s.route),
     ))
     if not candidates:
-        return LinkResult(NO_ROUTE_MATCH)
+        return _case_lead(call, servers)
     if len(candidates) == 1:
         return LinkResult(MATCHED, candidates=candidates)
     return LinkResult(AMBIGUOUS, candidates=candidates)
+
+
+def _case_lead(call: ClientCall, servers: Iterable[ServerEndpoint]) -> LinkResult:
+    """``case_mismatch`` when a server route equals the call's apart from case."""
+    wanted = _fold_route(call.route)
+    found: dict[object, ServerEndpoint] = {}
+    for server in servers:
+        if server.catch_all or not _method_matches(call.http_method, server.http_method):
+            continue
+        if _fold_route(server.route) == wanted:
+            found.setdefault(_location_key(server, normalize_route(server.route)), server)
+    if not found:
+        return LinkResult(NO_ROUTE_MATCH)
+    return LinkResult(
+        CASE_MISMATCH, reason=CASE_MISMATCH_REASON,
+        candidates=_sorted_candidates(found), confidence="low",
+    )
 
 
 def _location_key(
@@ -357,6 +391,8 @@ class ServerIndex:
     def __init__(self, servers: Iterable[ServerEndpoint]) -> None:
         self.exact: dict[str, list[ServerEndpoint]] = {}
         self.catch_all: list[tuple[str, ServerEndpoint]] = []
+        #: The same exact routes, keyed with case ignored, for ``case_mismatch`` leads.
+        self.folded: dict[str, list[ServerEndpoint]] = {}
         for server in servers:
             if server.catch_all:
                 prefix = _catch_all_prefix(server.route)
@@ -364,7 +400,9 @@ class ServerIndex:
                 if prefix != "/":
                     self.catch_all.append((prefix, server))
                 continue
-            self.exact.setdefault(normalize_route(server.route), []).append(server)
+            shape = normalize_route(server.route)
+            self.exact.setdefault(shape, []).append(server)
+            self.folded.setdefault(shape.lower(), []).append(server)
 
 
 def link_js_call(call: ClientCall, index: ServerIndex) -> LinkResult:
@@ -375,6 +413,8 @@ def link_js_call(call: ClientCall, index: ServerIndex) -> LinkResult:
     accepts every method does not count), a literal prefix that is a whole
     leading path segment run of the call, and at least one more segment
     unless the wildcard is optional.  Such a match has ``confidence`` ``low``.
+    When nothing fits, a server route that differs only in letter case gives
+    ``case_mismatch`` (see the module notes) rather than ``no_route_match``.
     Call :func:`unmatchable_reason` first.
     """
     wanted = normalize_route(call.route)
@@ -393,7 +433,15 @@ def link_js_call(call: ClientCall, index: ServerIndex) -> LinkResult:
         if below or (server.optional_catch_all and wanted == prefix):
             found.setdefault(_location_key(server, prefix + "/**"), server)
     if not found:
-        return LinkResult(NO_ROUTE_MATCH)
+        for server in index.folded.get(wanted.lower(), ()):
+            if _method_matches(call.http_method, server.http_method):
+                found.setdefault(_location_key(server, normalize_route(server.route)), server)
+        if not found:
+            return LinkResult(NO_ROUTE_MATCH)
+        return LinkResult(
+            CASE_MISMATCH, reason=CASE_MISMATCH_REASON,
+            candidates=_sorted_candidates(found), confidence="low",
+        )
     candidates = _sorted_candidates(found)
     return LinkResult(
         MATCHED if len(candidates) == 1 else AMBIGUOUS,

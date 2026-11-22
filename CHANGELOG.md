@@ -18,6 +18,13 @@
   route such as a Next.js `[...path]` proxy matches only by exact method and
   literal prefix, with `confidence: "low"`. A variable URL is never guessed.
   Rebuild a graph to index existing JavaScript; see `docs/COMMANDS.md`.
+- `cross_repo_requests_tool` reports a call whose route matches a server route
+  except for letter case (for example `/v1/attributeGroups` against
+  `/v1/attributegroups`) as `case_mismatch` instead of `no_route_match`. The row
+  names those endpoints as `candidates`, has `confidence: "low"` and the reason
+  `route_differs_by_case`. It is a lead to check, not a match; matching stays
+  case-sensitive and only calls that were `no_route_match` can change. Filter
+  with `status="case_mismatch"`.
 - New `cross_repo_requests_tool` answers "which endpoint does this Feign call
   reach?" across your registered repositories. For each outbound Spring Feign
   call it names the controller endpoint in the repository the service name

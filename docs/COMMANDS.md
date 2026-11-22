@@ -911,7 +911,7 @@ summary reports the counts rather than echoing the names.
 repos: list[str] | None      # Calling repos (aliases or folder names); default: every registered repo
 service: str | None          # Only calls to this Feign service name (exact)
 route: str | None            # Only calls whose route equals this or lies below it
-status: str | None           # matched | ambiguous | no_route_match | no_target_repo | unmatchable
+status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js; default: both
@@ -945,6 +945,11 @@ How a call is classified:
   trailing slash and treating every `{name}` as one wildcard segment. Case is
   kept. A `{name}` in the call does not match a fixed segment on the server.
   One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
+- A call with no exact match whose route equals a server route once case is
+  ignored is `case_mismatch` (reason `route_differs_by_case`, `confidence`
+  `low`), with those endpoints as `candidates`. It is a lead to check, not a
+  match: a case-sensitive server does not serve it. Only a call that would
+  otherwise be `no_route_match` can become one.
 
 Every row has an `origin`: `feign` for a Spring client method, `js` for a
 JavaScript or TypeScript call. Feign rows are classified exactly as above.
