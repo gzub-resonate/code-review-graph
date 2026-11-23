@@ -11,6 +11,7 @@ import json
 import os
 from dataclasses import asdict
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -410,12 +411,148 @@ def test_dockerfile_edges_survive_a_build(tmp_path: Path) -> None:
 # Terragrunt
 # ---------------------------------------------------------------------------
 
+TERRAGRUNT = f"""\
+locals {{
+  region = "{SECRET}"
+}}
+
+terraform {{
+  source = "git::https://git.example.com/acme/modules.git//network/vpc?ref=v1.4.0"
+}}
+
+include "root" {{
+  path = find_in_parent_folders()
+}}
+
+include "common" {{
+  path = "../common.hcl"
+}}
+
+dependency "vpc" {{
+  config_path = "../vpc"
+  mock_outputs = {{
+    vpc_id = "{SECRET}"
+  }}
+}}
+
+dependency "shared" {{
+  config_path = "${{get_repo_root()}}/shared"
+}}
+
+inputs = {{
+  password = "{SECRET}"
+}}
+"""
 
 
+def test_parse_terragrunt_source_variants() -> None:
+    from code_review_graph.infra_references import parse_terragrunt_source
+
+    git = parse_terragrunt_source("git::https://git.example.com/acme/mods.git//vpc?ref=v1")
+    assert (git["kind"], git["base"], git["subdir"], git["ref"]) == (
+        "git", "https://git.example.com/acme/mods", "vpc", "v1",
+    )
+    ssh = parse_terragrunt_source("git@git.example.com:acme/mods.git//a/b?ref=main")
+    assert (ssh["kind"], ssh["base"], ssh["subdir"], ssh["ref"]) == (
+        "git", "git.example.com/acme/mods", "a/b", "main",
+    )
+    registry = parse_terragrunt_source("tfr:///acme/vpc/aws?version=3.1.0")
+    assert registry["kind"] == "registry" and registry["ref"] == "3.1.0"
+    bare = parse_terragrunt_source("acme/vpc/aws")
+    assert bare["kind"] == "registry" and bare["base"] == "acme/vpc/aws"
+    assert parse_terragrunt_source("../modules/vpc")["kind"] == "local"
+    shorthand = parse_terragrunt_source("git.example.com/acme/mods//x?ref=v2")
+    assert shorthand["kind"] == "git" and shorthand["ref"] == "v2"
+    assert parse_terragrunt_source("https://example.com/m.zip")["kind"] == "archive"
 
 
+def test_terragrunt_references(tmp_path: Path) -> None:
+    (tmp_path / "live").mkdir()
+    (tmp_path / "common.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (tmp_path / "vpc").mkdir()
+    (tmp_path / "vpc/terragrunt.hcl").write_text("")
+    nodes, edges = _parse(tmp_path, "live/terragrunt.hcl", TERRAGRUNT)
+    rows = _imports(edges)
+    got = [(e.target, e.extra["block"], e.extra.get("name"), e.line) for e in rows]
+    assert got == [
+        ("external:terraform-module:https://git.example.com/acme/modules", "terraform", None, 6),
+        ("external:terragrunt:dynamic", "include", "root", 10),
+        ((tmp_path / "common.hcl").as_posix(), "include", "common", 14),
+        ((tmp_path / "vpc/terragrunt.hcl").as_posix(), "dependency", "vpc", 18),
+        ("external:terragrunt:dynamic", "dependency", "shared", 25),
+    ]
+    source = rows[0].extra
+    assert source["ref"] == "v1.4.0" and source["subdir"] == "network/vpc"
+    assert source["source_kind"] == "git" and source["dynamic"] is False
+    assert "raw" not in rows[1].extra
+    assert rows[1].extra["dynamic"] is True
+    assert "raw" not in rows[4].extra
+    assert SECRET not in _dump(nodes, edges)
 
 
+def test_terragrunt_relative_paths_resolve_inside_the_repo(tmp_path: Path) -> None:
+    (tmp_path / "common.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (tmp_path / "vpc").mkdir()
+    (tmp_path / "vpc/terragrunt.hcl").write_text('terraform {\n  source = "./m"\n}\n')
+    (tmp_path / "modules/net").mkdir(parents=True)
+    (tmp_path / "modules/net/main.tf").write_text('variable "a" {}\n')
+    _nodes, edges = _parse(
+        tmp_path, "live/terragrunt.hcl",
+        'include "c" {\n  path = "../common.hcl"\n}\n'
+        'dependency "v" {\n  config_path = "../vpc"\n}\n'
+        'terraform {\n  source = "../modules/net"\n}\n',
+    )
+    assert [e.target for e in _imports(edges)] == [
+        (tmp_path / "common.hcl").as_posix(),
+        (tmp_path / "vpc/terragrunt.hcl").as_posix(),
+        (tmp_path / "modules/net/main.tf").as_posix(),
+    ]
+
+
+def test_terragrunt_blocks_in_tf_files_are_unchanged(tmp_path: Path) -> None:
+    text = 'terraform {\n  source = "git::https://git.example.com/a/b.git"\n}\n'
+    _nodes, edges = _parse(tmp_path, "main.tf", text)
+    assert _imports(edges) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "terraform {",
+        'include {\n  path =\n}\n',
+        'dependency "x" {\n  config_path = [1, 2]\n}\n',
+        'terraform {\n  source = 5\n}\n',
+        'include "a" {\n  other = "x"\n}\n',
+        "\x00\x01",
+    ],
+)
+def test_malformed_terragrunt_never_raises(tmp_path: Path, text: str) -> None:
+    _parse(tmp_path, "terragrunt.hcl", text)
+
+
+def test_terragrunt_is_deterministic(tmp_path: Path) -> None:
+    assert _dump(*_parse(tmp_path, "terragrunt.hcl", TERRAGRUNT)) == _dump(
+        *_parse(tmp_path, "terragrunt.hcl", TERRAGRUNT),
+    )
+
+
+def test_terragrunt_sources_answer_who_uses_module_x(tmp_path: Path) -> None:
+    for unit in ("a", "b"):
+        _parse(
+            tmp_path, f"{unit}/terragrunt.hcl",
+            'terraform {\n  source = "git::https://git.example.com/acme/modules.git//x?ref=v1"\n}\n',
+        )
+    store = _build(tmp_path)
+    try:
+        edges = store.get_edges_by_target(
+            "external:terraform-module:https://git.example.com/acme/modules",
+        )
+        assert sorted(e.file_path for e in edges) == [
+            (tmp_path / "a/terragrunt.hcl").as_posix(),
+            (tmp_path / "b/terragrunt.hcl").as_posix(),
+        ]
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -447,9 +584,61 @@ def _parse_excluding(
     return parser.parse_bytes(path, path.read_bytes())[1]
 
 
+def _tg_targets(root: Path, body: str) -> list[str]:
+    _nodes, edges = _parse(root, "live/terragrunt.hcl", body)
+    return [e.target for e in _imports(edges)]
 
 
+@pytest.mark.parametrize("attribute", ["include", "dependency", "terraform"])
+def test_terragrunt_path_outside_repo_is_not_resolved(tmp_path: Path, attribute: str) -> None:
+    repo, outside = _make_repo(tmp_path)
+    key = {"include": "path", "dependency": "config_path", "terraform": "source"}[attribute]
+    label = ' "x"' if attribute != "terraform" else ""
+    for raw in (
+        "../../outside/terragrunt.hcl",
+        "../../outside/dir",
+        (outside / "terragrunt.hcl").as_posix(),
+        outside.as_posix() + "/dir",
+    ):
+        body = f'{attribute}{label} {{\n  {key} = "{raw}"\n}}\n'
+        assert _tg_targets(repo, body) == [raw]
 
+
+def test_terragrunt_absolute_path_inside_repo_is_not_probed(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "common.hcl").write_text('locals {\n  a = "b"\n}\n')
+    raw = (repo / "common.hcl").as_posix()
+    assert _tg_targets(repo, f'include "c" {{\n  path = "{raw}"\n}}\n') == [raw]
+
+
+def test_terragrunt_inside_repo_still_resolves_with_children(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "vpc").mkdir()
+    (repo / "vpc/terragrunt.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (repo / "net").mkdir()
+    (repo / "net/main.tf").write_text('variable "a" {}\n')
+    body = (
+        'dependency "v" {\n  config_path = "../vpc"\n}\n'
+        'terraform {\n  source = "../net"\n}\n'
+    )
+    assert _tg_targets(repo, body) == [
+        (repo / "vpc/terragrunt.hcl").as_posix(),
+        (repo / "net/main.tf").as_posix(),
+    ]
+
+
+def test_terragrunt_excluded_files_are_not_resolved(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "hidden").mkdir()
+    (repo / "hidden/terragrunt.hcl").write_text('locals {\n  a = "b"\n}\n')
+    (repo / "secret.hcl").write_text('locals {\n  a = "b"\n}\n')
+    edges = _parse_excluding(
+        repo, "live/terragrunt.hcl",
+        'include "c" {\n  path = "../secret.hcl"\n}\n'
+        'dependency "h" {\n  config_path = "../hidden"\n}\n',
+        {repo / "secret.hcl", repo / "hidden/terragrunt.hcl"},
+    )
+    assert [e.target for e in _imports(edges)] == ["../secret.hcl", "../hidden"]
 
 
 def _symlink(link: Path, target: Path) -> None:
@@ -459,6 +648,23 @@ def _symlink(link: Path, target: Path) -> None:
         pytest.skip("symbolic links are not available")
 
 
+def test_terragrunt_symlink_leaving_repo_is_not_followed(tmp_path: Path) -> None:
+    repo, outside = _make_repo(tmp_path)
+    _symlink(repo / "link.hcl", outside / "terragrunt.hcl")
+    _symlink(repo / "linkdir", outside / "dir")
+    body = (
+        'include "c" {\n  path = "../link.hcl"\n}\n'
+        'dependency "d" {\n  config_path = "../linkdir"\n}\n'
+    )
+    assert _tg_targets(repo, body) == ["../link.hcl", "../linkdir"]
+
+
+def test_terragrunt_symlink_inside_repo_resolves(tmp_path: Path) -> None:
+    repo, _outside = _make_repo(tmp_path)
+    (repo / "real.hcl").write_text('locals {\n  a = "b"\n}\n')
+    _symlink(repo / "alias.hcl", repo / "real.hcl")
+    body = 'include "c" {\n  path = "../alias.hcl"\n}\n'
+    assert _tg_targets(repo, body) == [(repo / "alias.hcl").as_posix()]
 
 
 def _gha_targets(root: Path, uses: list[str], excluded: set[Path] | None = None) -> list[str]:
@@ -538,6 +744,31 @@ COPY --from=build /out /out
 FROM scratch AS alias-with-secret-planted:dockerpass-planted
 """
 
+SECRET_TERRAGRUNT = """\
+terraform {
+  source = "git::https://tok3n-userinfo:p4ssw0rd-planted@git.example.com/acme/mods.git//vpc?ref=v1&sshkey=QUJD-sshkey"
+}
+include "a" {
+  path = "https://tok3n-userinfo:p4ssw0rd-planted@git.example.com/acme/common.hcl?access_token=acc3ss-tok-planted"
+}
+dependency "b" {
+  config_path = "git::ssh://tok3n-userinfo@git.example.com/acme/dep.git?token=acc3ss-tok-planted"
+}
+"""
+
+SECRET_TERRAGRUNT_SOURCES = [
+    "git::https://tok3n-userinfo:p4ssw0rd-planted@git.example.com/acme/mods.git//vpc?ref=v1"
+    "&sshkey=QUJD-sshkey",
+    "https://git.example.com/acme/mods.zip?X-Amz-Signature=sig-X-Amz-planted"
+    "&access_token=acc3ss-tok-planted#frag-secret-planted",
+    "git@git.example.com:acme/mods.git//vpc?ref=v2&access_token=acc3ss-tok-planted",
+    "scpuser-planted@git.example.com:acme/mods.git",
+    "ssh://scpuser-planted:p4ssw0rd-planted@git.example.com:2222/acme/mods.git?ref=v3",
+    "tok3n-userinfo@git.example.com/acme/mods?ref=v4",
+    "https://tok3n-userinfo:pa?ss-planted@git.example.com/acme/mods",
+    "https://git.example.com?sshkey=a@QUJD-sshkey",
+]
+
 
 def _assert_none_planted(nodes: list[NodeInfo], edges: list[EdgeInfo]) -> None:
     dumped = _dump(nodes, edges) + repr(nodes) + repr(edges)
@@ -580,8 +811,68 @@ def test_dockerfile_credentials_and_queries_are_never_stored(tmp_path: Path) -> 
     assert all("raw" not in row.extra for row in rows)
 
 
+def test_terragrunt_credentials_and_queries_are_never_stored(tmp_path: Path) -> None:
+    nodes, edges = _parse(tmp_path, "live/terragrunt.hcl", SECRET_TERRAGRUNT)
+    _assert_none_planted(nodes, edges)
+    rows = _imports(edges)
+    assert rows[0].target == "external:terraform-module:https://git.example.com/acme/mods"
+    assert rows[0].extra["ref"] == "v1" and rows[0].extra["subdir"] == "vpc"
+    assert rows[0].extra["source_kind"] == "git"
+    assert [r.target for r in rows[1:]] == ["external:terragrunt:dynamic"] * 2
+    assert all(r.extra["dynamic"] is True for r in rows[1:])
+    assert all("raw" not in row.extra for row in rows)
 
 
+@pytest.mark.parametrize("source", SECRET_TERRAGRUNT_SOURCES)
+def test_terragrunt_source_variants_never_keep_secrets(tmp_path: Path, source: str) -> None:
+    from code_review_graph.infra_references import parse_terragrunt_source
+
+    parts = parse_terragrunt_source(source)
+    assert not any(p in repr(parts) for p in PLANTED), parts
+    body = f'terraform {{\n  source = "{source}"\n}}\n'
+    nodes, edges = _parse(tmp_path, "live/terragrunt.hcl", body)
+    _assert_none_planted(nodes, edges)
+
+
+def test_terragrunt_remote_sources_keep_host_path_subdir_and_ref() -> None:
+    from code_review_graph.infra_references import parse_terragrunt_source
+
+    def shape(source: str) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
+        p = parse_terragrunt_source(source)
+        return p["kind"], p["base"], p["subdir"], p["ref"]
+
+    assert shape(SECRET_TERRAGRUNT_SOURCES[0]) == (
+        "git", "https://git.example.com/acme/mods", "vpc", "v1",
+    )
+    assert shape(SECRET_TERRAGRUNT_SOURCES[1]) == (
+        "archive", "https://git.example.com/acme/mods.zip", None, None,
+    )
+    # ``git@host:path`` is the conventional ssh user, not a secret; it is dropped like any
+    # userinfo and the address is host/path.
+    assert shape(SECRET_TERRAGRUNT_SOURCES[2]) == (
+        "git", "git.example.com/acme/mods", "vpc", "v2",
+    )
+    assert shape("git@git.example.com:acme/mods.git") == (
+        "git", "git.example.com/acme/mods", None, None,
+    )
+    assert shape(SECRET_TERRAGRUNT_SOURCES[4]) == (
+        "other", "ssh://git.example.com:2222/acme/mods", None, "v3",
+    )
+    assert shape("tfr:///acme/vpc/aws?version=1.2.3")[3] == "1.2.3"
+    # An ambiguous authority (a ``?`` before the ``@``) is not guessed at.
+    assert shape(SECRET_TERRAGRUNT_SOURCES[6])[1] is None
+    assert shape(SECRET_TERRAGRUNT_SOURCES[7])[1] is None
+
+
+def test_unusable_terragrunt_reference_is_dynamic_without_text(tmp_path: Path) -> None:
+    _nodes, edges = _parse(
+        tmp_path, "live/terragrunt.hcl",
+        'terraform {\n  source = "https://u:pa?ss-planted@git.example.com/x"\n}\n',
+    )
+    row = _imports(edges)[0]
+    assert row.target == "external:terragrunt:dynamic"
+    assert row.extra["dynamic"] is True
+    assert "pa?ss" not in repr(edges)
 
 
 def test_docker_image_userinfo_query_and_fragment_are_dropped() -> None:

@@ -1,17 +1,18 @@
-"""Reference-shaped strings in infrastructure files: workflow ``uses`` and Docker images.
+"""Reference-shaped strings in infrastructure files: workflow ``uses``, Docker images, sources.
 
 The graph keeps configuration VALUES out (see ``config_keys.py`` and the value-free YAML, JSON
 and Spring parsers). The one exception made here is an allowlist of strings that NAME another
-unit of code: a GitHub Actions ``uses:`` reference and a Dockerfile base image. Each is parsed
-into its parts and stored as an ``IMPORTS_FROM`` edge to a stable external target, so a question
-such as "which repositories call this shared workflow" has an answer in the graph.
+unit of code: a GitHub Actions ``uses:`` reference, a Dockerfile base image, a Terragrunt
+module source. Each is parsed into its parts and stored as an ``IMPORTS_FROM`` edge to a
+stable external target, so a question such as "which repositories call this shared workflow"
+has an answer in the graph.
 
-Nothing else is read. ``env``, ``with``, ``secrets``, ``args``, ``ENV``, ``ARG`` values and
-``LABEL`` are never looked at, so no value in them can reach a node or an edge. Nor does a URL
-credential (``user:password@``, a token), a query string other than a ``ref`` or ``version``, or
-a fragment: they are dropped from every reference and the raw remote string is never stored. The
-helpers here are pure: they take a string and return its parts, and the emitters in
-``parser.py`` decide where the edges go.
+Nothing else is read. ``env``, ``with``, ``secrets``, ``args``, ``ENV``, ``ARG`` values,
+``LABEL`` and Terragrunt ``inputs`` are never looked at, so no value in them can reach a node
+or an edge. Nor does a URL credential (``user:password@``, a token), a query string other
+than a ``ref`` or ``version``, or a fragment: they are dropped from every reference and the
+raw remote string is never stored. The helpers here are pure: they take a string and return
+its parts, and the emitters in ``parser.py`` decide where the edges go.
 """
 
 from __future__ import annotations
@@ -55,6 +56,8 @@ _STAGE_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _DIGEST_TAIL = re.compile(
     r"@([A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:[0-9A-Fa-f]{32,})$"
 )
+_ADDRESS_VALUE = re.compile(r"^[A-Za-z0-9_.~:/+%-]+$")
+
 
 def is_reference_text(text: str) -> bool:
     """Whether *text* is short, single-line and free of control characters."""
@@ -259,6 +262,82 @@ def is_dockerfile_name(name: str) -> bool:
     return False
 
 
+#: Target of a Terragrunt source, include or dependency that is an expression, such as
+#: ``find_in_parent_folders()``. It is never evaluated, and its text is not stored.
+EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET = "external:terragrunt:dynamic"
+
+#: Target prefix of a remote Terraform module source (git, registry, archive).
+EXTERNAL_TERRAFORM_MODULE_PREFIX = "external:terraform-module:"
+
 _GETTER_PREFIX = re.compile(r"^([A-Za-z0-9]+)::")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
+
+def parse_terragrunt_source(raw: str) -> dict[str, Any]:
+    """Split a ``terraform { source = ... }`` value into where it points and which version.
+
+    ``kind`` is ``local`` (a ``./``, ``../`` or absolute path), ``git`` (a ``git::`` prefix, a
+    ``.git`` address or ``git@`` address), ``registry`` (``tfr://`` or ``<ns>/<name>/<provider>``),
+    ``archive`` (``http(s)``, ``s3``, ``gcs``) or ``other``. A remote source has ``base``
+    (``[scheme://]host/path`` without the ``//subdir``, the ``.git`` suffix, the query and
+    any credentials), ``subdir`` and ``ref`` (the ``ref`` or ``version`` query parameter).
+    The raw text is not part of the result. ``userinfo@`` (``user:password@``, a token, the
+    ``git@`` of an scp-like address) is dropped, a fragment is dropped, and every query
+    parameter other than ``ref`` and ``version`` is dropped, so a credential or signed URL
+    parameter is never kept. A source that cannot be reduced safely has ``base`` ``None``.
+    Nothing is fetched or evaluated.
+    """
+    text = raw.strip()
+    parts: dict[str, Any] = {"kind": "other", "base": None, "subdir": None, "ref": None}
+    if text.startswith(("./", "../", "/")):
+        parts["kind"] = "local"
+        return parts
+    getter = None
+    match = _GETTER_PREFIX.match(text)
+    if match and not text.startswith(match.group(1) + "://"):
+        getter = match.group(1).lower()
+        text = text[match.end():]
+    git_user = text.startswith("git@")
+    scheme = _URL_SCHEME.match(text)
+    prefix = scheme.group(0) if scheme else ""
+    rest = drop_userinfo(text[scheme.end():] if scheme else text)
+    if rest is None:
+        return parts
+    if not scheme:
+        scp = re.match(r"^([^/:?#]+):(?!\d+(?:/|$))(.*)$", rest)
+        if scp:  # ``host:org/repo``, the scp-like form
+            rest = scp.group(1) + "/" + scp.group(2)
+    rest = rest.split("#", 1)[0]
+    address, _, query = rest.partition("?")
+    for pair in query.split("&"):
+        key, _, value = pair.partition("=")
+        if key in ("ref", "version") and _REF_VALUE.match(value):
+            parts["ref"] = value
+    base, sep, subdir = address.partition("//")
+    subdir = subdir.strip("/")
+    dot_git = not scheme and base.endswith(".git")
+    if base.endswith(".git"):
+        base = base[:-4]
+    base = prefix + base
+    if (
+        not base
+        or not _ADDRESS_VALUE.match(base.replace("://", "/", 1))
+        or (subdir and not _ADDRESS_VALUE.match(subdir))
+    ):
+        parts["ref"] = None
+        return parts
+    parts["base"] = base
+    if sep:
+        parts["subdir"] = subdir or None
+    scheme_name = prefix[:-3].lower()
+    if getter == "git" or git_user or dot_git:
+        parts["kind"] = "git"
+    elif scheme_name == "tfr" or (
+        not scheme and not getter and re.fullmatch(r"\w[\w-]*/[\w.-]+/[\w.-]+", base)
+    ):
+        parts["kind"] = "registry"
+    elif getter in ("s3", "gcs", "http", "https") or scheme_name in ("http", "https", "s3", "gcs"):
+        parts["kind"] = "archive"
+    elif not scheme and not getter and "." in base.split("/")[0]:
+        parts["kind"] = "git"  # ``github.com/acme/mods``: go-getter's shorthand
+    return parts

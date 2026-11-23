@@ -4,12 +4,12 @@
 
 ### Added
 
-- GitHub Actions workflows and Dockerfiles now record the workflows, actions
-  and images they use, so you can ask which files use a given one. Dockerfile
-  build stages are also indexed, with the stages they copy from. Credentials
-  in URLs and query strings other than the ref are never stored, and neither
-  are other values from these files. Run `code-review-graph build` once to add
-  these to an existing graph. See
+- GitHub Actions workflows, Dockerfiles and Terragrunt files now record the
+  workflows, actions, images and modules they use, so you can ask which files
+  use a given one. Dockerfile build stages are also indexed, with the stages
+  they copy from. Credentials in URLs and query strings other than the ref are
+  never stored, and neither are other values from these files. Run
+  `code-review-graph build` once to add these to an existing graph. See
   [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md).
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or

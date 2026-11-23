@@ -7,7 +7,7 @@
 - [CHANGELOG.md](../CHANGELOG.md): every change by release, with upgrade notes
 - [GITHUB_ACTION.md](GITHUB_ACTION.md): risk-scored PR review comments in GitHub Actions
 - [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md): add a language through `.code-review-graph/languages.toml`
-- [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md): GitHub Actions and Dockerfile references as external edges
+- [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md): GitHub Actions, Dockerfile and Terragrunt references as external edges
 - [architecture.md](architecture.md): system design and data flow
 - [schema.md](schema.md): node and edge types, SQLite tables (including flows, communities, FTS5)
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md): `code-review-graph doctor`, then common problems and fixes, including Windows/WSL

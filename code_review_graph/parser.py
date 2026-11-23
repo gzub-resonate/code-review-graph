@@ -48,6 +48,8 @@ from .custom_languages import CustomLanguage, load_custom_languages
 from .infra_references import (
     DYNAMIC_GITHUB_ACTIONS_TARGET,
     EXTERNAL_DYNAMIC_DOCKER_TARGET,
+    EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET,
+    EXTERNAL_TERRAFORM_MODULE_PREFIX,
     MAX_DOCKERFILE_BYTES,
     MAX_DOCKERFILE_LINES,
     MAX_INFRA_REFERENCES_PER_FILE,
@@ -57,8 +59,11 @@ from .infra_references import (
     github_actions_target,
     is_dockerfile_name,
     is_github_workflow_path,
+    is_plain_local_path,
+    is_reference_text,
     parse_docker_image,
     parse_github_uses,
+    parse_terragrunt_source,
 )
 from .npm_alias_resolver import NpmAliasResolver
 
@@ -1804,6 +1809,13 @@ def _builtin_language_names() -> frozenset[str]:
         | frozenset(_CALL_TYPES)
     )
 
+
+# Terragrunt blocks that name another unit, and the one attribute read from each.
+_TERRAGRUNT_REFERENCE_ATTRIBUTES = {
+    "terraform": "source",
+    "include": "path",
+    "dependency": "config_path",
+}
 
 # Patterns that indicate a test function
 _TEST_PATTERNS = [
@@ -13484,6 +13496,13 @@ class CodeParser:
         if block_type == "locals":
             return self._emit_hcl_locals(body_node, file_path, nodes, edges)
 
+        if block_type in _TERRAGRUNT_REFERENCE_ATTRIBUTES and file_path.lower().endswith(".hcl"):
+            if body_node is not None:
+                self._emit_terragrunt_reference(
+                    block_type, labels, body_node, file_path, edges, line_start,
+                )
+            return True
+
         cfg = _HCL_BLOCK_CFG.get(block_type)
         if cfg is None:  # "terraform" and unknown blocks silently skipped
             return True
@@ -13533,6 +13552,100 @@ class CodeParser:
             )
 
         return True
+
+    def _emit_terragrunt_reference(
+        self,
+        block_type: str,
+        labels: list[str],
+        body_node,
+        file_path: str,
+        edges: list[EdgeInfo],
+        line: int,
+    ) -> None:
+        """Emit the one reference a Terragrunt ``terraform``, ``include`` or ``dependency`` names.
+
+        Only ``terraform.source``, ``include.path`` and ``dependency.config_path`` are read.
+        ``inputs``, ``locals``, ``mock_outputs`` and every other attribute are not visited. A
+        string with an interpolation or a function call (``find_in_parent_folders()``) is
+        recorded as dynamic and its text is not stored. A local path resolves to the file or
+        module it names, as a ``.tf`` module ``source`` does; a remote source points at
+        ``external:terraform-module:<address>`` with the ``ref`` in ``extra``. Credentials and
+        query parameters other than ``ref`` and ``version`` are dropped, and the raw source is
+        never stored.
+        """
+        attribute = _TERRAGRUNT_REFERENCE_ATTRIBUTES[block_type]
+        found = self._terragrunt_attribute(body_node, attribute)
+        if found is None:
+            return
+        raw, is_literal, attr_line = found
+        extra: dict[str, Any] = {
+            "resolution": "terragrunt_reference", "block": block_type,
+            "dynamic": not is_literal,
+        }
+        if labels:
+            extra["name"] = labels[0]
+        target = EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        if is_literal and block_type == "terraform":
+            parts = parse_terragrunt_source(raw)
+            extra.update(
+                source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
+            )
+            if parts["kind"] == "local":
+                if is_plain_local_path(raw):
+                    target = self._terragrunt_local_target(raw, file_path)
+            elif parts["base"]:
+                target = EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
+        elif is_literal and is_plain_local_path(raw):
+            target = self._terragrunt_local_target(raw, file_path)
+        if target == EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET:
+            extra["dynamic"] = True
+        edges.append(EdgeInfo(
+            kind="IMPORTS_FROM", source=file_path, target=target,
+            file_path=file_path, line=attr_line or line, extra=extra,
+        ))
+
+    @staticmethod
+    def _terragrunt_attribute(
+        body_node, attr_name: str,
+    ) -> Optional[tuple[str, bool, int]]:
+        """``(text, is_literal, line)`` of attribute *attr_name*, or ``None`` if absent.
+
+        A plain quoted string is literal. Any other expression is returned as its source text
+        with ``is_literal`` false; one that is not a reference-shaped string is dropped.
+        """
+        for attr in body_node.children:
+            if attr.type != "attribute":
+                continue
+            key = _hcl_child(attr, "identifier")
+            expr = _hcl_child(attr, "expression")
+            if key is None or expr is None or _hcl_text(key) != attr_name:
+                continue
+            literal = _hcl_child(expr, "literal_value")
+            string_lit = _hcl_child(literal, "string_lit") if literal is not None else None
+            template = (
+                _hcl_child(string_lit, "template_literal") if string_lit is not None else None
+            )
+            if template is not None:
+                text, is_literal = _hcl_text(template).strip(), True
+            else:
+                text, is_literal = _hcl_text(expr).strip(), False
+            if not is_reference_text(text):
+                return None
+            return text, is_literal, attr.start_point[0] + 1
+        return None
+
+    def _terragrunt_local_target(self, raw: str, file_path: str) -> str:
+        """The in-repo file a relative Terragrunt path names, else the raw text.
+
+        A path to a directory (a module, or a dependency's config) names the
+        ``terragrunt.hcl`` or ``main.tf`` inside it when one exists.
+        """
+        resolved = self._resolve_module_to_file(raw, file_path, "hcl")
+        if resolved:
+            return resolved
+        return self._confined_local_file(
+            Path(file_path).parent, raw, ("", "terragrunt.hcl", "main.tf"),
+        ) or raw
 
     def _confined_local_file(
         self, base: Path, raw: str, children: tuple[str, ...],
