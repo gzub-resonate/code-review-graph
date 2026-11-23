@@ -4,13 +4,21 @@
 
 ### Added
 
-- Ember.js modules are given a role, `ember_kind` (`service`, `route`, `controller`,
-  `component`, `model`, `adapter`, `serializer`, `helper`, `modifier`, `mixin`,
-  `transform` or `template`), from their path and base class, and `.hbs` templates
-  are indexed as the `handlebars` language. Service injections, Ember Data names
-  and the components a template invokes are recorded by name for a later step to
-  bind. No template text or literal value is stored. Run `code-review-graph build`
-  once to refresh an existing graph.
+- Ember.js projects are understood by their naming convention. A service
+  injected with `@service`, `service()` or `Ember.inject.service()` now points
+  at the service file (the lookup name is the explicit name or the dasherized
+  property name), and `this.foo.bar()` or `this.get('foo').bar()` goes to that
+  service's `bar`, so `callers_of` on a service method finds its callers. Ember
+  Data names resolve too: `store.findRecord('post')` and `belongsTo('post')`
+  point at the model. `.hbs` templates are indexed: each component, helper or
+  modifier a template invokes points at its file, and a component's class
+  points at its template. Imports written as `<app>/services/x` resolve to the
+  file under `app/` or `addon/`. Each route in `router.js` becomes an
+  `Endpoint` handled by the route, controller and template modules its name
+  implies. Service, route, component and other modules carry an `ember_kind`.
+  An injection or template name that matches no file, or several, stays
+  unresolved and says why (`ember_reason`). No template text or literal value
+  is stored. See `docs/EMBER.md`.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
@@ -173,6 +181,14 @@
   its analysis; it leaves a notice naming both commits.
 - A call that could mean several functions now stores them in sorted order, so
   the same code gives the same graph whatever order its files are read in.
+
+### Internal
+
+- `ember_extract.py`, `ember_template.py` and `ember_resolver.py` add the Ember
+  support; tests are `test_ember_parser.py`, `test_ember_template.py` (including
+  hostile-input bounds) and `test_ember_resolver.py`, over the synthetic apps in
+  `tests/fixtures/ember/`. `ember_resolved` is a resolver-bound key in
+  `graph.py`, so Ember edges are `INFERRED`.
 
 ## [2.4.0] - 2026-11-10
 
