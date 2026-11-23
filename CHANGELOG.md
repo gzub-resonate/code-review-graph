@@ -21,6 +21,12 @@
   (`feign` or `js`); the new `origin` argument narrows to one. A catch-all
   route such as a Next.js `[...path]` proxy matches only by exact method and
   literal prefix, with `confidence: "low"`. A variable URL is never guessed.
+- FastAPI and Flask routes on an application built in the same file
+  (`app = FastAPI()`, `app = Flask(__name__)`) are indexed as server endpoints,
+  so a JavaScript caller or another service can match them. Routes on a router
+  or blueprint, whose prefix is set elsewhere, are not read yet, and a path that
+  is not a string literal is never guessed. Rebuild a graph to index existing
+  Python; see `docs/COMMANDS.md`.
 - JavaScript and TypeScript servers now take part too: the parser records served
   routes (the Next.js app and pages routers, and Express, Koa, Fastify and Hono
   style `app.get('/x', handler)`) as server `Endpoint` nodes with `HANDLES`

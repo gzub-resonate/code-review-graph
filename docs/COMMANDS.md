@@ -977,6 +977,18 @@ path, with at least one more segment (none for `[[...path]]`), and only when no
 exact route fits; a catch-all at the root matches nothing. Its candidate has
 `catch_all: true`.
 
+Python servers are indexed too, so a frontend or another service can reach
+them. Routes on a FastAPI or Flask application built in the same file are read
+from `@app.get/post/put/patch/delete/head/options`, `@app.api_route(path,
+methods=[...])` and `@app.route(path, methods=[...])` (default `GET`), with
+Flask `<int:id>` turned into `{id}` and a trailing `{name:path}` or
+`<path:name>` read as a catch-all. A path that is not a string literal is never
+guessed: the route is left out. Routes on an `APIRouter` or `Blueprint`, and on
+an application imported from another file, are not read yet, because part of
+their path is a prefix set elsewhere. Routes in test, fixture and example
+directories are ignored; class-based Flask views and `add_url_rule` are not
+read.
+
 What the parser records for JavaScript and TypeScript (all of it is a plain
 `Endpoint` node: client ones have `role: "client"` and a `REQUESTS` edge from
 the enclosing function, server ones a `HANDLES` edge from the handler):
