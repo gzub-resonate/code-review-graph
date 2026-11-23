@@ -4,6 +4,11 @@
 
 ### Added
 
+- `query_graph_tool` can answer "who points at this?" for code outside the
+  repository. A target written `external:<kind>:<name>` (the form parsers use
+  for a GitHub Action, a Docker image, a Terragrunt module or a Lambda) now works
+  with `callers_of`, `references_to` and `importers_of`; it used to return
+  `not_found` because no node has that name. See `docs/COMMANDS.md`.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

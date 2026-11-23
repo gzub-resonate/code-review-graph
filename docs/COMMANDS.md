@@ -554,6 +554,13 @@ are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller. Within that order, calls bound to a node come
 before bare-name guesses.
 
+A target written `external:<kind>:<name>`, such as `external:aws-lambda:order-validator`
+or `external:github-actions:actions/checkout`, names code outside the repository. No node
+has that name, so `callers_of`, `references_to` and `importers_of` read the edges that end
+there (calls, references and imports respectively) and list who points at it. A target
+nothing points at gives an empty answer, not `not_found`. The other patterns do not read
+external targets.
+
 A full name that one real symbol has resolves to it, even when tests or test
 helpers share the name; the summary says how many it skipped. When two real
 symbols share the name, `status` is `"ambiguous"` and the response lists
