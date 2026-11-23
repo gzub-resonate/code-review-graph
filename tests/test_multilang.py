@@ -6379,3 +6379,118 @@ class TestDockerfileParsing:
     def test_values_are_not_indexed(self):
         dumped = repr(self.nodes) + repr(self.edges)
         assert "not-a-real-value" not in dumped
+
+
+class TestAslParsing:
+    """Amazon States Language (AWS Step Functions) state machines."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.path = FIXTURES / "sample.asl.json"
+        self.nodes, self.edges = self.parser.parse_file(self.path)
+        self.states = {n.identity_name: n for n in self.nodes if n.kind == "Function"}
+
+    def _flow(self, via=None):
+        return {
+            (e.source.split("::", 1)[1], e.target.split("::", 1)[1], e.extra.get("via"))
+            for e in self.edges
+            if e.kind == "TRANSITIONS_TO" and (via is None or e.extra.get("via") == via)
+        }
+
+    def test_detects_language_by_file_name(self):
+        assert self.parser.detect_language(Path("orders.asl.json")) == "asl"
+        assert self.parser.detect_language(Path("orders.ASL.JSON")) == "asl"
+        assert self.parser.detect_language(Path("orders.asl")) == "asl"
+        assert self.parser.detect_language(Path("orders.json")) == "json"
+        assert self.parser.detect_language(Path("asl.json")) == "json"
+
+    def test_file_and_machine_nodes(self):
+        file_node = next(n for n in self.nodes if n.kind == "File")
+        assert file_node.language == "asl"
+        assert file_node.extra["values_indexed"] is False
+        machine = next(n for n in self.nodes if n.kind == "Class")
+        assert machine.name == "sample"
+        assert machine.extra["state_count"] == 15
+        assert machine.extra["unresolved_transitions"] == 0
+
+    def test_no_generic_json_nodes(self):
+        assert not [n for n in self.nodes if n.kind == "JsonPath"]
+        assert all(n.language == "asl" for n in self.nodes)
+
+    def test_every_state_type_is_found(self):
+        types = {n.extra["state_type"] for n in self.states.values()}
+        assert types == {
+            "Task", "Choice", "Parallel", "Map", "Wait", "Pass", "Succeed", "Fail",
+        }
+
+    def test_start_and_end_flags(self):
+        starts = {n.name for n in self.states.values() if n.extra["is_start"]}
+        assert starts == {"Validate Order", "Reserve Stock", "Notify Customer", "Price Item"}
+        assert self.states["sample/Done"].extra["end"] is True
+        assert self.states["sample/Reject Order"].extra["end"] is True
+        assert self.states["sample/Route Order"].extra["end"] is False
+
+    def test_nested_states_have_unique_qualified_names(self):
+        assert "sample/Fan Out[0]/Reserve Stock" in self.states
+        assert "sample/Fan Out[1]/Notify Customer" in self.states
+        assert "sample/Process Items[map]/Price Item" in self.states
+        qualified = [
+            e.target for e in self.edges if e.kind == "CONTAINS" and "::" in e.target
+        ]
+        assert len(qualified) == len(set(qualified))
+
+    def test_next_default_choice_and_catch_transitions(self):
+        assert ("sample/Validate Order", "sample/Route Order", "next") in self._flow("next")
+        assert ("sample/Route Order", "sample/Fan Out", "default") in self._flow("default")
+        assert self._flow("choice") == {
+            ("sample/Route Order", "sample/Manual Review", "choice"),
+            ("sample/Route Order", "sample/Fan Out", "choice"),
+        }
+        assert self._flow("catch") == {
+            ("sample/Validate Order", "sample/Reject Order", "catch"),
+        }
+
+    def test_parallel_branches_and_map_processor_transitions(self):
+        assert self._flow("branch") == {
+            ("sample/Fan Out", "sample/Fan Out[0]/Reserve Stock", "branch"),
+            ("sample/Fan Out", "sample/Fan Out[1]/Notify Customer", "branch"),
+        }
+        assert self._flow("map") == {
+            ("sample/Process Items", "sample/Process Items[map]/Price Item", "map"),
+        }
+        assert (
+            "sample/Process Items[map]/Pause", "sample/Process Items[map]/Tag Item", "next",
+        ) in self._flow("next")
+
+    def test_task_targets_use_references_edges(self):
+        refs = {
+            e.source.split("::", 1)[1]: (e.target, e.extra["resource_kind"])
+            for e in self.edges
+            if e.kind == "REFERENCES"
+        }
+        assert refs == {
+            "sample/Validate Order": ("external:aws-lambda:validate-order", "lambda"),
+            "sample/Manual Review": ("external:aws-lambda:request-review", "lambda"),
+            "sample/Fan Out[0]/Reserve Stock": ("external:aws-dynamodb:inventory", "dynamodb"),
+            "sample/Fan Out[1]/Notify Customer": ("external:aws-sns:order-events", "sns"),
+            "sample/Start Fulfilment": ("external:aws-states:fulfilment-flow", "states"),
+            "sample/Run Packer": ("external:aws-ecs:packing-cluster", "ecs"),
+        }
+
+    def test_placeholder_and_intrinsic_targets_are_dynamic(self):
+        placeholder = self.states["sample/Process Items[map]/Price Item"].extra
+        assert placeholder["target_dynamic"] is True
+        assert placeholder["target_placeholders"] == ["price_item_arn"]
+        intrinsic = self.states["sample/Notify Dynamic"].extra
+        assert intrinsic["target_dynamic"] is True
+        assert "target_placeholders" not in intrinsic
+        assert not [
+            e for e in self.edges
+            if e.kind == "REFERENCES" and e.source.endswith("/Notify Dynamic")
+        ]
+
+    def test_state_lines_span_the_state_object(self):
+        state = self.states["sample/Done"]
+        assert state.line_start == state.line_end
+        parallel = self.states["sample/Fan Out"]
+        assert parallel.line_end - parallel.line_start > 20

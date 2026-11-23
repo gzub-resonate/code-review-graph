@@ -605,6 +605,8 @@ async def query_graph_tool(
     - children_of: Find nodes contained in a file or class
     - tests_for: Find tests for the target
     - inheritors_of: Find classes inheriting from the target
+    - next_states_of: Find the Step Functions states a state hands over to
+    - previous_states_of: Find the Step Functions states that hand over to a state
     - triggers_of: Find methods invoked by a scheduler or other trigger
     - triggered_by: Find schedulers or other triggers that invoke the target
     - publishers_of: Find methods that publish an event

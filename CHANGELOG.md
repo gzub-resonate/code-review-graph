@@ -177,6 +177,26 @@
   file outside the repository is opened. Registry and git `module` sources in
   `.tf` files are now stored as `external:terraform-module:` targets without
   credentials. Run `code-review-graph build` once to update an existing graph.
+- AWS Step Functions state machines are indexed. A file named `*.asl.json` or
+  `*.asl` is read as a state machine instead of as generic JSON, so it no longer
+  adds a `JsonPath` node for every key (on two real repositories, 61
+  definitions went from about 20,900 nodes to about 1,500). Each machine is a
+  `Class` node and each state a `Function` node, with its type, whether it
+  starts the machine or ends it, and, for a Task, the kind of service it calls.
+  Parallel branches and Map processors are included, and a state keeps a
+  unique name by the path of the states around it. New `TRANSITIONS_TO` edges
+  follow the flow (`via` is `next`, `default`, `choice`, `catch`, `branch` or
+  `map`). `query_graph_tool` has two new patterns, `next_states_of` and
+  `previous_states_of`, to list the states a state hands over to and the states
+  that hand over to it, and `path_to` now follows transitions from one state to
+  another. A Task that calls a Lambda function, a nested state machine, an
+  ECS task, an SNS topic, an SQS queue, a DynamoDB table or a few other
+  resources gets a `REFERENCES` edge to `external:aws-<service>:<name>`. Only
+  the resource name is kept: no account ID, region, parameter, path, choice
+  value or comment ever enters the graph. A `${placeholder}` or an intrinsic
+  function in place of a name is recorded as dynamic, with the placeholder's
+  key name and nothing else. A definition that is not valid JSON, or is over
+  1 MiB, keeps only its file node.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

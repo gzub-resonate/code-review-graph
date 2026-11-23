@@ -231,6 +231,11 @@ tests, user keywords, keyword calls, and `Resource`/`Library`/`Variables`
 settings are extracted. Changes to this support should include focused tests
 for both extensions in `tests/test_parser.py`.
 
+AWS Step Functions state machines (`*.asl.json`, `*.asl`) are another structural
+parser, `_parse_asl` in `parser.py`, over the bundled JSON grammar. Keep it value-free:
+a change must not store a `Parameters`, path, `Choice` or `Comment` value, and
+`tests/test_asl.py` plants fake values and checks that none reaches a node or an edge.
+
 ## Adding a Platform Target
 
 Every supported AI tool is permanent maintenance surface: its config path, schema, install merge, uninstall and tests have to keep working on every release. Some existing targets were merged without evidence that they worked in a released client, and those are the ones that break. New targets are held to the bar below.

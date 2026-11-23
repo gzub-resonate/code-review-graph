@@ -2902,6 +2902,8 @@ def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
             grammars.update(("javascript", "typescript", "html"))
         elif lang == "blade":
             grammars.update(("php", "html"))
+        elif lang == "asl":
+            grammars.add("json")
         elif lang == "c" and suffix == ".h":
             grammars.update(("c", "cpp"))
         elif lang in _NO_GRAMMAR_LANGUAGES:

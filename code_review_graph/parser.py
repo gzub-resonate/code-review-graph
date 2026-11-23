@@ -32,7 +32,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
-from . import ember_extract, ember_template, js_api_extract, py_api_extract
+from . import asl_parse, ember_extract, ember_template, js_api_extract, py_api_extract
 from . import scala_parse as _scala_parse
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
@@ -1333,6 +1333,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".yml": "yaml",
     ".yaml": "yaml",
     ".json": "json",
+    ".asl": "asl",
     ".robot": "robot",
     ".resource": "robot",
     ".liquid": "liquid",
@@ -3444,6 +3445,7 @@ _JSON_VALUE_TYPES = {
     "string": "string",
     "true": "boolean",
 }
+
 # Folders whose JSON is data for a test, a demo or the docs, not settings for
 # the project. On vega, ``docs/`` alone held 168 example specs and data sets
 # that would have become 12,725 paths.
@@ -4062,6 +4064,9 @@ class CodeParser:
             return "blade"
         if is_dockerfile_name(path.name):
             return "dockerfile"
+        # A Step Functions definition is JSON, but it is a state machine, not data.
+        if path.name.lower().endswith((".asl.json", ".asl")):
+            return "asl"
         suffix = path.suffix.lower()
         lang = self._extension_map.get(suffix)
         if lang == "yaml" and _is_ansible_path(path):
@@ -4320,6 +4325,10 @@ class CodeParser:
             if _yaml is None:
                 return [], []
             return self._parse_yaml(path, source)
+
+        # Step Functions state machines: states and transitions, never values.
+        if language == "asl":
+            return self._parse_asl(path, source)
 
         # JSON: the same value-free paths, and data files stay out.
         if language == "json":
@@ -11982,6 +11991,15 @@ class CodeParser:
         if truncated:
             file_extra["infra_references_truncated"] = True
         return nodes, edges
+
+    def _parse_asl(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index a Step Functions state machine (see :mod:`code_review_graph.asl_parse`)."""
+        return asl_parse.parse_asl(
+            path, source, self._get_parser("json"), NodeInfo, EdgeInfo,
+            _is_test_file(normalize_file_path(path)),
+        )
 
     def _parse_json(
         self,
