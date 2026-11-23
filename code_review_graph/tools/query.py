@@ -6,7 +6,7 @@ import logging
 import re
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..config_keys import normalize_spring_config_key
 from ..constants import (
@@ -42,6 +42,7 @@ from ..incremental import (
     get_db_path,
     path_within_repo,
 )
+from ..paging import CursorError, Page, graph_stamp, make_scope, paginate, shown_range
 from ..parser import is_test_file, normalize_file_path, repo_relative_path
 from ..search import hybrid_search
 from ..uncertainty import (
@@ -57,7 +58,6 @@ from ._common import (
     _get_store,
     _resolve_graph_file_paths,
     _resolve_graph_file_paths_with_unmatched,
-    _shown_of,
     _unmatched_file_warning,
     _validate_positive_int,
 )
@@ -128,6 +128,47 @@ _MAX_BARE_TARGET_CANDIDATES = 20
 #: Patterns whose rows describe one edge, so a call site can be attached and
 #: the answer can be split by how certain that edge's target attribution is.
 _CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
+
+
+class _RowWindow:
+    """A stand-in for a whole list of *total* rows of which only some are in memory.
+
+    ``paginate`` measures a list and slices it. These tools stop collecting rows once
+    the page is full, so the list only ever holds the rows from *start* on; this gives
+    ``paginate`` the same two operations without building the rows before the page.
+    """
+
+    def __init__(self, rows: list[Any], total: int, start: int = 0) -> None:
+        self._rows, self._total, self._start = rows, total, start
+
+    def __len__(self) -> int:
+        return self._total
+
+    def __getitem__(self, window: slice) -> list[Any]:
+        low = max((window.start or 0) - self._start, 0)
+        high = None if window.stop is None else max(window.stop - self._start, 0)
+        return self._rows[low:high]
+
+
+def _window_page(
+    rows: list[Any], total: int, start: int, limit: int, hard_cap: int,
+    cursor: str | None, scope: str, stamp: str,
+) -> Page:
+    """The page of a list of *total* rows when only ``rows`` (from *start*) were read."""
+    return paginate(
+        cast("list[Any]", _RowWindow(rows, total, start)), limit, hard_cap, cursor,
+        scope=scope, stamp=stamp,
+    )
+
+
+def _cursor_offset(cursor: str | None, scope: str, stamp: str) -> int:
+    """Where *cursor* points, refused if it is not for this query and graph.
+
+    Needed before the rows are read, so the read can stop at the end of the page.
+    """
+    if not cursor:
+        return 0
+    return _window_page([], 2**62, 0, 1, 1, cursor, scope, stamp).offset
 
 
 def _attach_call_site(
@@ -319,6 +360,7 @@ def _compact_impact_response(
     result: dict[str, Any], root: Path, changed_files: list[str],
     unmatched_files: list[str], max_files: int, resolution: str,
     unresolved_call_sites: int,
+    cursor: str | None = None, scope: str = "", stamp: str = "",
 ) -> dict[str, Any]:
     """Project the radius onto files without serializing its graph records."""
     def requested_path(path: str) -> str:
@@ -355,7 +397,10 @@ def _compact_impact_response(
     ))
     ranked_set = set(ranked_files)
     ranked_files.extend(sorted(file_set - ranked_set))
-    shown, total, cut = _bounded(ranked_files, max_files, _MAX_IMPACT_FILES)
+    page = paginate(
+        ranked_files, max_files, _MAX_IMPACT_FILES, cursor, scope=scope, stamp=stamp,
+    )
+    shown, total, cut = page.items, page.total, page.truncated
     # The changed-file list is the caller's own, and a whole-repo diff makes
     # it as long as the repository: it gets the same display limit.
     changed_shown, changed_total, changed_cut = _bounded(
@@ -366,7 +411,12 @@ def _compact_impact_response(
     )
     return {
         "status": "ok",
-        "summary": f"Showing {len(shown)} of {total} impacted files (best-first).",
+        "summary": (
+            f"Showing {page.offset + 1}-{page.offset + len(shown)} of {total}"
+            " impacted files (best-first)."
+            if page.offset and shown
+            else f"Showing {len(shown)} of {total} impacted files (best-first)."
+        ),
         "changed_files": [requested_path(path) for path in changed_shown],
         "changed_file_count": changed_total,
         "changed_files_omitted": changed_total - len(changed_shown),
@@ -382,6 +432,7 @@ def _compact_impact_response(
         "truncated": result["truncated"] or cut or changed_cut or unmatched_cut,
         "resolution": resolution,
         "unresolved_call_sites": unresolved_call_sites,
+        **page.fields(),
     }
 
 
@@ -744,6 +795,7 @@ def get_impact_radius(
     detail_level: str = "standard",
     resolution: str = RESOLUTION_ALL,
     max_files: int = 25,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Analyze the blast radius of changed files.
 
@@ -762,10 +814,21 @@ def get_impact_radius(
         resolution: "all" (default) traverses every edge; "direct" refuses to
             traverse a CALLS/REFERENCES edge whose target was never bound to
             an indexed node.
+        cursor: ``next_cursor`` from the previous reply, to read the next page.
+            "standard" pages ``impacted_nodes`` (page size ``max_results``, at
+            most 100; the traversal grows to reach the page, so ``max_results``
+            is no longer a limit on how far a caller can read). "compact" pages
+            ``impacted_files`` (page size ``max_files``) among the files of the
+            ``max_results`` nodes traversed. The other lists stay capped as
+            before and are repeated on every page. Not supported with "minimal".
+            A cursor is refused if the changed files, depth, resolution, detail
+            level or graph differ from the call that made it.
 
     Returns:
         Changed nodes, impacted nodes, impacted files, connecting edges,
-        plus ``truncated`` flag and ``total_impacted`` count. An impacted node
+        plus ``truncated`` flag and ``total_impacted`` count. ``next_cursor``
+        is present when more impacted nodes (files, in compact) remain, and a
+        page after the first adds ``offset``. An impacted node
         that calls or references the changed code directly also carries the
         ``call_site`` it does so at, and ``unresolved_call_sites`` counts the
         call sites that name a changed symbol but were never bound to it.
@@ -778,12 +841,22 @@ def get_impact_radius(
         raise ValueError(
             f"resolution must be one of {list(IMPACT_RESOLUTIONS)}, got {resolution!r}"
         )
+    if cursor and detail_level == "minimal":
+        raise ValueError(
+            'cursor is not supported with detail_level="minimal", which is a summary; '
+            'use "standard" or "compact"'
+        )
 
     store, root = _get_store(repo_root)
     try:
         if changed_files is None:
             changed_files, base = discover_review_changes(root, base)
 
+        if cursor and not changed_files:
+            raise CursorError(
+                "cursor was made for a different query (no changed files now); "
+                "call again without a cursor to start over"
+            )
         if not changed_files:
             if detail_level == "compact":
                 return _compact_impact_response(
@@ -813,8 +886,27 @@ def get_impact_radius(
         shown_unmatched, unmatched_total, unmatched_cut = _bounded(
             unmatched_files, 5 if detail_level == "minimal" else max_results, _MAX_IMPACT_FILES,
         )
+        # What decides which rows the list holds. Standard pages the whole
+        # impacted set, so the traversal budget stays out of it; compact pages
+        # the files of the nodes the budget reached, so it belongs in it.
+        scope = make_scope(
+            "get_impact_radius_tool", changed_files=sorted(changed_files),
+            max_depth=max_depth, resolution=resolution, detail_level=detail_level,
+            max_results=max_results if detail_level == "compact" else None,
+        )
+        stamp = graph_stamp(store)
+        node_cap = max_results
+        if detail_level != "compact":
+            # Rank order is fixed (score, then qualified name), so the first
+            # ``offset + page`` nodes are the same whatever the cap: reach
+            # as far as this page needs.
+            node_cap = max(
+                max_results,
+                _cursor_offset(cursor, scope, stamp)
+                + min(max_results, _MAX_IMPACT_NODES_SHOWN),
+            )
         result = store.get_impact_radius(
-            abs_files, max_depth=max_depth, max_nodes=max_results,
+            abs_files, max_depth=max_depth, max_nodes=node_cap,
             resolution=resolution,
         )
 
@@ -824,6 +916,7 @@ def get_impact_radius(
                 store.count_unresolved_call_sites({
                     n.name for n in result["changed_nodes"] if n.kind != "File"
                 }),
+                cursor=cursor, scope=scope, stamp=stamp,
             )
             if not result["impacted_nodes"]:
                 language = next(
@@ -855,9 +948,11 @@ def get_impact_radius(
             ):
                 direct_sites.setdefault(edge.source_qualified, []).append(edge)
         impacted_dicts = []
-        shown_impacted, _total_shown, _cut = _bounded(
-            result["impacted_nodes"], max_results, _MAX_IMPACT_NODES_SHOWN,
+        impact_page = _window_page(
+            result["impacted_nodes"], result["total_impacted"], 0,
+            max_results, _MAX_IMPACT_NODES_SHOWN, cursor, scope, stamp,
         )
+        shown_impacted = impact_page.items
         for node in shown_impacted:
             node_dict = node_to_dict(node)
             score = impact_scores.get(node.qualified_name)
@@ -904,8 +999,7 @@ def get_impact_radius(
         })
         # ``truncated`` has to mean "there is more", whichever cap bit.
         truncated = (
-            result["truncated"]
-            or len(impacted_dicts) < len(result["impacted_nodes"])
+            impact_page.truncated
             or edges_omitted > 0
             or changed_nodes_omitted > 0
             or files_omitted > 0
@@ -925,7 +1019,12 @@ def get_impact_radius(
         ]
         if unmatched_files:
             summary_parts.append(_unmatched_file_warning(unmatched_files))
-        if len(impacted_dicts) < total_impacted:
+        if impact_page.offset and impacted_dicts:
+            summary_parts.append(
+                f"  - Impacted nodes {impact_page.offset + 1}-"
+                f"{impact_page.offset + len(impacted_dicts)} of {total_impacted}"
+            )
+        elif len(impacted_dicts) < total_impacted:
             summary_parts.append(
                 f"  - Results truncated: showing {len(impacted_dicts)}"
                 f" of {total_impacted} impacted nodes"
@@ -996,6 +1095,7 @@ def get_impact_radius(
             "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
             "resolution": resolution,
             "unresolved_call_sites": unresolved_call_sites,
+            **impact_page.fields(),
         }
         if confidence:
             response["confidence"] = confidence
@@ -1024,6 +1124,7 @@ def query_graph(
     max_results: int = 100,
     resolution: str = RESOLUTION_ALL,
     to: str | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1044,9 +1145,16 @@ def query_graph(
             "unresolved" keeps only the bare-name matches.
         to: For path_to, the node, qualified name or file to reach. A route is one
             answer, so max_results and the minimal cap do not cut it.
+        cursor: ``next_cursor`` from the previous reply, to read the next page of
+            rows (the page size is ``max_results``, or five in minimal mode,
+            and may change between pages). Rows keep the order the graph yields
+            them, and a cursor is refused if the pattern, target, resolution or
+            graph differ from the call that made it. Not available for path_to.
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
+        ``next_cursor`` is present when more rows remain, and a page after the
+        first adds ``offset``.
         For callers_of, callees_of and references_to each row also carries the
         ``call_site`` it was found at, one row per call site rather than one
         per node, plus a ``resolution_split`` saying how much of the answer is
@@ -1072,6 +1180,8 @@ def query_graph(
 
         minimal = detail_level == "minimal"
         if pattern == "path_to":
+            if cursor:
+                raise ValueError("path_to returns one route and has no pages")
             if not to:
                 return {
                     "status": "error",
@@ -1079,6 +1189,12 @@ def query_graph(
                 }
             return _query_route(store, root, target, to, minimal)
         response_limit = min(max_results, 5) if minimal else max_results
+        # The target as asked, before it is resolved: it is what the rows answer.
+        page_scope = make_scope(
+            "query_graph_tool", pattern=pattern, target=target, resolution=resolution,
+        )
+        page_stamp = graph_stamp(store)
+        page_offset = _cursor_offset(cursor, page_scope, page_stamp)
         results: list[dict[str, Any]] = []
         edges_out: list[dict[str, Any]] = []
         total_results = 0
@@ -1094,7 +1210,7 @@ def query_graph(
             total_results += 1
             if result.get("inferred_by"):
                 inferred_results += 1
-            if len(results) >= response_limit:
+            if total_results <= page_offset or len(results) >= response_limit:
                 return
             results.append(result)
             if edge is not None:
@@ -1717,6 +1833,10 @@ def query_graph(
             for row, edge in _interleave_call_sites(call_sites):
                 add_result(row, edge)
 
+        page = _window_page(
+            results, total_results, page_offset, response_limit, response_limit,
+            cursor, page_scope, page_stamp,
+        )
         results_omitted = max(0, total_results - len(results))
         if pattern in _CALL_SITE_PATTERNS:
             summary = (
@@ -1728,7 +1848,12 @@ def query_graph(
                 f"Found {total_results} result(s) "
                 f"for {pattern}('{target}')"
             )
-        if results_omitted:
+        if page_offset:
+            summary += (
+                f" — showing {page_offset + 1}-{page_offset + len(results)}"
+                if results else f" — none shown (offset {page_offset})"
+            ) + f", {results_omitted} omitted"
+        elif results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
         if same_name_tests:
             summary += f" — skipped {same_name_tests} same-named test symbol(s)"
@@ -1776,6 +1901,7 @@ def query_graph(
                 "result_count": total_results,
                 "results_omitted": results_omitted,
                 "results": minimal_results,
+                **page.fields(),
             }
             if resolution_split is not None:
                 minimal_response["distinct_nodes"] = distinct_nodes
@@ -1794,6 +1920,7 @@ def query_graph(
             "results_omitted": results_omitted,
             "results": results,
             "edges": edges_out,
+            **page.fields(),
         }
         if resolution_split is not None:
             response["distinct_nodes"] = distinct_nodes
@@ -1989,6 +2116,7 @@ def semantic_search_nodes(
     include_source: bool = False,
     expand_neighbors: bool = False,
     max_source_lines: int = _MAX_SEARCH_SOURCE_LINES_PER_NODE,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Search for nodes by name, keyword, or semantic similarity.
 
@@ -2015,11 +2143,19 @@ def semantic_search_nodes(
             instead of opening those files itself.
         max_source_lines: Per-node snippet cap when include_source is set.
             The response is additionally capped in total.
+        cursor: ``next_cursor`` from the previous reply, to read the next page of
+            the ranking. Search ranks a window three times ``limit`` rows long
+            and the window sets the ranking, so paging reads that window and the
+            page size must stay the same. A cursor is refused if the query, kind,
+            ``context_files``, model, provider, limit or graph differ, or if the
+            ranking itself has changed (for example embeddings were added).
 
     Returns:
         Ranked list of matching nodes. ``total`` and ``result_count`` count the
-        matches that were ranked, ``results_omitted`` those not shown, and
+        matches that were ranked, ``results_omitted`` those not on this page, and
         ``total_is_lower_bound`` says there may be more than were ranked.
+        ``next_cursor`` is present when ranked rows remain, and a page after the
+        first adds ``offset``.
     """
     _validate_positive_int(limit, "limit")
     shown_limit = min(
@@ -2036,13 +2172,29 @@ def semantic_search_nodes(
             store, query, kind=kind, limit=window, context_files=context_files,
             model=model, provider=provider, _out_mode=mode_out, repo_root=root,
         )
-        results, total, truncated = _bounded(ranked, shown_limit, shown_limit)
+        # The window decides the ranking (boosts reorder what it holds), and the
+        # vector side can change without the graph changing, so the cursor is
+        # tied to the window size and to the ranked order itself.
+        page = paginate(
+            ranked, shown_limit, shown_limit, cursor,
+            scope=make_scope(
+                "semantic_search_nodes_tool", query=query, kind=kind, window=window,
+                context_files=sorted(context_files) if context_files else None,
+                model=model, provider=provider,
+            ),
+            stamp=graph_stamp(
+                store, mode_out[0] if mode_out else "keyword",
+                [row["qualified_name"] for row in ranked],
+            ),
+        )
+        results, total, truncated = page.items, page.total, page.truncated
         lower_bound = total >= window
         bounds: dict[str, Any] = {
             "result_count": total,
             "total": total,
             "truncated": truncated,
             "results_omitted": total - len(results),
+            **page.fields(),
         }
         if lower_bound:
             bounds["total_is_lower_bound"] = True
@@ -2082,7 +2234,7 @@ def semantic_search_nodes(
         total_text = f"{total}+" if lower_bound else str(total)
         summary = f"Found {total_text} node(s) matching '{query}'" + (
             f" (kind={kind})" if kind else ""
-        ) + _shown_of(len(results), total)
+        ) + shown_range(page)
 
         # Zero hits can mean "no such symbol" or "never indexed"/"stale index";
         # only the marker distinguishes them.
@@ -2219,6 +2371,7 @@ def find_large_functions(
     limit: int = 50,
     repo_root: str | None = None,
     detail_level: str = "standard",
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -2233,10 +2386,16 @@ def find_large_functions(
             detail_level "minimal").
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full rows) or "minimal" (fewer, smaller rows).
+        cursor: ``next_cursor`` from the previous reply, to read the next page
+            (the page size is ``limit`` and may change between pages). A cursor
+            is refused if ``min_lines``, ``kind``, ``file_path_pattern`` or the
+            graph differ from the call that made it.
 
     Returns:
-        Oversized nodes with line counts, ordered largest first. ``total``,
-        ``total_found`` and ``result_count`` are the count before the cut.
+        Oversized nodes with line counts, ordered largest first and equal sizes
+        by id. ``total``, ``total_found`` and ``result_count`` are the count
+        before the cut. ``next_cursor`` is present when more rows remain, and a
+        page after the first adds ``offset``.
     """
     _validate_positive_int(limit, "limit")
     minimal = detail_level == "minimal"
@@ -2252,12 +2411,20 @@ def find_large_functions(
             kind=kind,
             file_path_pattern=file_path_pattern,
         )
+        scope = make_scope(
+            "find_large_functions_tool", min_lines=min_lines, kind=kind,
+            file_path_pattern=file_path_pattern,
+        )
+        stamp = graph_stamp(store)
+        offset = _cursor_offset(cursor, scope, stamp)
         nodes = store.get_nodes_by_size(
             min_lines=min_lines,
             kind=kind,
             file_path_pattern=file_path_pattern,
             limit=shown_limit,
+            offset=offset,
         )
+        page = _window_page(nodes, total, offset, shown_limit, shown_limit, cursor, scope, stamp)
 
         results = []
         for n in nodes:
@@ -2278,7 +2445,7 @@ def find_large_functions(
             f"Found {total} node(s) with >= {min_lines} lines"
             + (f" (kind={kind})" if kind else "")
             + (f" matching '{file_path_pattern}'" if file_path_pattern else "")
-            + _shown_of(len(results), total)
+            + shown_range(page)
             + ":",
         ]
         for r in results[:10]:
@@ -2306,9 +2473,10 @@ def find_large_functions(
             "total": total,
             "result_count": total,
             "results_omitted": total - len(results),
-            "truncated": total > len(results),
+            "truncated": page.truncated,
             "min_lines": min_lines,
             "results": results,
+            **page.fields(),
         }
     finally:
         store.close()
@@ -2325,6 +2493,7 @@ def traverse_graph_func(
     depth: int = 3,
     token_budget: int = 2000,
     repo_root: str | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """BFS/DFS traversal from best-matching node.
 
@@ -2336,6 +2505,12 @@ def traverse_graph_func(
             walk stops when it runs out, so a small budget does little work and
             ``truncated`` means there was more.
         repo_root: Repository root path.
+        cursor: ``next_cursor`` from the previous reply. The walk is the same, in
+            the same order; the cursor skips the nodes already returned and the
+            budget applies to the page. ``next_cursor`` is present exactly when
+            ``truncated`` is true and the page held a node (a budget too small
+            for one node returns none). A cursor is refused if the query, mode,
+            depth, start node or graph differ from the call that made it.
     """
     _validate_positive_int(token_budget, "token_budget")
     token_budget = min(token_budget, _MAX_TRAVERSAL_TOKEN_BUDGET)
@@ -2354,6 +2529,14 @@ def traverse_graph_func(
 
         start_qn = start.qualified_name
         depth = max(1, min(depth, 6))
+        # The start node is the search's answer, which the graph alone does not
+        # fix (the vector side can change), so it belongs to the query.
+        scope = make_scope(
+            "traverse_graph_tool", query=query, mode=mode, depth=depth, start=start_qn,
+        )
+        stamp = graph_stamp(store)
+        offset = _cursor_offset(cursor, scope, stamp)
+        listed = 0
 
         # BFS / DFS traversal
         visited: dict[str, int] = {}  # qn -> depth
@@ -2384,6 +2567,8 @@ def traverse_graph_func(
                 continue
 
             if seen_at is None:
+                listed += 1
+            if seen_at is None and listed > offset:
                 entry = {
                     "name": _sanitize_name(node.name),
                     "qualified_name": node.qualified_name,
@@ -2414,6 +2599,18 @@ def traverse_graph_func(
                 if visited.get(src, next_depth + 1) > next_depth:
                     queue.append((src, next_depth))
 
+        if offset and listed <= offset:
+            raise CursorError(
+                "cursor points past the end of the list; call again without a cursor "
+                "to start over"
+            )
+        # The walk has no known length: a cut one has at least the node that did
+        # not fit. A budget that fits no node cannot advance, so it gets no cursor.
+        more = approx_tokens > token_budget and bool(traversal)
+        page = _window_page(
+            traversal, offset + len(traversal) + (1 if more else 0), offset,
+            len(traversal), len(traversal), cursor, scope, stamp,
+        )
         return {
             "start_node": _sanitize_name(start_qn),
             "mode": mode,
@@ -2422,6 +2619,7 @@ def traverse_graph_func(
             "nodes_visited": len(traversal),
             "traversal": traversal,
             "truncated": approx_tokens > token_budget,
+            **page.fields(),
             "next_tool_suggestions": [
                 "query_graph_tool callers_of"
                 " -- focused relationship query",

@@ -499,6 +499,7 @@ base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard", "minimal", or "compact"
 max_files: int = 25             # Compact-mode display limit (hard ceiling 200)
 resolution: str = "all"          # "all" or "direct" (only calls bound to a node)
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 An impacted node that calls or references the changed code in one hop carries
 `call_site` (`line`, plus `file` only when the call is written outside the node's
@@ -542,6 +543,7 @@ detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
 resolution: str = "all"          # "all", "direct", or "unresolved"
 to: str | None                   # path_to only: the node or file to reach
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the
@@ -615,6 +617,7 @@ depth: int = 3                  # Clamped to 1-6
 mode: str = "bfs"               # "bfs" or "dfs"
 token_budget: int = 2000        # At most 10000 approximate tokens; the walk stops there
 repo_root: str | None
+cursor: str | None              # next_cursor of the previous reply (see Paging)
 ```
 `truncated` means the budget ran out before the walk did.
 
@@ -631,6 +634,7 @@ detail_level: str = "standard"
 include_source: bool = False     # Attach each hit's source lines
 expand_neighbors: bool = False   # With include_source: also the top hits' callers and callees
 max_source_lines: int = 60       # Lines per snippet (1-60)
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 Search ranks three times what it shows. `total` and `result_count` count the
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
@@ -672,6 +676,7 @@ file_path_pattern: str | None      # File path substring
 limit: int = 50                    # At most 100; at most 25 with detail_level "minimal"
 repo_root: str | None
 detail_level: str = "standard"     # "minimal" gives fewer, smaller rows
+cursor: str | None                 # next_cursor of the previous reply (see Paging)
 ```
 `total` and `result_count` count every match before the cut.
 
@@ -922,8 +927,9 @@ context window (see #849). The contract is the same everywhere:
 
 ### Paging
 
-`list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` do not stop at
-their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
+`list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool`, `get_impact_radius_tool`,
+`query_graph_tool`, `semantic_search_nodes_tool`, `find_large_functions_tool` and
+`traverse_graph_tool` do not stop at their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
 back as `cursor` returns the next page, so the ceiling bounds one reply, not what
 you can read. This follows the cursor pagination the MCP specification defines for
 its list operations (`cursor` in, `nextCursor` out), with the result key spelled in
@@ -939,7 +945,25 @@ snake_case like the other keys here.
   updated, is refused with an error that says to start over without a cursor.
   Cursors are not signed and hold no state on the server.
 - Ties in a ranking are ordered by a fixed key (flow and community id, a hub's
-  qualified name), so a page never repeats or skips a row.
+  qualified name, a node's id for `find_large_functions_tool`, qualified name for
+  impacted nodes), so a page never repeats or skips a row.
+- `get_impact_radius_tool` pages one list: `impacted_nodes` in standard mode (page
+  size `max_results`, at most 100; the traversal grows to reach the page) and
+  `impacted_files` in compact mode (page size `max_files`, among the files of the
+  `max_results` nodes traversed). The other lists keep their caps and repeat on
+  every page, and `truncated` stays true while any of them is cut. `minimal`
+  takes no cursor. It is refused when the changed files, depth, resolution or
+  detail level differ.
+- `query_graph_tool` pages rows in the order the graph yields them; `path_to` is a
+  single route and takes no cursor. `results_omitted` counts the rows not in the
+  reply, including earlier pages.
+- `semantic_search_nodes_tool` ranks a window three times `limit` long, and the
+  window sets the ranking, so a cursor reads that window and needs the same
+  `limit`. The cursor also records the ranked order itself, so one made before
+  embeddings were added or the model changed is refused.
+- `traverse_graph_tool` pages the same walk: `token_budget` applies to each page,
+  `next_cursor` is present exactly when `truncated` is true, except that a budget
+  too small for a single node returns neither nodes nor a cursor.
 
 ## MCP Prompts (5 workflow templates)
 

@@ -532,6 +532,7 @@ async def get_impact_radius_tool(
     detail_level: str = "standard",
     resolution: str = "all",
     max_files: int = 25,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Analyze the blast radius of changed files in the codebase.
 
@@ -558,6 +559,14 @@ async def get_impact_radius_tool(
         max_files: File display limit in compact mode (default 25, maximum 200).
             Does not reduce the graph traversal budget set by max_results.
         resolution: "all" (default) or "direct" to traverse only calls bound to an indexed node.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            ``impacted_nodes`` ("standard", page size ``max_results``, at most 100)
+            or ``impacted_files`` ("compact", page size ``max_files``). The other
+            lists stay capped and repeat on every page. Not for "minimal".
+            Omit it for the first page.
+
+    Returns the impact radius; ``next_cursor`` is present when more impacted
+    nodes (files, in compact) remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -566,7 +575,7 @@ async def get_impact_radius_tool(
             changed_files=changed_files, max_depth=max_depth,
             max_results=max_results,
             repo_root=root, base=base, detail_level=detail_level,
-            resolution=resolution, max_files=max_files,
+            resolution=resolution, max_files=max_files, cursor=cursor,
         ),
         root,
     )
@@ -581,6 +590,7 @@ async def query_graph_tool(
     max_results: int = 100,
     resolution: str = "all",
     to: Optional[str] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -627,6 +637,10 @@ async def query_graph_tool(
         resolution: "all" (default), "direct" for only calls bound to an indexed
             node, or "unresolved" for only the bare-name matches.
         to: For path_to, the node name, qualified name, or file path to reach.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            rows. Omit it for the first page. Not available for path_to.
+
+    Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -634,7 +648,7 @@ async def query_graph_tool(
         lambda: query_graph(
             pattern=pattern, target=target, repo_root=root,
             detail_level=detail_level, max_results=max_results,
-            resolution=resolution, to=to,
+            resolution=resolution, to=to, cursor=cursor,
         ),
         root,
     )
@@ -696,6 +710,7 @@ async def semantic_search_nodes_tool(
     include_source: bool = False,
     expand_neighbors: bool = False,
     max_source_lines: int = 60,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
 
@@ -729,6 +744,13 @@ async def semantic_search_nodes_tool(
                           answers "how does X work". Default: False.
         max_source_lines: With include_source, the most lines per snippet
                           (1-60). Default: 60.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            the ranking. Search ranks three times ``limit`` rows, and paging
+            reads that window, so keep ``limit`` and the other arguments the
+            same; a cursor is refused if the ranking changed. Omit it for the
+            first page.
+
+    Returns ranked nodes; ``next_cursor`` is present when ranked rows remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -737,7 +759,7 @@ async def semantic_search_nodes_tool(
             query=query, kind=kind, limit=limit, repo_root=root,
             model=model, provider=provider, detail_level=detail_level,
             include_source=include_source, expand_neighbors=expand_neighbors,
-            max_source_lines=max_source_lines,
+            max_source_lines=max_source_lines, cursor=cursor,
         ),
         root,
     )
@@ -838,6 +860,7 @@ async def find_large_functions_tool(
     limit: int = 50,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -854,13 +877,17 @@ async def find_large_functions_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full rows, "minimal" for fewer, smaller rows.
             Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
+
+    Returns oversized nodes; ``next_cursor`` is present when more remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "find_large_functions_tool",
         lambda: find_large_functions(
             min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-            limit=limit, repo_root=root, detail_level=detail_level,
+            limit=limit, repo_root=root, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -1434,6 +1461,7 @@ async def traverse_graph_tool(
     depth: int = 3,
     token_budget: int = 2000,
     repo_root: Optional[str] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """BFS/DFS traversal from best-matching node with token budget.
 
@@ -1449,6 +1477,10 @@ async def traverse_graph_tool(
         token_budget: Approximate token limit for results, at most 10000.
             The walk stops when it runs out. Default: 2000.
         repo_root: Repository root path. Auto-detected if omitted.
+        cursor: The ``next_cursor`` of a previous reply, to read the next
+            ``token_budget`` of the same walk. Omit it for the first page.
+
+    Returns the traversal; ``next_cursor`` is present when the walk was cut.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1456,7 +1488,7 @@ async def traverse_graph_tool(
         lambda: traverse_graph_func(
             query=query, mode=mode, depth=depth,
             token_budget=token_budget,
-            repo_root=root or "",
+            repo_root=root or "", cursor=cursor,
         ),
         root,
     )
