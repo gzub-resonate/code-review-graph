@@ -833,6 +833,8 @@ detail_level: str = "standard"
 max_results: int = 25        # Changed functions, test gaps, changed files (max 100)
 max_flows: int = 20          # Affected flows embedded (max 200)
 cursor: str | None           # `next_cursor` of the previous reply
+pr: int = None               # Score a pull request's files (read from refs/pull/<pr>/head), new files included
+head: str = None             # Or a ref/commit to read the changed files from; base then names the target branch
 ```
 Main tool for code review. Maps changed files to affected functions, YAML and JSON
 paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and

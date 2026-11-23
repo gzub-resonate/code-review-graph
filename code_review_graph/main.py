@@ -1171,6 +1171,8 @@ async def detect_changes_tool(
     max_results: int = 25,
     max_flows: int = 20,
     cursor: Optional[str] = None,
+    pr: Optional[int] = None,
+    head: Optional[str] = None,
 ) -> dict:
     """Detect changes and produce risk-scored, priority-ordered review guidance.
 
@@ -1197,6 +1199,10 @@ async def detect_changes_tool(
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             changed functions. Only valid for the same base, changed files, depth
             and detail level on the same graph.
+        pr: Pull request number. Reads the PR's changed files from refs/pull/<pr>/head,
+            parses them in memory and scores them against the graph, so new files are
+            covered. base then names the branch the PR merges into. Default: none.
+        head: A ref or commit to read the changed files from instead of pr.
 
     Returns:
         The risk-scored analysis. When more changed functions remain,
@@ -1211,6 +1217,7 @@ async def detect_changes_tool(
             include_source=include_source, max_depth=max_depth,
             repo_root=root, detail_level=detail_level,
             max_results=max_results, max_flows=max_flows, cursor=cursor,
+            pr=pr, head=head,
         ),
         root,
         timeout_hint=_DETECT_CHANGES_TIMEOUT_HINT,

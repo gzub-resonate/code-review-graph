@@ -1027,6 +1027,8 @@ def detect_changes_func(
     max_results: int = 25,
     max_flows: int = 20,
     cursor: str | None = None,
+    pr: int | None = None,
+    head: str | None = None,
 ) -> dict[str, Any]:
     """Detect changes and produce risk-scored review guidance.
 
@@ -1057,6 +1059,12 @@ def detect_changes_func(
             of changed functions. Omit it for the first page. A cursor is opaque
             and only valid for the same base, changed-file list, depth and
             detail level on the same graph; ``"minimal"`` has no pages.
+        pr: A pull request number. The files the pull request changes are read from
+            ``refs/pull/<pr>/head`` (fetched into ``refs/crg/``), parsed in memory and
+            compared with the graph, so new files and unmerged code are covered. ``base``
+            then names the branch the pull request merges into (default: the remote's
+            default branch). ``include_source`` is not available in this mode.
+        head: A ref or commit to read the changed files from, instead of ``pr``.
 
     Returns:
         Risk-scored analysis with changed functions, YAML paths, affected
@@ -1076,7 +1084,41 @@ def detect_changes_func(
     notes: list[str] = []
     try:
         # Detect changed files if not provided.
-        if changed_files is None:
+        pr_nodes: list[GraphNode] | None = None
+        pr_info: dict[str, Any] | None = None
+        if pr is not None or head:
+            if changed_files is not None:
+                raise ValueError("give changed_files or a pull request (pr/head), not both")
+            from .pr_tools import load_pull_request
+
+            loaded = load_pull_request(
+                store, str(root), pr, head, None if base == "HEAD~1" else base, max_depth,
+            )
+            base = loaded["base_ref"]
+            pr_changes = loaded["changes"]
+            changed_files = [c.path for c in pr_changes]
+            notes.extend(loaded["notes"])
+            found = loaded["found"]
+            pr_nodes = []
+            pr_info = {
+                "head": loaded["head_sha"][:12], "base": loaded["base_ref"][:12],
+                "added_symbols": {}, "removed_symbols": {},
+            }
+            seen_qns: set[str] = set()
+            for report in (found["files"] if found else []):
+                for qn in report.changed_qns:
+                    node = store.get_node(qn)
+                    if node is not None and qn not in seen_qns:
+                        seen_qns.add(qn)
+                        pr_nodes.append(node)
+                if report.added:
+                    pr_info["added_symbols"][report.path] = report.added[:25]
+                if report.removed:
+                    pr_info["removed_symbols"][report.path] = report.removed[:25]
+                if not report.parsed:
+                    notes.append(f"{report.path}: {report.note}")
+            include_source = False
+        elif changed_files is None:
             # discover_review_changes carries require_vcs through the whole
             # chain: the "no changed files" answer below is an all-clear, and
             # a git that could not be run (or overran the discovery budget)
@@ -1116,7 +1158,7 @@ def detect_changes_func(
         # Lenient on purpose: the changed-file list above is already known
         # to be non-empty, so an unreadable line-level diff costs precision,
         # not honesty. analyze_changes records the degradation.
-        diff_ranges = parse_diff_ranges(str(root), base)
+        diff_ranges = {} if pr_nodes is not None else parse_diff_ranges(str(root), base)
         # Remap to absolute paths so they match graph file_paths. The
         # remapped ranges keep the old side of any pure-deletion hunk, which
         # is what lets analyze_changes name the symbols a diff removed.
@@ -1135,6 +1177,7 @@ def detect_changes_func(
             # memoised per commit, capped, and fails soft, so a cold first run
             # costs one bounded walk and every later call is free.
             include_churn=True,
+            changed_nodes=pr_nodes,
         )
 
         # The changed functions are the paged list. The cursor is bound to the exact
@@ -1296,6 +1339,8 @@ def detect_changes_func(
                 "truncated": any_cut,
                 **page.fields(),
             }
+        if pr_info is not None:
+            result["pull_request"] = pr_info
         if notes:
             # Said once, first: the review covers different files than the
             # base the caller asked for would have.
