@@ -121,8 +121,8 @@ code-review-graph query callers_of <target>    # Takes every query_graph_tool pa
                                                 #   references_to, callees_of, imports_of, importers_of,
                                                 #   children_of, tests_for, inheritors_of, triggers_of,
                                                 #   triggered_by, publishers_of, listeners_of, advises,
-                                                #   advised_by, handlers_of, endpoints_for, consumers_of,
-                                                #   file_summary, path_to
+                                                #   advised_by, handlers_of, endpoints_for, requests_of,
+                                                #   requesters_of, consumers_of, file_summary, path_to
 code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
 code-review-graph impact [--files F ...] [--depth N] [--max-results N] [--base REF] [--detail-level compact] [--max-files N]
 code-review-graph search <query> [--kind Function] [--limit N]
@@ -535,7 +535,8 @@ code-review-graph impact --files src/auth.py --detail-level minimal
 pattern: str    # callers_of, references_to, callees_of, imports_of, importers_of,
                 # children_of, tests_for, inheritors_of, triggers_of, triggered_by,
                 # publishers_of, listeners_of, advises, advised_by, handlers_of,
-                # endpoints_for, consumers_of, file_summary, path_to
+                # endpoints_for, requests_of, requesters_of, consumers_of,
+                # file_summary, path_to
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
@@ -686,10 +687,11 @@ repo_root: str | None
 #### `list_flows_tool`
 ```
 sort_by: str = "criticality"  # criticality, depth, node_count, file_count, name
-limit: int = 50               # Flows returned (max 200)
+limit: int = 50               # Flows per page (max 200)
 kind: str | None              # Entry point kind (e.g. "Test", "Function")
 repo_root: str | None
 detail_level: str = "standard"
+cursor: str | None            # next_cursor of the previous reply (see Result Bounds)
 ```
 
 #### `get_flow_tool`
@@ -722,8 +724,9 @@ sort_by: str = "size"    # size, cohesion, name
 min_size: int = 0
 repo_root: str | None
 detail_level: str = "standard"
-max_results: int = 50    # Communities returned (max 200)
+max_results: int = 50    # Communities per page (max 200)
 max_members: int = 10    # Member names per community in standard mode (max 25)
+cursor: str | None       # next_cursor of the previous reply (see Result Bounds)
 ```
 `size` reports the true member count; `members_truncated` marks a cut member list.
 
@@ -750,9 +753,10 @@ Minimal responses may include estimated `context_savings` metadata.
 
 #### `get_hub_nodes_tool`
 ```
-top_n: int = 10                  # Capped at 100
+top_n: int = 10                  # Hubs per page (max 100)
 repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
+cursor: str | None               # next_cursor of the previous reply (see Result Bounds)
 ```
 
 #### `get_bridge_nodes_tool`
@@ -904,6 +908,151 @@ are capped at 20 entries; `unknown_total` / `ambiguous_total` and
 `unknown_truncated` / `ambiguous_truncated` report the real counts, and the
 summary reports the counts rather than echoing the names.
 
+#### `cross_repo_requests_tool`
+```
+repos: list[str] | None      # Calling repos (aliases or folder names); default: every registered repo
+service: str | None          # Only calls to this Feign service name (exact)
+route: str | None            # Only calls whose route equals this or lies below it
+status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
+limit: int = 20              # Rows per calling repo
+max_results: int = 50        # Rows overall (max 100)
+origin: str | None           # feign | js; default: both
+cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
+```
+
+Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
+call, to the server endpoint it reaches in another registered repository. The join is computed on every call from the
+graphs that already exist, opened read-only. Each repo's side of it (its client calls and its server endpoints, with
+FastAPI and Flask router prefixes already joined) is worked out when its graph is built and kept in the graph's
+`metadata` table under `endpoint_index`, so a call does not re-read every `Endpoint` node. A graph built before that, or
+one whose `Endpoint` rows changed since, is read the old way and gives the same answer; the reply's `endpoint_index`
+field says how many repos came from each (`stored`, `computed`), and an `update` or `build` refreshes a repo's index.
+Each row has the
+calling repo, file and line, the HTTP method, route and service name, a
+`status`, and `candidates` (repo, file, line, method, route; at most five,
+with `candidates_total`).
+
+A page takes up to `limit` rows from each calling repo and keeps the first
+`max_results` of them; `next_cursor` then continues each repo where it stopped,
+so every call can be read. `counts` and `total` always cover every call. A
+cursor is refused if the filters or any of the rows changed since it was made.
+
+How a call is classified:
+
+- `unmatchable`, with a `reason`, when the target cannot be known from the
+  code: `service_unresolved` (the `@FeignClient` name is a `${...}`
+  placeholder or absent), `url_from_argument` (a `java.net.URI` argument
+  receives the request), `url_literal` (the client has a fixed `url`),
+  `route_dynamic` or `placeholder_in_route` (part of the route could not be
+  resolved). These are never guessed.
+- The service name picks the target repository: a registry alias or folder
+  name first, then a name in `repo-aliases.toml`, then a name that differs only
+  in case, `-` versus `_` or repeated separators. That last step must reach
+  exactly one repository. Otherwise the status is `no_target_repo` with
+  `service_not_registered`, `service_name_ambiguous` or `target_unreadable`.
+  Sibling checkouts that share a folder name are all searched.
+- Within the target, an endpoint matches when its HTTP method is the same (an
+  endpoint mapped for every method matches any) and its route is the same
+  after dropping the query string, collapsing repeated slashes, dropping a
+  trailing slash and treating every `{name}` as one wildcard segment. Case is
+  kept. A `{name}` in the call does not match a fixed segment on the server.
+  One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
+- A call with no exact match whose route equals a server route once case is
+  ignored is `case_mismatch` (reason `route_differs_by_case`, `confidence`
+  `low`), with those endpoints as `candidates`. It is a lead to check, not a
+  match: a case-sensitive server does not serve it. Only a call that would
+  otherwise be `no_route_match` can become one.
+- For a JavaScript or TypeScript call that still has no match, a `{name}` in the call may
+  stand against a fixed server segment (`/agents/{name}/threads` reaches
+  `/agents/planner/threads`): reason `variable_matches_literal`, `confidence` `low`.
+  The call needs the same segment count, an equal method and at least two segments it
+  spells out, and more than 10 matching server routes is too open to report. Only a
+  call that would otherwise be `no_route_match` can change.
+
+Every row has an `origin`: `feign` for a Spring client method, `js` for a
+JavaScript or TypeScript call. Feign rows are classified exactly as above.
+
+JavaScript and TypeScript calls (`origin: "js"`) have no service name, so they
+are matched by HTTP method and normalised route. A relative URL goes to the
+origin that served the page, so the server endpoints of the caller's own
+repository are searched first (its Next.js `app/api` routes, an Express server
+beside the client); only when they have no match does the search widen to every
+other registered repository. A row has a `client_kind`
+(`axios`, `fetch`, `jquery` or `ember-ajax`). One matching
+location, or several in one repository (`reason: "several_handlers_in_repo"`,
+for example handlers of one path that differ by `params=`), is `matched`;
+several repositories are `ambiguous` with the candidate repositories; none is
+`no_route_match`. A call
+is `unmatchable` with one of these reasons: `non_literal_url` (a variable or
+computed URL, or a template or concatenation that starts with an unknown
+piece), `absolute_url` (a full `https://...` URL or an absolute `baseURL`),
+`method_dynamic` (the method is not a literal) or `placeholder_in_route`.
+A match carries `confidence: "low"` and `confidence_notes` when it rests on a
+guess: `receiver_inferred` (an instance imported from another file, recognised by its
+name), `base_url_not_literal`, or `catch_all_route`. A server route that takes
+the rest of the path (a Next.js `[...path]` route, an Express `*`) matches only
+a call with the same HTTP method and a literal prefix that is a whole leading
+path, with at least one more segment (none for `[[...path]]`), and only when no
+exact route fits; a catch-all at the root matches nothing. Its candidate has
+`catch_all: true`.
+
+Python servers are indexed too, so a frontend or another service can reach
+them. FastAPI and Starlette-style routers (`APIRouter`, `FastAPI`) and Flask
+(`Flask`, `Blueprint`) routes are read from `@router.get/post/put/patch/delete/head/options`,
+`@app.api_route(path, methods=[...])` and `@app.route(path, methods=[...])`
+(default `GET`), with Flask `<int:id>` turned into `{id}` and a trailing
+`{name:path}` or `<path:name>` read as a catch-all. A route's full path is the
+prefix of every router above it plus its own path: `APIRouter(prefix=...)`,
+`Blueprint(url_prefix=...)` and the `prefix=` or `url_prefix=` of
+`include_router` and `register_blueprint`, followed across files through
+`import` and `from ... import` (relative ones too). A router mounted twice
+gives a route for each mount. A prefix or path that is not a string literal is
+never guessed: the route is left out. Routes in test, fixture and example
+directories are ignored; class-based Flask views and `add_url_rule` are not
+read.
+
+What the parser records for JavaScript and TypeScript (all of it is a plain
+`Endpoint` node: client ones have `role: "client"` and a `REQUESTS` edge from
+the enclosing function, server ones a `HANDLES` edge from the handler):
+
+- Calls: `axios.get/post/put/patch/delete/head/options(url)`,
+  `axios({method, url})`, `axios.request`, instances from `axios.create`
+  (their `baseURL` is applied only when it is a string literal in the same
+  file, or set by `instance.defaults.baseURL = '...'`), `fetch(url, {method})`,
+  `$.ajax`, `$.getJSON`, `$.get`, `$.post`, and Ember `this.ajax`,
+  `this.ajax.request` and `ajax`. The URL may be a string, a template literal
+  (each `${expr}` becomes `{param}`), a `+` concatenation, or a same-file
+  top-level `const` string; a leading unknown piece is never guessed. A query
+  string glued to the path (`` `/feeds${query}` `` where `query` is
+  `cond ? `?${q}` : ''`) is dropped with the rest of the query, but only when
+  every declaration of that name in the file is a `const` holding an empty or
+  `?...` string; a parameter or any other binding of the same name keeps it a
+  path parameter. A call whose URL cannot be read is recorded as unmatchable
+  only for a certain HTTP client (axios, `$.ajax`, Ember ajax, `fetch`), never
+  for an imported instance. Test files are skipped.
+- Servers: Next.js app router `route.ts|js` exports (`GET`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `HEAD`, `OPTIONS`; the path comes from the directory,
+  `[id]` becomes `{id}`, `(group)` and `@slot` directories are dropped,
+  `[...path]` and `[[...path]]` are catch-alls), the pages router under
+  `pages/api` (methods read from `req.method` comparisons, otherwise `ANY`), and
+  `app.get('/x', handler)` style calls in files that load Express, Koa, Fastify,
+  Hono, restify, Hapi, polka or connect (also `router.route('/x').get(...)`
+  and `fastify.route({method, url})`). `:id` becomes `{id}`. `app.use('/prefix',
+  router)` mounting is not followed, so a mounted router's routes are
+  recorded without the prefix. A handler written inline, `app.get('/x', (req,
+  res) => ...)`, becomes a Function node named by where it sits
+  (`handler@L12C20`), so every route has its own handler; the calls in its body
+  belong to it, except those on its first line, which stay with the code that
+  registered the route.
+
+`repos` selects the calling repositories only; targets are always looked up
+across the whole registry. Names that match no entry are returned in
+`unknown`, ambiguous ones in `ambiguous`, as for `cross_repo_search_tool`.
+`counts` and `total` cover every call that passed the filters; `results` is
+capped by `limit` and `max_results`, and `truncated` says so. A repository whose
+graph is missing or unreadable is listed in `unreadable` (with its role,
+`client` or `target`, and a short reason) and does not stop the call.
+
 ## Result Bounds
 
 Every tool that returns a list is bounded, so one MCP response cannot fill a
@@ -916,6 +1065,27 @@ context window (see #849). The contract is the same everywhere:
   summary says how many of how many are shown.
 - Cap parameters reject values below 1 and reject booleans.
 - Hard ceilings are enforced in code and pinned by `tests/test_token_budget.py`.
+
+### Paging
+
+`list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool` and
+`cross_repo_requests_tool` do not stop at their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
+back as `cursor` returns the next page, so the ceiling bounds one reply, not what
+you can read. This follows the cursor pagination the MCP specification defines for
+its list operations (`cursor` in, `nextCursor` out), with the result key spelled in
+snake_case like the other keys here.
+
+- A reply with no `next_cursor` is the last page. `truncated` is `true` exactly
+  when `next_cursor` is present, `total` is always the whole list, and a page after
+  the first adds `offset`, the index of its first row. The first page is the same
+  as before, plus `next_cursor` when the list was cut.
+- A cursor is opaque. It is valid only for the same query on the same graph, and
+  the page size (`limit`, `max_results` or `top_n`) may change between pages.
+  A cursor from a different query or tool, or from before the graph was rebuilt or
+  updated, is refused with an error that says to start over without a cursor.
+  Cursors are not signed and hold no state on the server.
+- Ties in a ranking are ordered by a fixed key (flow and community id, a hub's
+  qualified name), so a page never repeats or skips a row.
 
 ## MCP Prompts (5 workflow templates)
 

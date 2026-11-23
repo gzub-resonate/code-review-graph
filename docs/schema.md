@@ -76,9 +76,50 @@ Columns as for Class.
 ### Endpoint
 A synthesised routed entry point, emitted for Spring request mappings, WebFlux functional
 routes, and static Laravel routes in `routes/*.php`. Metadata includes `http_method`, `route`,
-and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Laravel
+and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Methods of a
+Spring Cloud OpenFeign `@FeignClient` interface emit client Endpoints instead: `role` is
+`"client"`, `client` is `"feign"`, and `http_method` and `route` come from the mapping
+annotations with the `@FeignClient` `path` prefix applied. Other extras are `client_method`,
+`service` (the client `name`, or `service_unresolved` when it is a placeholder), `context_id`,
+`route_dynamic` (a path piece could not be resolved, or the mapping is an absolute URL),
+`url_literal`, and `config_keys` (`${...}` placeholders, recorded without values). A piece
+of a Feign route that is not a string literal (a constant, a method call) is rendered as the marker
+`<unresolved>`, and `route_literal_parts` lists the literal fragments in order, so a route is
+never shown as fully literal when something was dropped. The marker is not `{...}`, so it cannot
+be read as a path variable, and it has no `?`, so a query-string strip leaves it whole.
+`${...}` placeholders stay verbatim in `route` and do not count as unresolved. A method with a
+`java.net.URI` argument gets `url_from_argument`: Feign sends the request to that argument, so
+`route` is not the target. A `REQUESTS` edge links the interface method to its
+client Endpoint, never a `HANDLES` edge. Dead-code reports skip the interface. Flow detection does
+not treat a method as an entry point on the strength of its mapping annotation (a method nothing
+calls can still be one). Laravel
 closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
 set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
+
+Known gaps in Feign support:
+
+- Mappings inherited from a parent interface are not resolved at parse time. A marker interface
+  such as `interface X extends Base {}` gets no client endpoints. A parent interface without
+  `@FeignClient` that declares mapped methods is indexed like a controller, so those methods
+  still get server-style `Endpoint` nodes and `HANDLES` edges.
+- Query strings stay verbatim in `route` (`/items?active=true`); stripping is left to whoever
+  matches routes (`cross_repo_requests_tool` strips them, and ignores a trailing slash and the
+  names inside `{...}`, when it joins a call to a server endpoint in another registered repo).
+- Feign's native `@RequestLine` contract and Kotlin clients are not supported.
+
+JavaScript and TypeScript use the same node shape, written by `js_api_extract.py`. A client
+`Endpoint` has `role: "client"`, `client: "js_http"`, `origin: "js"`, `client_kind` (`axios`,
+`fetch`, `jquery`, `ember-ajax`), `http_method`, `route` and `route_dynamic`;
+a call that cannot be joined also has `method_dynamic` or `absolute_url`, and `base_url`,
+`base_url_dynamic`, `instance` or `receiver_inferred` say how sure the route is.
+A URL that is not statically known is `<unresolved>` with `route_dynamic: true`. A server
+`Endpoint` has `framework` (`nextjs-app`, `nextjs-pages`, `express`), `origin: "js"` and, for a
+rest-of-path route, `catch_all` (and `optional_catch_all`). `{param}` is the placeholder for a `${expr}`
+piece of a call, `{...name}` marks a catch-all piece of a served route. An inline handler is a
+Function node with `extra.inline_handler`, named `handler@L<line>C<column>`; its route's `HANDLES`
+edge starts there.
+- `requests_of` and `requesters_of` take a method or an endpoint qualified name. A class name
+  returns nothing, as it does for `endpoints_for` and `handlers_of`.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
@@ -181,6 +222,7 @@ names the class the call went through. Both are `INFERRED`.
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
 | DEPENDS_ON_CONFIG | `@ConfigurationProperties` class -> `ConfigProperty` | Spring enrichment |
 | HANDLES | handler -> `Endpoint`; listener -> event | Spring and Laravel enrichment |
+| REQUESTS | `@FeignClient` interface method -> client `Endpoint` | Spring Cloud OpenFeign enrichment; read with `requests_of` / `requesters_of` |
 | TRIGGERS | `Scheduler` -> `@Scheduled` method | Spring enrichment |
 | PUBLISHES | method -> Spring application event | Spring enrichment |
 
@@ -268,6 +310,11 @@ CREATE TABLE metadata (
     value TEXT NOT NULL
 );
 ```
+
+The `endpoint_index` key holds a JSON document (`v`, `stamp`, `clients`, `servers`) with the repository's HTTP client
+calls and server endpoints, written by every build and by an update that changed the graph (`endpoint_index.py`).
+`stamp` digests the `Endpoint` rows it was made from; a reader whose stamp differs, or that does not know `v`, ignores
+the key and reads the nodes. A graph with no `Endpoint` node has no such key.
 
 Tables added by migrations:
 

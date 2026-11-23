@@ -4,6 +4,101 @@
 
 ### Added
 
+- `cross_repo_requests_tool` no longer reads and joins every repo's `Endpoint`
+  nodes on each call. A build or update now stores each repo's client calls and
+  server endpoints, FastAPI and Flask router prefixes already joined, in the
+  graph's `metadata` table (no schema change). The tool reads that and falls
+  back to the graph for a repo with no current index, with the same answer; the
+  reply's `endpoint_index` says how many repos were read each way. On a
+  synthetic repo of 4,410 endpoints the load took 16.5 ms instead of 110.4 ms.
+- `cross_repo_requests_tool` reads past its row ceilings the same way: a reply
+  with more calls than fit carries `next_cursor`, and `cursor` returns the next
+  page, taking up to `limit` more rows from each calling repo. The cursor is
+  refused if the filters or the calls changed since it was made.
+- `list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` no longer
+  stop at their ceiling. When more rows exist the reply carries `next_cursor`;
+  pass it back as `cursor` to read the next page. A page after the first adds
+  `offset`. A cursor is refused, with a message to start over, if the query or
+  the graph changed since it was made. Equal-ranked flows, communities and hubs
+  now come in a fixed order, so pages never repeat or skip a row. See
+  `docs/COMMANDS.md`.
+- FastAPI and Flask routes are indexed as server endpoints, with
+  `APIRouter(prefix=...)`, `Blueprint(url_prefix=...)`, `include_router` and
+  `register_blueprint` prefixes joined across files, so a JavaScript caller or
+  another service can match them. Non-literal prefixes and paths are never
+  guessed. Rebuild a graph to index existing Python; see `docs/COMMANDS.md`.
+- `cross_repo_requests_tool` matches a JavaScript or TypeScript call whose variable
+  segment stands against a fixed server segment (`/agents/{name}/threads` against
+  `/agents/planner/threads`). It is the last rule tried, so only calls that were
+  `no_route_match` can change. It needs the same segment count, an equal method and
+  at least two segments the call spells out, and is skipped when more than 10 server
+  routes fit. The row has the reason `variable_matches_literal` and
+  `confidence: "low"`.
+- `cross_repo_requests_tool` reports a call whose route matches a server route
+  except for letter case (for example `/v1/attributeGroups` against
+  `/v1/attributegroups`) as `case_mismatch` instead of `no_route_match`. The row
+  names those endpoints as `candidates`, has `confidence: "low"` and the reason
+  `route_differs_by_case`. It is a lead to check, not a match; matching stays
+  case-sensitive and only calls that were `no_route_match` can change. Filter
+  with `status="case_mismatch"`.
+- `cross_repo_requests_tool` now joins JavaScript and TypeScript calls to the
+  server endpoints they reach. A call names no service, so it is matched by
+  HTTP method and route, first against the caller's own repository (a relative
+  URL goes to the origin that served the page) and then against every other
+  registered repository. One location, or several in one repository, is
+  `matched` (`reason` `several_handlers_in_repo`); several repositories are
+  `ambiguous` with the candidate repositories. Each row has an `origin`
+  (`feign` or `js`); the new `origin` argument narrows to one. A catch-all
+  route such as a Next.js `[...path]` proxy matches only by exact method and
+  literal prefix, with `confidence: "low"`. A variable URL is never guessed.
+- JavaScript and TypeScript servers now take part too: the parser records served
+  routes (the Next.js app and pages routers, and Express, Koa, Fastify and Hono
+  style `app.get('/x', handler)`) as server `Endpoint` nodes with `HANDLES`
+  edges. A rest-of-path route such as a Next.js `[...path]` is marked
+  `catch_all`. A handler written inline gets its own function node, so each
+  route has its own handler. Rebuild a graph to index existing JavaScript; see
+  `docs/COMMANDS.md`.
+- JavaScript and TypeScript frontends now record the HTTP calls they make with
+  a statically known route (`axios` and `axios.create` instances, `fetch`,
+  `$.ajax`, Ember `ajax`) as client `Endpoint` nodes with `REQUESTS` edges from
+  the enclosing function. A variable URL is never guessed, and a query string
+  glued to the path (`/feeds${query}`) is dropped when the name only ever holds
+  a query string. Rebuild a graph to index existing JavaScript; see
+  `docs/COMMANDS.md`.
+- New `cross_repo_requests_tool` answers "which endpoint does this Feign call
+  reach?" across your registered repositories. For each outbound Spring Feign
+  call it names the controller endpoint in the repository the service name
+  points at, matched by HTTP method and route, and says `matched`,
+  `ambiguous` (several endpoints fit), `no_route_match` or `no_target_repo`
+  (no registered repository carries that service name). A call whose target
+  cannot be known from the code, such as a placeholder service name, a fixed
+  `url` or a `URI` argument, is `unmatchable` and says why instead of being
+  guessed. Narrow it with `repos` (the calling repositories), `service`,
+  `route` and `status`. Service names resolve through registry aliases, folder
+  names and `repo-aliases.toml`, then through a case-insensitive match that
+  ignores `-` versus `_`. It reads each graph read-only and stores nothing, so
+  there is nothing to rebuild; see `docs/COMMANDS.md`.
+- Spring Cloud OpenFeign client methods are shown as calls the service makes
+  to other services, not as routes it serves. The route includes the interface
+  path prefix, and a route built from a constant is shown as unresolved.
+  `query_graph_tool` has two new patterns, `requests_of` and `requesters_of`,
+  to follow these calls.
+- A Feign route built from a constant or a method call is shown with an
+  `<unresolved>` marker, and `route_literal_parts` lists the literal pieces, so
+  a route is never shown as fully literal when something was dropped. A method
+  with a `java.net.URI` argument is flagged `url_from_argument`, because Feign
+  sends the request to that argument and `route` is not the target. Run
+  `code-review-graph build` once to update an existing graph.
+- Spring Cloud OpenFeign clients are indexed as outbound calls. Each method of
+  a `@FeignClient` interface becomes a client `Endpoint` (with the
+  `@FeignClient` `path` prefix applied) linked to the method by a `REQUESTS`
+  edge, and the new `requests_of` and `requesters_of` patterns of
+  `query_graph_tool` follow those edges.
+- An optional `repo-aliases.toml` next to `registry.json` (in `$CRG_HOME`) gives
+  a registered repository extra names, for example
+  `cross_repo_search_tool(repos=["old-service-name"])`. A registry alias or
+  folder name always wins over the file, a bad entry is skipped with a
+  warning, and `register` never changes the file. See `docs/REPO_ALIASES.md`.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
@@ -26,6 +121,9 @@
 
 ### Changed
 
+- Feign client methods are no longer listed as served routes by `endpoints_for`
+  or `handlers_of`. Run `code-review-graph build` once to re-index existing
+  Feign interfaces.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers
@@ -44,6 +142,10 @@
   now named after the alphabetically first one, not the one that came first
   among its members, so presenting the same files in another order no longer
   renames it.
+- `@FeignClient` interfaces are no longer reported as dead code. Run
+  `code-review-graph build` once to update an existing graph.
+- Feign client methods no longer start an execution flow just because of their
+  mapping annotation. Run `code-review-graph build` once to update an existing graph.
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could

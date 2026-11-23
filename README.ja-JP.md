@@ -235,7 +235,7 @@ code-review-graph build              # once: new file types and fixes reach only
 
 PHP プロジェクトではさらに、リポジトリ内に閉じた Composer PSR-4 の解決、Blade テンプレートの参照、そしてソースに明示的なフレームワークのインポート、モデルの継承、レシーバの根拠が現れている場合の Laravel Route と Eloquent のエッジが得られます。`routes/*.php` 内の静的な Laravel ルートは、Endpoint ノードとコントローラへの HANDLES エッジを生成し、リテラルのグループプレフィックスも反映します。
 
-Java プロジェクトでは、Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスから対象へのエッジ、Temporal のワークフローとアクティビティのエッジが得られます。各リゾルバは解析のあとに動き、注入されたフィールド、発行されるイベント、ワークフローのスタブがリポジトリ内で見えている必要があります。
+Java プロジェクトでは、Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、OpenFeign クライアントのリクエスト、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスから対象へのエッジ、Temporal のワークフローとアクティビティのエッジが得られます。各リゾルバは解析のあとに動き、注入されたフィールド、発行されるイベント、ワークフローのスタブがリポジトリ内で見えている必要があります。
 
 </details>
 
@@ -409,7 +409,7 @@ jobs:
 | **増分更新** | ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのリポジトリでは、2 ファイルの編集がフックの経路で約 2.5 秒です（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。 |
 | **言語とノートブックの対応** | 上記の[対応言語](#対応言語とノートブック)を参照。 |
 | **フレームワークを理解する PHP 解析** | リポジトリ内に閉じた Composer PSR-4 のインポート、Blade テンプレートの参照、根拠に基づく Laravel Route からコントローラへのエッジと Eloquent のリレーションのエッジ |
-| **フレームワークを理解する Java 解析** | Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスのエッジ、Temporal のワークフローとアクティビティのエッジ、そして値を含めずにインデックスする Spring Boot の設定キー |
+| **フレームワークを理解する Java 解析** | Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、OpenFeign クライアントのリクエスト、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスのエッジ、Temporal のワークフローとアクティビティのエッジ、そして値を含めずにインデックスする Spring Boot の設定キー |
 | **影響範囲の分析** | 変更によって影響を受けそうな関数、クラス、ファイル |
 | **自動更新フック** | エディタのフック、git のフック（コミットの前と、チェックアウト、マージ、リベースの後）、watch モードが作業中にグラフを更新 |
 | **セマンティック検索** | 任意のベクトル埋め込み。sentence-transformers、Google Gemini、MiniMax、Voyage AI、あるいは任意の OpenAI 互換エンドポイント |
@@ -588,7 +588,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 個の MCP ツール</strong></summary>
+<summary><strong>31 個の MCP ツール</strong></summary>
 <br>
 
 グラフを構築すると、アシスタントはこれらを使います。読むだけの 25 個のツールには `readOnlyHint: true` が付いているので、クライアントは確認なしで実行できます。書き込みを行う 5 個（`build_or_update_graph_tool`、`run_postprocess_tool`、`embed_graph_tool`、`apply_refactor_tool`、`generate_wiki_tool`）には付いていません。
@@ -625,6 +625,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 1 つの Wiki ページ |
 | `list_repos_tool` | 登録済みのリポジトリ |
 | `cross_repo_search_tool` | 登録済みのリポジトリを検索。`repos` で対象を絞り込める |
+| `cross_repo_requests_tool` | Spring Feign の呼び出しを、他の登録済みリポジトリ内の対応するエンドポイントに結び付ける |
 
 **MCP プロンプト**（5 つのワークフローテンプレート）:
 `review_changes`、`architecture_map`、`debug_issue`、`onboard_developer`、`pre_merge_check`
@@ -736,7 +737,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### ツールの絞り込み
 
-CRG は既定で 30 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
+CRG は既定で 31 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
 
 ```bash
 # CLI flag

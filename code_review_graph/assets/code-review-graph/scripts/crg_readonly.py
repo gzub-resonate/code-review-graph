@@ -27,6 +27,8 @@ QUERY_PATTERNS = (
     "advised_by",
     "handlers_of",
     "endpoints_for",
+    "requests_of",
+    "requesters_of",
     "consumers_of",
     "file_summary",
     "path_to",

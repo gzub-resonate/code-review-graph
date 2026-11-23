@@ -1,12 +1,13 @@
 # Documentation Index
 
 - [USAGE.md](USAGE.md): install, configure, and use the CLI and MCP tools
-- [COMMANDS.md](COMMANDS.md): reference for the CLI commands and their exit codes, the 30 MCP tools, 5 MCP prompts, and skills
+- [COMMANDS.md](COMMANDS.md): reference for the CLI commands and their exit codes, the 31 MCP tools, 5 MCP prompts, and skills
 - [FAQ.md](FAQ.md): how it compares to LSP, RAG, grep, and similar tools; when not to use it
 - [FEATURES.md](FEATURES.md): release highlights by version
 - [CHANGELOG.md](../CHANGELOG.md): every change by release, with upgrade notes
 - [GITHUB_ACTION.md](GITHUB_ACTION.md): risk-scored PR review comments in GitHub Actions
 - [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md): add a language through `.code-review-graph/languages.toml`
+- [REPO_ALIASES.md](REPO_ALIASES.md): give a registered repository a second name through `repo-aliases.toml`
 - [architecture.md](architecture.md): system design and data flow
 - [schema.md](schema.md): node and edge types, SQLite tables (including flows, communities, FTS5)
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md): `code-review-graph doctor`, then common problems and fixes, including Windows/WSL

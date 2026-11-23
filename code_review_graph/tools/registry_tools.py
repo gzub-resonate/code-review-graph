@@ -1,13 +1,21 @@
-"""Tools 21, 22: list_repos_func, cross_repo_search_func."""
+"""Tools 21, 22, 23: list_repos_func, cross_repo_search_func, cross_repo_requests_func."""
 
 from __future__ import annotations
 
 import logging
+import sqlite3
+from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+from .. import feign_links as fl
+from ..endpoint_index import attach as attach_endpoints
+from ..endpoint_index import extract_endpoints, read_endpoint_index
+from ..errors import GraphStoreError
 from ..graph import GraphStore, _sanitize_name
 from ..incremental import get_db_path
+from ..paging import content_stamp, make_scope, paginate_groups, shown_range
+from ..repo_aliases import RepoNameResolver, load_repo_aliases
 from ..search import hybrid_search
 from ._common import _bounded, _shown_of, _validate_positive_int
 
@@ -77,29 +85,22 @@ def _select_repos(
     to prevent; sibling checkouts sharing a folder name are the normal case
     this parameter was added for.
 
+    A name that matches neither is looked up in the optional
+    ``repo-aliases.toml`` (see ``repo_aliases.py``), whose target is resolved
+    by the same two rules; that file never overrides a registered name.
+
     Registry order is preserved so the caller cannot change the merge
     tie-breaker by reordering ``names``.
 
     Returns the selected entries, the names that matched nothing, and the
     names that matched more than one entry.
     """
-    by_alias: dict[str, list[int]] = {}
-    by_folder: dict[str, list[int]] = {}
-    for index, entry in enumerate(repos):
-        folder = Path(entry["path"]).name
-        alias = entry.get("alias")
-        # Only an EXPLICIT alias goes in the alias namespace. An entry
-        # registered without one is addressable by its folder name alone,
-        # so it cannot outrank another entry's deliberate alias.
-        if alias:
-            by_alias.setdefault(alias, []).append(index)
-        by_folder.setdefault(folder, []).append(index)
-
+    resolver = RepoNameResolver(repos)
     wanted: set[int] = set()
     unknown: list[str] = []
     ambiguous: list[str] = []
     for name in names:
-        matches = by_alias.get(name) or by_folder.get(name)
+        matches = resolver.lookup(name)
         if not matches:
             unknown.append(name)
             continue
@@ -287,4 +288,402 @@ def cross_repo_search_func(
             response["ambiguous_truncated"] = ambiguous_truncated
         return response
     except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tool 23: cross_repo_requests  [REGISTRY]
+# ---------------------------------------------------------------------------
+
+_MAX_REQUEST_ROWS = 100
+_MAX_CANDIDATES_PER_ROW = 5
+_MAX_UNREADABLE = 20
+
+
+def _repo_label(entry: dict[str, Any]) -> str:
+    return str(entry.get("alias") or Path(entry["path"]).name)
+
+
+_STORED = "stored"
+_COMPUTED = "computed"
+
+
+def _load_endpoints(
+    entry: dict[str, Any],
+) -> tuple[list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str]]:
+    """Read one repo's Feign client calls and server endpoints, read-only.
+
+    The third item is ``None`` on success, else ``"no_database"`` or
+    ``"unreadable"``; nothing from the failure (a path, an exception text) is
+    carried out. The fourth says where the endpoints came from: ``"stored"`` (the
+    index the build wrote) or ``"computed"`` (read from the ``Endpoint`` nodes, for a
+    graph with no current index).
+    """
+    repo_path = Path(entry["path"])
+    try:
+        db_path = get_db_path(repo_path, read_only=True)
+        if not db_path.is_file():
+            return [], [], "no_database", None
+        with GraphStore(db_path, read_only=True) as store:
+            endpoints = read_endpoint_index(store)
+            source = _STORED
+            if endpoints is None:
+                source = _COMPUTED
+                endpoints = extract_endpoints(store.get_nodes_by_kind(["Endpoint"]), repo_path)
+    except (GraphStoreError, sqlite3.Error, OSError, ValueError) as exc:
+        logger.warning("Cannot read endpoints of %s: %s", repo_path, exc)
+        return [], [], "unreadable", None
+    clients, servers = attach_endpoints(_repo_label(entry), repo_path, endpoints)
+    return clients, servers, None, source
+
+
+def _route_in_scope(call_route: str, wanted: str) -> bool:
+    """Whether ``call_route`` equals ``wanted`` or sits below it, segment-wise."""
+    have = fl.normalize_route(call_route)
+    return wanted == "/" or have == wanted or have.startswith(wanted + "/")
+
+
+def _candidate_row(server: fl.ServerEndpoint) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "repo": _sanitize_name(server.repo),
+        "file": _sanitize_name(server.file) if server.file else None,
+        "line": server.line,
+        "http_method": _sanitize_name(server.http_method),
+        "route": _sanitize_name(server.route),
+    }
+    if server.catch_all:
+        row["catch_all"] = True
+    return row
+
+
+def cross_repo_requests_func(
+    repos: list[str] | None = None,
+    service: str | None = None,
+    route: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    max_results: int = 50,
+    origin: str | None = None,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Join outbound Spring Feign and JavaScript/TypeScript calls to server endpoints.
+
+    [REGISTRY] Reads each registered repo's graph database read-only, finds
+    the Feign client calls in the selected (client) repos, and for each one
+    looks for the matching controller endpoint in the repo its service name
+    points at. JavaScript and TypeScript calls (axios, fetch, jQuery and Ember
+    ajax) have no service name: they are matched by method and
+    route against the server endpoints of every other registered repo.
+    Each repo's endpoints are read from the index its build stored (see
+    ``endpoint_index.py``), or worked out from its graph when it has none that is
+    current; the join itself depends on the whole registry and is recomputed on
+    every call.
+
+    Args:
+        repos: Optional aliases or folder names of the CLIENT repos whose
+            calls are listed (same matching, ``unknown`` and ``ambiguous``
+            reporting as ``cross_repo_search_func``). Omitted or empty lists
+            calls from every registered repo. Target repos are always looked
+            up across the whole registry.
+        service: Only calls whose Feign service name equals this (exact); this
+            leaves out JavaScript/TypeScript calls, which have none.
+        route: Only calls whose route equals this or lies below it, compared
+            after normalisation.
+        status: Only rows with this status: ``matched``, ``ambiguous``,
+            ``case_mismatch``, ``no_route_match``, ``no_target_repo`` or
+            ``unmatchable``.
+        limit: Maximum rows per client repo (default 20).
+        max_results: Maximum rows returned overall (default 50, capped at
+            100). ``counts`` and ``total`` cover every call that passed the
+            filters, not just the rows shown.
+        cursor: ``next_cursor`` from the previous reply, to read the next page of
+            the same query. Each page takes up to ``limit`` more rows from every
+            client repo, then keeps the first ``max_results``. Omit it for the
+            first page.
+        origin: Only ``feign`` or only ``js`` calls. Default: both.
+
+    Returns:
+        ``results`` rows, ``counts`` by status, ``total``, ``truncated``,
+        ``repos_searched``, ``endpoint_index`` (how many of the repos read had their
+        endpoints from the stored index and how many from their graph) and
+        ``unreadable`` (repos whose graph could not be read), plus
+        ``unknown``/``ambiguous`` when ``repos`` was given.
+        When rows remain, ``next_cursor`` is the ``cursor`` that returns the next page.
+    """
+    from ..registry import Registry
+
+    _validate_positive_int(limit, "limit")
+    _validate_positive_int(max_results, "max_results")
+    if status is not None and status not in fl.STATUSES:
+        raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
+    if origin is not None and origin not in ("feign", "js"):
+        raise ValueError("origin must be one of: feign, js")
+
+    try:
+        all_repos = Registry().list_repos()
+        if not all_repos:
+            return {
+                "status": "ok",
+                "summary": "No repositories registered. Use 'register' to add repos.",
+                "results": [],
+                "counts": {},
+                "total": 0,
+                "truncated": False,
+            }
+
+        unknown_shown: list[str] = []
+        unknown_total = 0
+        unknown_truncated = False
+        ambiguous_shown: list[str] = []
+        ambiguous_total = 0
+        ambiguous_truncated = False
+        if repos:
+            selected, unknown, ambiguous = _select_repos(all_repos, repos)
+            unknown_shown, unknown_total, unknown_truncated = _echoed(unknown)
+            ambiguous_shown, ambiguous_total, ambiguous_truncated = _echoed(ambiguous)
+            if not selected:
+                return {
+                    "status": "ok",
+                    "summary": (
+                        f"No registered repository matches the "
+                        f"{unknown_total} name(s) given. Use 'repos' to list the registry."
+                    ),
+                    "results": [],
+                    "counts": {},
+                    "total": 0,
+                    "truncated": False,
+                    "repos_searched": [],
+                    "unreadable": [],
+                    "unknown": unknown_shown,
+                    "unknown_total": unknown_total,
+                    "unknown_truncated": unknown_truncated,
+                    "ambiguous": ambiguous_shown,
+                    "ambiguous_total": ambiguous_total,
+                    "ambiguous_truncated": ambiguous_truncated,
+                }
+        else:
+            selected = all_repos
+
+        resolver = RepoNameResolver(all_repos)
+        folded: dict[str, set[str]] = defaultdict(set)
+        names = [n for e in all_repos for n in (e.get("alias"), Path(e["path"]).name) if n]
+        names += list(load_repo_aliases())
+        for name in names:
+            folded[fl.normalize_service_name(name)].add(name)
+
+        selected_ids = {id(e) for e in selected}
+        # Each repo's graph is read at most once, whether it turns up as a
+        # client repo, a target, or both.
+        loaded: dict[
+            int,
+            tuple[
+                list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str],
+            ],
+        ] = {}
+        unreadable: list[dict[str, str]] = []
+        unreadable_seen: set[tuple[str, str]] = set()
+
+        def note_unreadable(entry: dict[str, Any], role: str, reason: str) -> None:
+            key = (_repo_label(entry), role)
+            if key not in unreadable_seen:
+                unreadable_seen.add(key)
+                unreadable.append({
+                    "repo": _sanitize_name(key[0]), "role": role, "reason": reason,
+                })
+
+        def load(index: int) -> tuple[
+            list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str]
+        ]:
+            if index not in loaded:
+                loaded[index] = _load_endpoints(all_repos[index])
+            return loaded[index]
+
+        def servers_of(index: int) -> Optional[list[fl.ServerEndpoint]]:
+            _c, srv, why, _src = load(index)
+            if why:
+                note_unreadable(all_repos[index], "target", why)
+                return None
+            return srv
+
+        # A JavaScript call names no service, so every other registered repo
+        # is a candidate; its index is built once per calling repo.  The
+        # caller's own endpoints are indexed apart because they are searched
+        # first (a relative URL goes to the origin that served the page).
+        js_index: dict[int, fl.ServerIndex] = {}
+        own_index: dict[int, fl.ServerIndex] = {}
+
+        def own_index_for(client_index: int) -> fl.ServerIndex:
+            if client_index not in own_index:
+                own_index[client_index] = fl.ServerIndex(
+                    load(client_index)[1],
+                )
+            return own_index[client_index]
+
+        def js_index_for(client_index: int) -> fl.ServerIndex:
+            if client_index not in js_index:
+                pool: list[fl.ServerEndpoint] = []
+                for other in range(len(all_repos)):
+                    if other == client_index:
+                        continue
+                    found = servers_of(other)
+                    if found:
+                        pool.extend(found)
+                js_index[client_index] = fl.ServerIndex(pool)
+            return js_index[client_index]
+
+        wanted_route = fl.normalize_route(route) if route else None
+        counts: dict[str, int] = {}
+        origin_counts: dict[str, int] = {}
+        rows_by_repo: list[list[dict[str, Any]]] = []
+        searched: list[str] = []
+        total = 0
+
+        for index, entry in enumerate(all_repos):
+            if id(entry) not in selected_ids:
+                continue
+            clients, _own_servers, why, _src = load(index)
+            if why:
+                note_unreadable(entry, "client", why)
+                continue
+            searched.append(_sanitize_name(_repo_label(entry)))
+            seen: set[tuple[Any, ...]] = set()
+            repo_rows: list[dict[str, Any]] = []
+            for call in sorted(
+                clients,
+                key=lambda c: (c.file or "", c.line or 0, c.route, c.http_method),
+            ):
+                key = (
+                    call.file, call.line, call.http_method, call.route, call.service,
+                    call.origin,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                if origin is not None and call.origin != origin:
+                    continue
+                if service is not None and call.service != service:
+                    continue
+                if wanted_route is not None and not _route_in_scope(call.route, wanted_route):
+                    continue
+
+                reason = fl.unmatchable_reason(call)
+                resolution: Optional[fl.TargetResolution] = None
+                result = fl.LinkResult(fl.UNMATCHABLE, reason)
+                if reason is None and call.origin == "js":
+                    result = fl.link_js_call(
+                        call, js_index_for(index), own_index_for(index),
+                    )
+                elif reason is None:
+                    assert call.service is not None
+                    resolution = fl.resolve_service(call.service, resolver.lookup, folded)
+                    if not resolution.indexes:
+                        result = fl.LinkResult(fl.NO_TARGET_REPO, resolution.reason)
+                    else:
+                        pool: list[fl.ServerEndpoint] = []
+                        missing = False
+                        for target in resolution.indexes:
+                            found = servers_of(target)
+                            if found is None:
+                                missing = True
+                            else:
+                                pool.extend(found)
+                        result = fl.link_call(call, pool)
+                        if missing and result.status == fl.NO_ROUTE_MATCH:
+                            result = fl.LinkResult(fl.NO_TARGET_REPO, "target_unreadable")
+                if status is not None and result.status != status:
+                    continue
+
+                counts[result.status] = counts.get(result.status, 0) + 1
+                origin_counts[call.origin] = origin_counts.get(call.origin, 0) + 1
+                total += 1
+                row: dict[str, Any] = {
+                    "client_repo": _sanitize_name(call.repo),
+                    "client_file": _sanitize_name(call.file) if call.file else None,
+                    "client_line": call.line,
+                    "http_method": _sanitize_name(call.http_method),
+                    "route": _sanitize_name(call.route),
+                    "service": _sanitize_name(call.service) if call.service else None,
+                    "status": result.status,
+                    "origin": call.origin,
+                }
+                if call.origin == "js":
+                    if call.client_kind:
+                        row["client_kind"] = _sanitize_name(call.client_kind)
+                    row_notes = list(call.notes)
+                    if result.confidence == "low":
+                        row_notes.append(result.reason or "catch_all_route")
+                    if row_notes and result.status in (fl.MATCHED, fl.AMBIGUOUS):
+                        row["confidence"] = "low"
+                        row["confidence_notes"] = row_notes
+                if result.status == fl.CASE_MISMATCH:
+                    row["confidence"] = "low"
+                if result.reason:
+                    row["reason"] = result.reason
+                if resolution is not None and resolution.how:
+                    row["target_resolution"] = resolution.how
+                if result.candidates:
+                    row["candidates"] = [
+                        _candidate_row(c) for c in result.candidates[:_MAX_CANDIDATES_PER_ROW]
+                    ]
+                    row["candidates_total"] = len(result.candidates)
+                repo_rows.append(row)
+            rows_by_repo.append(repo_rows)
+
+        page = paginate_groups(
+            rows_by_repo, limit, max_results, _MAX_REQUEST_ROWS, cursor,
+            scope=make_scope(
+                "cross_repo_requests_tool", repos=sorted(repos) if repos else None,
+                service=service, route=route, status=status, origin=origin,
+            ),
+            stamp=content_stamp(rows_by_repo),
+        )
+        results, truncated = page.items, page.truncated
+        shown_unreadable, unreadable_total, unreadable_truncated = _bounded(
+            unreadable, _MAX_UNREADABLE, _MAX_UNREADABLE,
+        )
+
+        notes = ""
+        if unknown_total:
+            notes += f"; {unknown_total} name(s) matched no repository"
+        if ambiguous_total:
+            notes += f"; {ambiguous_total} name(s) matched several"
+        if unreadable_total:
+            notes += f"; {unreadable_total} repo(s) could not be read"
+        ordered = ", ".join(f"{counts[s]} {s}" for s in fl.STATUSES if s in counts)
+        response: dict[str, Any] = {
+            "status": "ok",
+            "summary": (
+                (
+                    f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
+                    f"{origin_counts.get('js', 0)} JS/TS) in {len(searched)} repo(s)"
+                    if origin_counts.get("js")
+                    else f"{total} Feign call(s) in {len(searched)} repo(s)"
+                )
+                + (f": {ordered}" if ordered else "")
+                + shown_range(page)
+                + notes
+            ),
+            "results": results,
+            "counts": counts,
+            "total": total,
+            "truncated": truncated,
+            **page.fields(),
+            "repos_searched": searched,
+            "endpoint_index": {
+                kind: sum(1 for item in loaded.values() if item[3] == kind)
+                for kind in (_STORED, _COMPUTED)
+            },
+            "unreadable": shown_unreadable,
+            "unreadable_total": unreadable_total,
+            "unreadable_truncated": unreadable_truncated,
+        }
+        if repos:
+            response["unknown"] = unknown_shown
+            response["unknown_total"] = unknown_total
+            response["unknown_truncated"] = unknown_truncated
+            response["ambiguous"] = ambiguous_shown
+            response["ambiguous_total"] = ambiguous_total
+            response["ambiguous_truncated"] = ambiguous_truncated
+        return response
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         return {"status": "error", "error": str(exc)}

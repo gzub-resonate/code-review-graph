@@ -8,6 +8,7 @@ from typing import Any
 from ..flows import get_flow_by_id, get_flows
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
+from ..paging import graph_stamp, make_scope, paginate, shown_range
 from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
 
 # ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ def list_flows(
     limit: int = 50,
     kind: str | None = None,
     detail_level: str = "standard",
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """List execution flows in the codebase, sorted by criticality.
 
@@ -47,9 +49,13 @@ def list_flows(
         detail_level: "standard" (default) returns full flow data;
                       "minimal" returns only name, criticality, and
                       node_count per flow.
+        cursor: ``next_cursor`` from the previous reply, to read the next page
+                of the same list. Omit it for the first page. A cursor is opaque
+                and only valid for the same arguments on the same graph.
 
     Returns:
-        Flows with criticality scores, plus ``total`` and ``truncated``.
+        Flows with criticality scores, plus ``total`` and ``truncated``. When more
+        flows remain, ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     _validate_positive_int(limit, "limit")
 
@@ -71,7 +77,12 @@ def list_flows(
                         filtered.append(f)
             flows = filtered
 
-        flows, total, truncated = _bounded(flows, limit, _MAX_FLOWS)
+        page = paginate(
+            flows, limit, _MAX_FLOWS, cursor,
+            scope=make_scope("list_flows_tool", sort_by=sort_by, kind=kind),
+            stamp=graph_stamp(store),
+        )
+        flows, total = page.items, page.total
 
         if detail_level == "minimal":
             flows = [
@@ -87,11 +98,12 @@ def list_flows(
             "status": "ok",
             "summary": (
                 f"Found {total} execution flow(s)"
-                + _shown_of(len(flows), total)
+                + shown_range(page)
             ),
             "flows": flows,
             "total": total,
-            "truncated": truncated,
+            "truncated": page.truncated,
+            **page.fields(),
         }
         result["_hints"] = generate_hints(
             "list_flows_tool", result, get_session()

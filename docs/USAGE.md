@@ -215,6 +215,10 @@ code-review-graph register /path/to/other/repo --alias mylib
 ```
 Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset. `code-review-graph serve --http --multi-repo` runs one HTTP server for every registered repository; each tool call must then name one in `repo_root`.
 
+To see which endpoint in another registered repository an outbound Spring Feign call reaches, call `cross_repo_requests_tool`. It lists the calls of every registered repository (or of `repos=["mylib"]`), with the matching endpoint's repository, file, line and route, or the reason there is none (`status="ambiguous"` and `status="no_route_match"` are the usual follow-ups). It reads the existing graphs read-only; each graph's endpoints come from an index its build stored, and the join is computed on every call. See [COMMANDS.md](COMMANDS.md#cross_repo_requests_tool).
+
+A repository can also be known by extra names that you keep in `repo-aliases.toml`. See [REPO_ALIASES.md](REPO_ALIASES.md).
+
 `code-review-graph repos` lists each repository's registered `data_dir`, marking
 missing directories with `[MISSING]`. If a registered directory disappears and
 the repository still has a local `.code-review-graph/graph.db`, graph commands
@@ -330,7 +334,7 @@ Their imports, calls, and references alone do not keep application symbols alive
 dead-code reports. Normal application callers and ordinary test evidence still count.
 
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests, YamlPaths, DocSections, JsonPaths, Variables and Outputs (Liquid templates), plus Endpoints, Schedulers, Events and ConfigProperties where framework enrichment applies
-- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
+- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, REQUESTS, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
 - **Confidence**: each `CALLS`, `REFERENCES` and `TESTED_BY` edge has a `confidence_tier`: `EXTRACTED` (1.0) when the source names a real node, `INFERRED` (0.8, or the resolver's own score) when a resolver chose it, `AMBIGUOUS` (0.4) when several nodes fit, and `UNRESOLVED` (0.2) when none does
 
 See [schema.md](schema.md) for details.

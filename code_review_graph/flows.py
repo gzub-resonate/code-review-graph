@@ -549,7 +549,12 @@ def detect_entry_points(
         )
         is_entry = (
             node.qualified_name not in called
-            or _has_framework_decorator(node)
+            or (
+                # A Feign client method is where a flow leaves the service,
+                # so its mapping annotation does not make it a route.
+                _has_framework_decorator(node)
+                and not node.extra.get("spring_feign_client")
+            )
             or _matches_entry_name(node)
         )
 
@@ -1015,7 +1020,7 @@ def get_flows(
     # NOTE: get_flows reads from the flows table which is managed by
     # the flows module; _conn access is documented coupling.
     rows = store._conn.execute(
-        f"SELECT * FROM flows ORDER BY {sort_by} {order} LIMIT ?",  # nosec B608
+        f"SELECT * FROM flows ORDER BY {sort_by} {order}, id LIMIT ?",  # nosec B608
         (limit,),
     ).fetchall()
 

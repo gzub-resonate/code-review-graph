@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict, deque
 from pathlib import Path
+from typing import Any
 
 from .constants import (
     IMPORT_CONTEXT_DEFERRED,
@@ -42,7 +43,7 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
     nodes = store.get_all_nodes(exclude_files=True)
     community_map = store.get_all_community_ids()
 
-    scored = []
+    scored: list[dict[str, Any]] = []
     for n in nodes:
         qn = n.qualified_name
         ind = in_degree.get(qn, 0)
@@ -61,10 +62,9 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
             "community_id": community_map.get(qn),
         })
 
-    scored.sort(
-        key=lambda x: x.get("total_degree", 0),  # type: ignore[arg-type,return-value]
-        reverse=True,
-    )
+    # Equal degrees are ordered by qualified name, so a ranking read in pages never
+    # repeats or skips a node.
+    scored.sort(key=lambda x: (-x["total_degree"], x["qualified_name"]))
     return scored[:top_n]
 
 

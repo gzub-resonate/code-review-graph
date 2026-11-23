@@ -239,7 +239,7 @@ code-review-graph build              # once: new file types and fixes reach only
 
 PHP 项目还会得到仓库范围内的 Composer PSR-4 解析、Blade 模板引用，以及在源码中出现明确的框架导入、模型继承和接收者证据时生成的 Laravel Route 与 Eloquent 边。`routes/*.php` 中的静态 Laravel 路由会生成 Endpoint 节点和指向控制器的 HANDLES 边，包括字面量的路由组前缀。
 
-Java 项目会得到 Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知到目标的边，以及 Temporal 工作流与活动的边。每个解析器都在解析之后运行，并且需要被注入的字段、发布的事件或工作流 stub 在仓库中可见。
+Java 项目会得到 Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、OpenFeign 客户端请求、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知到目标的边，以及 Temporal 工作流与活动的边。每个解析器都在解析之后运行，并且需要被注入的字段、发布的事件或工作流 stub 在仓库中可见。
 
 </details>
 
@@ -413,7 +413,7 @@ jobs:
 | **增量更新** | 只重新解析哈希发生变化的文件。在一个约 3,000 个文件的仓库上，修改两个文件沿钩子路径约需 2.5 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。 |
 | **语言与笔记本支持** | 见上文[语言覆盖](#语言覆盖与笔记本)。 |
 | **框架感知的 PHP 解析** | 仓库范围内的 Composer PSR-4 导入、Blade 模板引用、有证据支撑的 Laravel Route 到控制器以及 Eloquent 关系边 |
-| **框架感知的 Java 解析** | Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知边、Temporal 工作流与活动的边，以及只索引键名不索引值的 Spring Boot 配置键 |
+| **框架感知的 Java 解析** | Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、OpenFeign 客户端请求、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知边、Temporal 工作流与活动的边，以及只索引键名不索引值的 Spring Boot 配置键 |
 | **影响半径分析** | 一次改动可能影响哪些函数、类和文件 |
 | **自动更新钩子** | 编辑器钩子、git 钩子（每次提交前，以及 checkout、merge 和 rebase 之后）和 watch 模式在你工作时更新图谱 |
 | **语义搜索** | 可选的向量嵌入，通过 sentence-transformers、Google Gemini、MiniMax、Voyage AI，或任何 OpenAI 兼容端点 |
@@ -592,7 +592,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 个 MCP 工具</strong></summary>
+<summary><strong>31 个 MCP 工具</strong></summary>
 <br>
 
 图谱构建完成后，助手会使用这些工具。只读的 25 个工具带有 `readOnlyHint: true`，客户端可以不经询问直接运行；会写入的五个（`build_or_update_graph_tool`、`run_postprocess_tool`、`embed_graph_tool`、`apply_refactor_tool`、`generate_wiki_tool`）则没有。
@@ -629,6 +629,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 单个 Wiki 页面 |
 | `list_repos_tool` | 已注册的仓库 |
 | `cross_repo_search_tool` | 搜索已注册的仓库；`repos` 可把搜索限定到一个子集 |
+| `cross_repo_requests_tool` | 把 Spring Feign 调用关联到其他已注册仓库中对应的端点 |
 
 **MCP 提示模板**（5 个工作流模板）：
 `review_changes`、`architecture_map`、`debug_issue`、`onboard_developer`、`pre_merge_check`
@@ -740,7 +741,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 工具过滤
 
-CRG 默认暴露 30 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
+CRG 默认暴露 31 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
 
 ```bash
 # CLI flag

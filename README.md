@@ -244,7 +244,7 @@ and Laravel Route and Eloquent edges when the source shows explicit framework im
 inheritance and receiver evidence. Static Laravel routes in `routes/*.php` emit Endpoint nodes
 and controller HANDLES edges, including literal group prefixes.
 
-Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice-to-target edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
+Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, OpenFeign client requests, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice-to-target edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
 
 </details>
 
@@ -418,7 +418,7 @@ Updates, impact analysis, search, visualisation, CI reviews, refactoring and mul
 | **Incremental updates** | Re-parses only files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5 s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
 | **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above. |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
-| **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
+| **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, OpenFeign client requests, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
 | **Auto-update hooks** | Editor hooks, git hooks (before each commit, after checkout, merge and rebase) and watch mode update the graph as you work |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint |
@@ -597,7 +597,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for th
 </details>
 
 <details>
-<summary><strong>30 MCP tools</strong></summary>
+<summary><strong>31 MCP tools</strong></summary>
 <br>
 
 The assistant uses these once the graph is built. The 25 tools that only read carry `readOnlyHint: true`, so a client can run them without asking; the five that write (`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`) do not.
@@ -634,6 +634,7 @@ The assistant uses these once the graph is built. The 25 tools that only read ca
 | `get_wiki_page_tool` | One wiki page |
 | `list_repos_tool` | Registered repositories |
 | `cross_repo_search_tool` | Search registered repositories; `repos` limits the search to a subset |
+| `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories |
 
 **MCP prompts** (5 workflow templates):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
@@ -745,7 +746,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### Tool Filtering
 
-CRG exposes 30 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
+CRG exposes 31 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
 
 ```bash
 # CLI flag

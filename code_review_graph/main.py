@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from .tools import (
         apply_refactor_func,
         build_or_update_graph,
+        cross_repo_requests_func,
         cross_repo_search_func,
         detect_changes_func,
         embed_graph,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
 _LAZY_TOOL_NAMES = frozenset({
     "apply_refactor_func",
     "build_or_update_graph",
+    "cross_repo_requests_func",
     "cross_repo_search_func",
     "detect_changes_func",
     "embed_graph",
@@ -601,6 +603,8 @@ async def query_graph_tool(
     - advised_by: Find AOP advice methods that intercept the target
     - handlers_of: Find methods that handle an endpoint
     - endpoints_for: Find endpoints handled by a method
+    - requests_of: Find outbound HTTP endpoints a client method requests
+    - requesters_of: Find client methods that request an outbound endpoint
     - consumers_of: Find classes that consume a Spring configuration property
     - file_summary: Get all nodes in a file
     - path_to: Find how the target reaches ``to``, one row per hop
@@ -873,6 +877,7 @@ async def list_flows_tool(
     kind: Optional[str] = None,
     detail_level: str = "standard",
     repo_root: Optional[str] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """List execution flows in the codebase, sorted by criticality.
 
@@ -887,13 +892,15 @@ async def list_flows_tool(
         detail_level: "standard" (default) returns full flow data; "minimal"
                       returns only name, criticality, and node_count per flow.
         repo_root: Repository root path. Auto-detected if omitted.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "list_flows_tool",
         lambda: list_flows(
             repo_root=root, sort_by=sort_by, limit=limit, kind=kind,
-            detail_level=detail_level,
+            detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -981,6 +988,7 @@ async def list_communities_tool(
     repo_root: Optional[str] = None,
     max_results: int = 50,
     max_members: int = 10,
+    cursor: Optional[str] = None,
 ) -> dict:
     """List detected code communities in the codebase.
 
@@ -1000,6 +1008,8 @@ async def list_communities_tool(
         max_members: Maximum member names listed per community in standard
             mode. Each community's size still reports its true member
             count. Default: 10.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1007,7 +1017,7 @@ async def list_communities_tool(
         lambda: list_communities_func(
             repo_root=root, sort_by=sort_by, min_size=min_size,
             detail_level=detail_level, max_results=max_results,
-            max_members=max_members,
+            max_members=max_members, cursor=cursor,
         ),
         root,
     )
@@ -1286,6 +1296,7 @@ async def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1297,12 +1308,14 @@ async def get_hub_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and total_degree only. Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_hub_nodes_tool",
         lambda: get_hub_nodes_func(
-            repo_root=root, top_n=top_n, detail_level=detail_level,
+            repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -1499,6 +1512,66 @@ async def cross_repo_search_tool(
         lambda: cross_repo_search_func(
             query=query, kind=kind, limit=limit, max_results=max_results,
             repos=repos,
+        ),
+        None,
+        provenance=False,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def cross_repo_requests_tool(
+    repos: Optional[list[str]] = None,
+    service: Optional[str] = None,
+    route: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 20,
+    max_results: int = 50,
+    origin: Optional[str] = None,
+    cursor: Optional[str] = None,
+) -> dict:
+    """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
+
+    Lists the Feign client calls of the registered repos and, for each, the
+    controller endpoint in the repo its service name points at, found by HTTP
+    method and route. Read-only; the join is computed on every call from each
+    repo's stored endpoint index (or its graph when it has none).
+    A call is ``matched`` (one endpoint), ``ambiguous`` (several),
+    ``case_mismatch`` (no exact route, but one that differs only in letter
+    case: a low-confidence lead, not a match), ``no_route_match``,
+    ``no_target_repo`` (no registered repo carries the service name) or
+    ``unmatchable`` with a ``reason`` (placeholder service name, absolute
+    ``url``, ``URI`` argument, or a route piece that could not be resolved).
+    Nothing is guessed.
+    A JavaScript call with no other match may still be ``matched`` at low
+    confidence (reason ``variable_matches_literal``) when its variable stands
+    against a fixed server segment.
+
+    JavaScript and TypeScript calls (axios, fetch, jQuery and Ember
+    ajax) have no service name and are matched by method and route against the
+    endpoints of every other registered repo; each row has an ``origin`` of
+    ``feign`` or ``js``. A match through a catch-all route such as a Next.js
+    ``[...path]`` proxy has ``confidence`` ``low``.
+
+    Args:
+        repos: Optional aliases or folder names of the client repos to list
+            calls from. Default: every registered repo. Targets are always
+            looked up across the whole registry. Names matching no entry come
+            back in ``unknown``; names matching several are in ``ambiguous``.
+        service: Only calls to this Feign service name (exact).
+        route: Only calls whose route equals this or lies below it.
+        status: Only rows with this status.
+        limit: Maximum rows per client repo. Default: 20.
+        max_results: Maximum rows overall, at most 100. ``counts`` and
+            ``total`` cover every call that passed the filters. Default: 50.
+        origin: Only ``feign`` or only ``js`` calls. Default: both.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            the same query. Omit it for the first page.
+    """
+    return await _offload(
+        "cross_repo_requests_tool",
+        lambda: cross_repo_requests_func(
+            repos=repos, service=service, route=route, status=status,
+            limit=limit, max_results=max_results, origin=origin, cursor=cursor,
         ),
         None,
         provenance=False,

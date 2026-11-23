@@ -241,7 +241,7 @@ code-review-graph build              # once: new file types and fixes reach only
 
 PHP 프로젝트에는 저장소 범위로 제한된 Composer PSR-4 해석, Blade 템플릿 참조, 그리고 소스에 명시적인 프레임워크 임포트, 모델 상속, 수신자 근거가 드러날 때의 Laravel Route 및 Eloquent 엣지가 추가됩니다. `routes/*.php`의 정적 Laravel 라우트는 리터럴 그룹 접두사까지 포함해 Endpoint 노드와 컨트롤러로 가는 HANDLES 엣지를 만듭니다.
 
-Java 프로젝트에는 Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스에서 대상으로 가는 엣지, Temporal 워크플로와 액티비티 엣지가 추가됩니다. 각 리졸버는 파싱 이후에 실행되며, 주입된 필드나 발행된 이벤트, 워크플로 스텁이 저장소 안에서 보여야 합니다.
+Java 프로젝트에는 Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, OpenFeign 클라이언트 요청, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스에서 대상으로 가는 엣지, Temporal 워크플로와 액티비티 엣지가 추가됩니다. 각 리졸버는 파싱 이후에 실행되며, 주입된 필드나 발행된 이벤트, 워크플로 스텁이 저장소 안에서 보여야 합니다.
 
 </details>
 
@@ -415,7 +415,7 @@ jobs:
 | **증분 업데이트** | 해시가 바뀐 파일만 다시 파싱합니다. 파일이 약 3,000개인 저장소에서 파일 두 개 편집은 훅 경로로 약 2.5초입니다([측정값](docs/REPRODUCING.md#incremental-update-latency)). |
 | **언어와 노트북 지원** | 위의 [언어 지원](#언어-지원과-노트북)을 보세요. |
 | **프레임워크를 아는 PHP 파싱** | 저장소 범위로 제한된 Composer PSR-4 임포트, Blade 템플릿 참조, 근거에 기반한 Laravel Route에서 컨트롤러로 가는 엣지와 Eloquent 관계 엣지 |
-| **프레임워크를 아는 Java 파싱** | Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스 엣지, Temporal 워크플로와 액티비티 엣지, 그리고 값 없이 색인되는 Spring Boot 설정 키 |
+| **프레임워크를 아는 Java 파싱** | Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, OpenFeign 클라이언트 요청, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스 엣지, Temporal 워크플로와 액티비티 엣지, 그리고 값 없이 색인되는 Spring Boot 설정 키 |
 | **영향 범위 분석** | 변경으로 영향을 받을 법한 함수, 클래스, 파일 |
 | **자동 업데이트 훅** | 편집기 훅, git 훅(커밋 전, 그리고 checkout, merge, rebase 후), watch 모드가 작업 중에 그래프를 갱신 |
 | **시맨틱 검색** | 선택적 벡터 임베딩. sentence-transformers, Google Gemini, MiniMax, Voyage AI 또는 OpenAI 호환 엔드포인트 |
@@ -594,7 +594,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>MCP 도구 30개</strong></summary>
+<summary><strong>MCP 도구 31개</strong></summary>
 <br>
 
 그래프를 만들고 나면 어시스턴트가 이 도구들을 씁니다. 읽기만 하는 도구 25개에는 `readOnlyHint: true`가 붙어 있어 클라이언트가 묻지 않고 실행할 수 있습니다. 쓰기를 하는 도구 5개(`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`)에는 붙어 있지 않습니다.
@@ -631,6 +631,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 위키 페이지 하나 |
 | `list_repos_tool` | 등록된 저장소 |
 | `cross_repo_search_tool` | 등록된 저장소 검색. `repos`로 대상을 좁힐 수 있음 |
+| `cross_repo_requests_tool` | Spring Feign 호출을 다른 등록된 저장소에서 대응하는 엔드포인트와 연결 |
 
 **MCP 프롬프트**(워크플로 템플릿 5개):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
@@ -742,7 +743,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 도구 필터링
 
-CRG는 기본으로 MCP 도구 30개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
+CRG는 기본으로 MCP 도구 31개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
 
 ```bash
 # CLI flag

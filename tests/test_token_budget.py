@@ -568,6 +568,17 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default_max": 4_000,
         "worst_max": 30_000,
     },
+    "cross_repo_requests_tool": {
+        "no_repo_root": True,
+        "needs_registry": True,
+        "default": {},
+        "worst": {
+            "limit": HUGE, "max_results": HUGE, "repos": "FLOOD_NAMES",
+            "service": "x" * 5_000, "route": "/" + "r" * 5_000,
+        },
+        "default_max": 4_000,
+        "worst_max": 30_000,
+    },
 }
 
 
