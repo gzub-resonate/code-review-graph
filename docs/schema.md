@@ -110,7 +110,7 @@ The persisted `extra` JSON is the internal source of truth. Query and change-ana
 | duplicate_key / duplicate_group_count | bool / int | Mapping-scoped duplicate-key diagnostics |
 | is_alias / anchor_definition / yaml_merge | bool | Alias, anchor, and merge relationship metadata |
 
-`CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
+`CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. A workflow or composite action file also lists its `uses` references in `extra.github_actions_uses` (see [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md)); these are the only YAML values stored. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
 
 ### DocSection
 A `div`, `section` or `article` with an `id` in an HTML page (`.html`, `.htm`). Its name is the
@@ -169,6 +169,7 @@ names the class the call went through. Both are `INFERRED`.
 |---|---|---|
 | CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`) |
 | IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package). An HTML `<script src>`, a Liquid `render` or `include` and an XSLT `xsl:import` or `xsl:include` are imports too |
+| IMPORTS_FROM (infrastructure) | file -> `external:github-actions:<owner/repo[/path]>`, `external:docker-image:<name>` | Workflow `uses`. Not a node: the target is a name outside the repository, and the version, tag or ref is in `extra`. `dynamic` targets (`external:github-actions:dynamic`) hold an expression or a reference that could not be reduced safely; no text is stored. URL credentials, fragments and query strings other than `ref` and `version` are never stored. See [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md) |
 | INHERITS | child class -> parent class | |
 | IMPLEMENTS | implementing class -> interface | |
 | CONTAINS | file -> class or function; class -> method | Structural containment |
