@@ -185,7 +185,11 @@ def get_flow(
 
         page = paginate(
             flow.get("steps") or [], max_steps, _MAX_FLOW_STEPS, cursor,
-            scope=make_scope("get_flow_tool", flow_id=flow["id"]), stamp=graph_stamp(store),
+            scope=make_scope(
+                "get_flow_tool",
+                flow_id=flow.get("id", flow_id if flow_id is not None else flow_name),
+            ),
+            stamp=graph_stamp(store),
         )
         steps, total_steps = page.items, page.total
         flow["steps"] = steps
