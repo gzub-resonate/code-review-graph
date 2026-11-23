@@ -342,3 +342,53 @@ def test_more_changed_files_than_the_cap_are_counted_not_read(pull_request, monk
 def test_git_output_past_the_limit_is_refused(pull_request):
     with pytest.raises(pbr.PullRequestError):
         pbr._git(str(pull_request), "log", "--format=%H%n%B", limit=5)
+
+
+def test_credentials_in_a_git_error_are_scrubbed():
+    text = "fatal: unable to access 'https://user:s3cret@github.com/o/r.git/': failed"
+    assert "s3cret" not in pbr._scrub(text) and "user" not in pbr._scrub(text)
+    assert "github.com/o/r.git" in pbr._scrub(text)
+
+
+def test_a_failed_fetch_does_not_echo_the_remote_credentials(pull_request):
+    git(pull_request, "remote", "add", "origin", "https://user:s3cret@127.0.0.1:1/x.git")
+    result = pr_blast_radius_func(repo_root=str(pull_request), pr=5, include_external=False)
+    assert result["status"] == "error"
+    assert "s3cret" not in result["error"] and "user:" not in result["error"]
+
+
+def test_reach_walks_share_one_visit_budget(tmp_path, monkeypatch):
+    repo = (tmp_path / "chain").resolve()
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    write(repo, "lib.py", "def base():\n    return 1\n")
+    lines = ["from lib import base\n"]
+    for number in range(6):
+        lines.append(f"\n\ndef caller{number}():\n    return base()\n")
+    write(repo, "app.py", "".join(lines))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "base")
+    with GraphStore(get_db_path(repo)) as store:
+        full_build(repo, store)
+    git(repo, "checkout", "-q", "-b", "pr")
+    write(repo, "lib.py", "def base():\n    return 2\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "pr")
+    git(repo, "checkout", "-q", "main")
+    monkeypatch.setattr(pbr, "MAX_REACH_VISITS", 2)
+    result = pr_blast_radius_func(
+        repo_root=str(repo), head="pr", base="main", include_external=False,
+    )
+    assert any("visit limit" in note for note in result["notes"])
+
+
+def test_names_in_migration_rows_are_sanitised(pull_request):
+    git(pull_request, "checkout", "-q", "pr")
+    write(pull_request, "db/migration/V2__a\x1b[31mb.sql", "CREATE TABLE evil\x07name (id int);\n")
+    git(pull_request, "add", "-A")
+    git(pull_request, "commit", "-q", "-m", "odd names")
+    git(pull_request, "checkout", "-q", "main")
+    rows = run(pull_request)["schema_changes"]
+    assert rows
+    for row in rows:
+        assert not any(ord(ch) < 32 or ord(ch) == 127 for ch in row["file"] + row["target"])

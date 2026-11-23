@@ -54,8 +54,10 @@ MAX_GIT_OUTPUT = 16_000_000
 MAX_CHANGED_FILES = 5_000
 #: Hops the reach walk follows from a changed symbol.
 DEFAULT_DEPTH = 3
-#: Nodes the reach walk may visit in all.
+#: Nodes one reach walk may visit.
 MAX_REACHED_NODES = 5_000
+#: Nodes all the reach walks of one request may visit together.
+MAX_REACH_VISITS = 50_000
 
 #: Node kinds that count as a symbol a pull request can change, add or remove.
 _SYMBOL_KINDS = ("Function", "Test", "Class")
@@ -71,6 +73,14 @@ _SQL_STATEMENT_RE = re.compile(
     r"(?:\s+if\s+exists)?)\s+([\w.\"]+)",
     re.IGNORECASE,
 )
+
+
+_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]*@")
+
+
+def _scrub(text: str) -> str:
+    """Drop the user and password of any URL in *text*; Git echoes the remote on a failed fetch."""
+    return _URL_USERINFO_RE.sub(r"\1", text)
 
 
 class PullRequestError(ValueError):
@@ -130,10 +140,10 @@ def _git(
             errors.seek(0)
             detail = errors.read().decode("utf-8", errors="replace").strip().splitlines()
     except OSError as exc:
-        raise PullRequestError(f"git could not be run: {exc}") from exc
+        raise PullRequestError("git could not be run") from exc
     if code != 0:
         raise PullRequestError(
-            f"git {args[0]} failed: {detail[-1][:200] if detail else 'no detail'}"
+            f"git {args[0]} failed: {_scrub(detail[-1])[:200] if detail else 'no detail'}"
         )
     return out if binary else out.decode("utf-8", errors="replace")
 
@@ -304,12 +314,16 @@ class FileReport:
 
 def reach_from(
     store: GraphStore, seeds: list[str], depth: int = DEFAULT_DEPTH,
-    max_nodes: int = MAX_REACHED_NODES,
+    max_nodes: int = MAX_REACHED_NODES, budget: Optional[list[int]] = None,
 ) -> dict[str, int]:
     """Qualified names that depend on *seeds*, with the hop count of each (seeds are 0).
 
     Follows the same edge kinds and directions as the graph's impact radius, from the base
     graph. A call bound to no indexed node cannot be followed, as there.
+
+    *budget* is a one-item list shared by every walk of a request: each node visited takes
+    one from it, and the walk stops when it is spent, so many small walks cannot add up to
+    more work than one large one.
     """
     hops = {qn: 0 for qn in seeds}
     frontier = list(seeds)
@@ -320,9 +334,13 @@ def reach_from(
                 direction = IMPACT_EDGE_DIRECTIONS.get(edge.kind, IMPACT_DEFAULT_EDGE_DIRECTION)
                 if direction != IMPACT_DIRECTION_INCOMING:
                     continue
+                if budget is not None and budget[0] <= 0:
+                    return hops
                 if edge.source_qualified not in hops and len(hops) < max_nodes:
                     hops[edge.source_qualified] = hop
                     following.append(edge.source_qualified)
+                    if budget is not None:
+                        budget[0] -= 1
         frontier = following
         if not frontier:
             break
@@ -452,7 +470,11 @@ def analyse(
         all_seeds.extend(report.seeds)
         reports.append(report)
 
-    reached = reach_from(store, list(dict.fromkeys(all_seeds)), depth) if all_seeds else {}
+    budget = [MAX_REACH_VISITS]
+    reached = (
+        reach_from(store, list(dict.fromkeys(all_seeds)), depth, budget=budget)
+        if all_seeds else {}
+    )
 
     reached_endpoints: dict[str, GraphNode] = {}
     for qn in reached:
@@ -465,7 +487,7 @@ def analyse(
     changed_paths = {c.path for c in changes}
     changed_abs = {str(root / p) for p in changed_paths} | changed_paths
     for report in reports:
-        own = reach_from(store, report.seeds, depth) if report.seeds else {}
+        own = reach_from(store, report.seeds, depth, budget=budget) if report.seeds else {}
         seeds = set(report.seeds)
         files: set[str] = set()
         production = tests = 0
@@ -501,4 +523,5 @@ def analyse(
         "endpoints_reached": servers_reached,
         "schema": schema,
         "parsed_files": parsed_count,
+        "reach_truncated": budget[0] <= 0,
     }
