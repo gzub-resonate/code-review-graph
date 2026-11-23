@@ -21,14 +21,19 @@ shallow clone without a merge base.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from .changes import _SAFE_GIT_REF, DiffRanges, _parse_unified_diff
 from .constants import (
@@ -102,19 +107,35 @@ _STATUS_NAMES = {"A": "added", "M": "modified", "D": "deleted", "R": "renamed", 
 
 def _git(
     repo_root: str, *args: str, binary: bool = False, stdin: Optional[bytes] = None,
-    limit: int = MAX_GIT_OUTPUT,
+    limit: int = MAX_GIT_OUTPUT, real: bool = False, config: Optional[dict[str, str]] = None,
 ) -> Any:
     """Run one read-only Git command in *repo_root*; raise ``PullRequestError`` on failure.
 
     Output past *limit* bytes stops the command and is refused, so a very large diff or
     blob cannot fill the server's memory.
+
+    While a scratch session holds fetched objects (:func:`scratch_session`) the command runs
+    against that throwaway repository, which borrows the checkout's objects; *real* runs it
+    against the checkout itself (for its branches and remote settings).
     """
+    scratch = None if real else _SCRATCH_DIR.get()
+    env = {**os.environ, "GIT_DIR": scratch} if scratch else None
+    if config:
+        # Settings go through Git's environment, not argv, so a value such as a remote URL
+        # with credentials in it never shows in the process list.
+        env = dict(env if env is not None else os.environ)
+        index = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+        for key, value in config.items():
+            env[f"GIT_CONFIG_KEY_{index}"] = key
+            env[f"GIT_CONFIG_VALUE_{index}"] = value
+            index += 1
+        env["GIT_CONFIG_COUNT"] = str(index)
     try:
         with tempfile.TemporaryFile() as errors:
             proc = subprocess.Popen(  # nosec B603 B607 - fixed argv, no shell
                 ["git", *args],
                 stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=errors, cwd=repo_root,
+                stdout=subprocess.PIPE, stderr=errors, cwd=repo_root, env=env,
             )
             timer = threading.Timer(GIT_TIMEOUT, proc.kill)
             timer.start()
@@ -159,34 +180,202 @@ def _safe_ref(ref: str, what: str) -> str:
 
 
 def resolve_commit(repo_root: str, ref: str, what: str) -> str:
-    """The commit a ref names, as a full SHA; every later Git call uses only the SHA."""
+    """The commit a ref names, as a full SHA; every later Git call uses only the SHA.
+
+    A full SHA and a ref under ``refs/crg/`` are looked up where fetched objects live (the
+    scratch repository, when a session is open); any other name is looked up in the checkout.
+    The error names the ref that failed and carries Git's own message.
+    """
     _safe_ref(ref, what)
-    sha = _git(
-        repo_root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
-        limit=256,
-    ).strip()
+    scratch = bool(_COMMIT_RE.fullmatch(ref)) or ref.startswith("refs/crg/")
+    try:
+        sha = _git(
+            repo_root, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}",
+            limit=256, real=not scratch,
+        ).strip()
+    except PullRequestError as exc:
+        raise PullRequestError(f"{what} {ref!r} could not be resolved: {exc}") from exc
     if not _COMMIT_RE.fullmatch(sha):
         raise PullRequestError(f"{what} does not name a commit: {ref!r}")
     return sha
 
 
+_SCRATCH_DIR: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "crg_pr_scratch_dir", default=None,
+)
+_SESSION: contextvars.ContextVar[Optional["ScratchSession"]] = contextvars.ContextVar(
+    "crg_pr_scratch_session", default=None,
+)
+SCRATCH_PREFIX = "crg-pr-"
+#: ``ext::`` and similar remote-helper URLs run a command; never fetch from one.
+_REMOTE_HELPER_RE = re.compile(r"^[A-Za-z0-9+.-]+::")
+#: A scratch directory older than this is left over from a call that never finished.
+SCRATCH_MAX_AGE = 3600.0
+#: Refs an earlier version wrote into the checkout itself; removed when found.
+_LEGACY_REF_PREFIX = "refs/crg/"
+
+
+class ScratchSession:
+    """A throwaway bare repository that fetched objects land in, removed when the call ends.
+
+    It borrows the checkout's object store (Git alternates), so only the objects the checkout
+    lacks are written, and they go to the temporary directory, never into the checkout. The
+    checkout gains no refs and no objects, so repeated calls cannot fill the server's disk.
+    """
+
+    def __init__(self) -> None:
+        self.path: Optional[str] = None
+
+    def ensure(self, repo_root: str) -> str:
+        if self.path:
+            return self.path
+        path = tempfile.mkdtemp(prefix=SCRATCH_PREFIX)
+        self.path = path
+        try:
+            common = _git(repo_root, "rev-parse", "--git-common-dir", limit=4096, real=True)
+            objects = os.path.join(os.path.abspath(os.path.join(repo_root, common.strip())),
+                                   "objects")
+            subprocess.run(  # nosec B603 B607 - fixed argv, no shell
+                ["git", "init", "--bare", "--quiet", path], check=True, capture_output=True,
+                timeout=GIT_TIMEOUT,
+            )
+            info = os.path.join(path, "objects", "info")
+            os.makedirs(info, exist_ok=True)
+            with open(os.path.join(info, "alternates"), "w", encoding="utf-8") as handle:
+                handle.write(objects + "\n")
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.close()
+            raise PullRequestError("could not set up a scratch repository for the fetch") from exc
+        _SCRATCH_DIR.set(path)
+        return path
+
+    def close(self) -> None:
+        if self.path:
+            shutil.rmtree(self.path, ignore_errors=True)
+            self.path = None
+        _SCRATCH_DIR.set(None)
+
+
+def _sweep_stale_scratch() -> None:
+    """Remove scratch directories a killed call left behind."""
+    root = tempfile.gettempdir()
+    cutoff = time.time() - SCRATCH_MAX_AGE
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(SCRATCH_PREFIX):
+            continue
+        full = os.path.join(root, name)
+        try:
+            if os.path.isdir(full) and os.path.getmtime(full) < cutoff:
+                shutil.rmtree(full, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _drop_legacy_refs(repo_root: str) -> None:
+    """Delete ``refs/crg/*`` refs an earlier version fetched into the checkout, if any."""
+    try:
+        out = _git(repo_root, "for-each-ref", "--format=%(refname)", _LEGACY_REF_PREFIX,
+                   limit=1_000_000, real=True)
+    except PullRequestError:
+        return
+    refs = [line for line in out.splitlines() if line.startswith(_LEGACY_REF_PREFIX)]
+    if not refs:
+        return
+    commands = "".join(f"delete {ref}\n" for ref in refs).encode()
+    try:
+        _git(repo_root, "update-ref", "--stdin", stdin=commands, limit=1024, real=True)
+    except PullRequestError as exc:
+        logger.warning("could not remove %d leftover refs/crg refs: %s", len(refs), exc)
+
+
+@contextlib.contextmanager
+def scratch_session(repo_root: str) -> Iterator[ScratchSession]:
+    """Everything fetched for one request lives in this session and is removed on exit."""
+    _sweep_stale_scratch()
+    _drop_legacy_refs(repo_root)
+    session = ScratchSession()
+    token = _SESSION.set(session)
+    try:
+        yield session
+    finally:
+        _SESSION.reset(token)
+        session.close()
+
+
+def _scratch_fetch(repo_root: str, refspec: str, what: str) -> None:
+    session = _SESSION.get()
+    if session is None:
+        raise PullRequestError("internal error: a fetch needs a scratch session")
+    session.ensure(repo_root)
+    url = _git(repo_root, "config", "--get", "remote.origin.url", limit=4096, real=True).strip()
+    if not url:
+        raise PullRequestError(
+            f"{what} is not in this checkout and there is no origin to fetch it from"
+        )
+    if url.startswith("-") or "\n" in url or "\0" in url or _REMOTE_HELPER_RE.match(url):
+        raise PullRequestError(
+            f"{what} cannot be fetched: the checkout's origin is not a usable URL"
+        )
+    _git(repo_root, "fetch", "--no-tags", "--quiet", "origin", refspec,
+         config={"remote.origin.url": url})
+
+
+def ensure_commit(repo_root: str, ref: str, what: str) -> str:
+    """The commit *ref* names, fetching it from ``origin`` when the checkout lacks it.
+
+    A branch name or full SHA the checkout already has is used as it stands. Otherwise a full
+    SHA is fetched by value and a branch name from ``refs/heads/``. An abbreviated SHA cannot
+    be fetched, and the error says so.
+    """
+    _safe_ref(ref, what)
+    try:
+        return resolve_commit(repo_root, ref, what)
+    except PullRequestError as first:
+        local_error = first
+    if _COMMIT_RE.fullmatch(ref):
+        dest, spec = f"refs/crg/{what}/{ref}", f"{ref}:refs/crg/{what}/{ref}"
+    elif re.fullmatch(r"[0-9a-fA-F]{7,39}", ref):
+        raise PullRequestError(
+            f"{what} {ref!r} is an abbreviated commit id that this checkout does not have; "
+            "give the full 40-character SHA so it can be fetched"
+        ) from local_error
+    else:
+        dest, spec = f"refs/crg/{what}/branch", f"+refs/heads/{ref}:refs/crg/{what}/branch"
+    try:
+        _scratch_fetch(repo_root, spec, what)
+        return resolve_commit(repo_root, dest, what)
+    except PullRequestError as exc:
+        raise PullRequestError(
+            f"{what} {ref!r} is not in this checkout and could not be fetched from origin: {exc}"
+        ) from exc
+
+
 def fetch_pull_request(repo_root: str, pr: int, base: Optional[str]) -> tuple[str, str]:
     """Fetch ``refs/pull/<pr>/head`` (and the base branch) and return ``(base_sha, head_sha)``.
 
-    The refs land under ``refs/crg/``, so the checkout's branches and working tree are not
-    touched. *base* is a branch name; omitted, the remote's default branch is used.
+    The objects land in the request's scratch repository, so the checkout's refs, branches,
+    objects and working tree are not touched. *base* is a branch name; omitted, the remote's
+    default branch is used. Call it inside :func:`scratch_session`.
     """
     if not isinstance(pr, int) or pr <= 0:
         raise PullRequestError("pr must be a positive pull request number")
     pull_ref = f"refs/crg/pull/{pr}"
-    _git(repo_root, "fetch", "--no-tags", "--quiet", "origin", f"+pull/{pr}/head:{pull_ref}")
+    _scratch_fetch(repo_root, f"+pull/{pr}/head:{pull_ref}", "head")
     head = resolve_commit(repo_root, pull_ref, "head")
     if base:
         _safe_ref(base, "base")
         base_ref = f"refs/crg/base/{pr}"
-        _git(repo_root, "fetch", "--no-tags", "--quiet", "origin",
-             f"+refs/heads/{base}:{base_ref}")
-        return resolve_commit(repo_root, base_ref, "base"), head
+        try:
+            _scratch_fetch(repo_root, f"+refs/heads/{base}:{base_ref}", "base")
+            return resolve_commit(repo_root, base_ref, "base"), head
+        except PullRequestError as exc:
+            raise PullRequestError(
+                f"base {base!r} could not be fetched from origin: {exc}"
+            ) from exc
     return resolve_commit(repo_root, default_branch(repo_root), "base"), head
 
 
@@ -195,6 +384,7 @@ def default_branch(repo_root: str) -> str:
     try:
         return _git(
             repo_root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", limit=1024,
+            real=True,
         ).strip()
     except PullRequestError:
         return "origin/main"

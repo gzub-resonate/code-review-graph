@@ -1116,8 +1116,8 @@ repo_root: str | None        # Repository root; auto-detected
 
 The graph holds the default branch, so a pull request's new files are not in it. This tool reads only the files the
 pull request touches, straight from Git, parses each in memory with the parser a build uses and compares the result with
-the base graph. Nothing is written to the graph. Files are fetched into `refs/crg/` of the checkout, so no branch or
-working tree is touched.
+the base graph. Nothing is written to the graph. What is fetched goes into a temporary repository that is removed when the call ends, so
+the checkout gains no branch, ref, object or working-tree change.
 
 Per file it reports the symbols **changed** (a symbol the base graph has, overlapped by a changed line), **added** (only the
 new file has it) and **removed** (only the base graph has it), `reached` (what depends on the changed and removed symbols,

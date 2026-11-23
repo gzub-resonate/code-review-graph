@@ -4727,6 +4727,7 @@ class _WatchSupervisor:
             "failed_paths": self.unwatched_paths,
             "phase": phase,
         }
+        temporary: Path | None = None
         try:
             self._health_path.parent.mkdir(parents=True, exist_ok=True)
             # Unique per writer, not per process: two supervisors in one
@@ -4737,6 +4738,11 @@ class _WatchSupervisor:
             os.replace(temporary, self._health_path)
         except OSError as exc:
             logger.debug("Could not write watcher health to %s: %s", self._health_path, exc)
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return
         self._last_health_write = now
         self._last_health_state = state

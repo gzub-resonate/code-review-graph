@@ -149,15 +149,21 @@ def forget(repo_root: Path, paths: Iterable[Path]) -> None:
 
 
 def _replace(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` in one step, so a reader never sees half a file."""
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp",
-        delete=False,
-    ) as handle:
-        temporary = Path(handle.name)
-        handle.write(text)
+    """Write ``text`` to ``path`` in one step, so a reader never sees half a file.
+
+    The temporary file is removed when the write or the replace fails, so a full disk or a bad
+    string cannot leave one behind.
+    """
+    temporary: Path | None = None
     try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
         os.replace(temporary, path)
-    except OSError:
-        temporary.unlink(missing_ok=True)
+    except BaseException:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         raise

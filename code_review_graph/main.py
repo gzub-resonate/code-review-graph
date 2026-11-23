@@ -250,6 +250,15 @@ async def _run_off_loop(work: Callable[[], dict]) -> dict:
     return await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
 
 
+def _log_tool_error(tool_name: str, root: str | None, result: Any) -> None:
+    """Log a tool's ``status: error`` reply so a failed call shows up in the server's logs."""
+    if isinstance(result, dict) and result.get("status") == "error":
+        logger.warning(
+            "tool error tool=%s repo_root=%r error=%r",
+            tool_name, root, str(result.get("error", ""))[:500],
+        )
+
+
 async def _offload(
     tool_name: str,
     work: Callable[[], dict],
@@ -310,6 +319,15 @@ async def _offload(
         timeout_hint: Advice appended to the timeout message.
     """
     def run_fn() -> Any:
+        try:
+            return _run_logged()
+        except Exception as exc:
+            logger.error(
+                "tool raised tool=%s repo_root=%r error=%r", tool_name, root, str(exc)[:500],
+            )
+            raise
+
+    def _run_logged() -> Any:
         # Resolve lazy attributes inside the worker: on a cold call the import
         # pulls in _common, the parser and the grammar package, which would
         # otherwise block the event loop before the timeout even starts.
@@ -318,9 +336,11 @@ async def _offload(
         for name in getattr(getattr(work, "__code__", None), "co_names", ()):
             if name in _LAZY_TOOL_NAMES and name not in globals():
                 _resolve_attr(name)
+        result = work()
+        _log_tool_error(tool_name, root, result)
         if provenance:
-            return _resolve_attr("with_provenance")(work(), root)
-        return work()
+            return _resolve_attr("with_provenance")(result, root)
+        return result
 
     tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
     if not bounded or tool_timeout <= 0:
@@ -330,6 +350,9 @@ async def _offload(
         return await asyncio.wait_for(_run_off_loop(run_fn), timeout=tool_timeout)
     except asyncio.TimeoutError:
         message = f"{tool_name} timed out after {tool_timeout}s. {timeout_hint}"
+        logger.warning(
+            "tool timed out tool=%s repo_root=%r after=%ss", tool_name, root, tool_timeout,
+        )
         error_response = {
             "status": "error",
             "error": message,
@@ -1203,6 +1226,7 @@ async def detect_changes_tool(
             parses them in memory and scores them against the graph, so new files are
             covered. base then names the branch the PR merges into. Default: none.
         head: A ref or commit to read the changed files from instead of pr.
+            A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
 
     Returns:
         The risk-scored analysis. When more changed functions remain,
@@ -1722,8 +1746,9 @@ async def pr_blast_radius_tool(
 
     Args:
         pr: A pull request number. The server fetches ``refs/pull/<pr>/head`` from the
-            checkout's ``origin`` into ``refs/crg/``; no branch or working tree is touched.
+            checkout's ``origin`` into a temporary repository that is removed afterwards.
         head: A ref or commit to read the new files from, when no ``pr`` is given.
+            A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
         base: The branch the pull request merges into. Default: the remote's default branch.
         depth: Hops the reach walk follows from a changed symbol. Default: 3, at most 6.
         include_external: Join the affected endpoints to the client calls of the other

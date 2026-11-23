@@ -133,8 +133,9 @@ def pr_blast_radius_func(
 
     Args:
         pr: A pull request number. The server fetches ``refs/pull/<pr>/head`` from the
-            checkout's ``origin`` into ``refs/crg/`` (no branch or working tree is touched).
+            checkout's ``origin`` into a temporary repository that is removed afterwards.
         head: A ref or commit to read the new files from, when no ``pr`` is given.
+            A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
         base: The branch the pull request merges into. Default: the remote's default
             branch. A stacked pull request should name its parent branch; the result
             then also says how many files differ from the default branch.
@@ -173,15 +174,33 @@ def load_pull_request(
     Shared by ``pr_blast_radius_tool`` and ``detect_changes_tool``. Returns ``found`` (the
     :func:`pbr.analyse` result, or None when no file differs), ``changes``, ``notes``,
     ``base_ref`` and ``head_sha``. Raises :class:`pbr.PullRequestError`.
+
+    Whatever is fetched lives in a scratch repository that is removed before this returns,
+    so the checkout gains no refs and no objects. Everything later code needs from Git (the
+    changed files, their ranges and bytes) is read inside it and returned as plain data.
     """
     if pr is None and not head:
         raise pbr.PullRequestError("give a pull request number (pr) or a head ref (head)")
+    try:
+        with pbr.scratch_session(repo):
+            return _load_pull_request(store, repo, pr, head, base, depth)
+    except pbr.PullRequestError as exc:
+        logger.warning(
+            "pull request load failed repo=%r pr=%r head=%r base=%r error=%r",
+            repo, pr, head, base, str(exc)[:500],
+        )
+        raise
+
+
+def _load_pull_request(
+    store: Any, repo: str, pr: int | None, head: str | None, base: str | None, depth: int,
+) -> dict[str, Any]:
     notes: list[str] = []
     if pr is not None:
         base_ref, head_sha = pbr.fetch_pull_request(repo, pr, base)
     else:
-        head_sha = pbr.resolve_commit(repo, head or "", "head")
-        base_ref = pbr.resolve_commit(repo, base or pbr.default_branch(repo), "base")
+        head_sha = pbr.ensure_commit(repo, head or "", "head")
+        base_ref = pbr.ensure_commit(repo, base or pbr.default_branch(repo), "base")
     changes, merge_based = pbr.changed_files(repo, base_ref, head_sha)
     if len(changes) > pbr.MAX_CHANGED_FILES:
         notes.append(
