@@ -5470,7 +5470,7 @@ class GraphStore:
         """Return qualified names of nodes in a community."""
         rows = self._conn.execute(
             "SELECT qualified_name FROM nodes "
-            "WHERE community_id = ?",
+            "WHERE community_id = ? ORDER BY id",
             (community_id,),
         ).fetchall()
         return [r["qualified_name"] for r in rows]
@@ -5480,7 +5480,7 @@ class GraphStore:
     ) -> list[GraphNode]:
         """Return all nodes belonging to a community."""
         rows = self._conn.execute(
-            "SELECT * FROM nodes WHERE community_id = ?",
+            "SELECT * FROM nodes WHERE community_id = ? ORDER BY id",
             (community_id,),
         ).fetchall()
         return [self._row_to_node(r) for r in rows]

@@ -11,6 +11,7 @@ from typing import Any
 
 from ..graph import GraphStore, _sanitize_name
 from ..incremental import find_project_root, get_db_path
+from ..paging import Page, paginate
 from ..parser import normalize_file_path
 
 _PROVENANCE_READ_TIMEOUT_SECONDS = 0.05
@@ -388,6 +389,29 @@ def _bounded(
     total = len(items)
     limit = min(max_results, hard_cap)
     return list(items[:limit]), total, total > limit
+
+
+def _page_together(
+    lists: "dict[str, list[Any]]",
+    limit: int,
+    hard_cap: int,
+    cursor: "str | None",
+    *,
+    scope: str,
+    stamp: str,
+) -> "tuple[dict[str, list[Any]], Page]":
+    """Page several lists of one reply with a single shared offset.
+
+    Every list shows rows ``offset`` to ``offset + min(limit, hard_cap)`` of its own
+    rows, so the first page is each list cut at the cap, as ``_bounded`` cuts it. The
+    returned page describes the longest list: it carries the next cursor while any list
+    has rows left, and its ``total`` is that longest length, not any one list's. A list
+    shorter than the offset comes back empty.
+    """
+    longest = max((len(rows) for rows in lists.values()), default=0)
+    page = paginate(list(range(longest)), limit, hard_cap, cursor, scope=scope, stamp=stamp)
+    end = page.offset + min(limit, hard_cap)
+    return {k: list(rows[page.offset:end]) for k, rows in lists.items()}, page
 
 
 def _shown_of(shown: int, total: int) -> str:

@@ -950,6 +950,7 @@ async def get_flow_tool(
     repo_root: Optional[str] = None,
     max_steps: int = 50,
     max_source_lines: int = 400,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Get detailed information about a single execution flow.
 
@@ -967,6 +968,12 @@ async def get_flow_tool(
             full count. Default: 50.
         max_source_lines: Total source lines across all steps when
             include_source is set. Default: 400.
+        cursor: The ``next_cursor`` of a previous reply, to read the next
+            steps of the same flow. Omit it for the first page.
+
+    Returns:
+        The flow with its steps. When more steps remain the reply carries
+        ``next_cursor``; a page after the first adds ``offset``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -975,6 +982,7 @@ async def get_flow_tool(
             flow_id=flow_id, flow_name=flow_name,
             include_source=include_source, repo_root=root,
             max_steps=max_steps, max_source_lines=max_source_lines,
+            cursor=cursor,
         ),
         root,
     )
@@ -1066,6 +1074,7 @@ async def get_community_tool(
     include_members: bool = False,
     repo_root: Optional[str] = None,
     max_members: int = 25,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Get detailed information about a single code community.
 
@@ -1083,6 +1092,12 @@ async def get_community_tool(
         max_members: Maximum member entries to include; the community's
             size still reports its true member count and
             members_truncated marks the cut. Default: 25.
+        cursor: The ``next_cursor`` of a previous reply, to read the next
+            members of the same community. Omit it for the first page.
+
+    Returns:
+        The community. When more members remain the reply carries
+        ``next_cursor``; a page after the first adds ``offset``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1090,7 +1105,7 @@ async def get_community_tool(
         lambda: get_community_func(
             community_name=community_name, community_id=community_id,
             include_members=include_members, repo_root=root,
-            max_members=max_members,
+            max_members=max_members, cursor=cursor,
         ),
         root,
     )
@@ -1102,6 +1117,7 @@ async def get_architecture_overview_tool(
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -1119,6 +1135,12 @@ async def get_architecture_overview_tool(
             cross_community_edges_total reports the full count. Default: 100.
         max_members: Maximum member names per community in standard mode.
             Default: 10.
+        cursor: The ``next_cursor`` of a previous reply, to read the next
+            cross-community rows and warnings. Omit it for the first page.
+
+    Returns:
+        The overview. When more cross-community rows or warnings remain the
+        reply carries ``next_cursor``; a page after the first adds ``offset``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1128,6 +1150,7 @@ async def get_architecture_overview_tool(
             detail_level=detail_level,
             max_results=max_results,
             max_members=max_members,
+            cursor=cursor,
         ),
         root,
     )
@@ -1380,6 +1403,7 @@ async def get_bridge_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -1392,12 +1416,17 @@ async def get_bridge_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and betweenness only. Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
+
+    Returns:
+        Ranked bridges. When more remain the reply carries ``next_cursor``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_bridge_nodes_tool",
         lambda: get_bridge_nodes_func(
-            repo_root=root, top_n=top_n, detail_level=detail_level,
+            repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -1408,6 +1437,7 @@ async def get_knowledge_gaps_tool(
     repo_root: Optional[str] = None,
     max_per_category: int = 15,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1422,13 +1452,19 @@ async def get_knowledge_gaps_tool(
             total_gaps still report the untruncated counts. Default: 15.
         detail_level: "standard" for full gap records, "minimal" to drop
             file paths. Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next rows
+            of every category together. Omit it for the first page.
+
+    Returns:
+        Gaps by category. When any category has more rows the reply carries
+        ``next_cursor``; a page after the first adds ``offset``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_knowledge_gaps_tool",
         lambda: get_knowledge_gaps_func(
             repo_root=root, max_per_category=max_per_category,
-            detail_level=detail_level,
+            detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -1439,6 +1475,7 @@ async def get_surprising_connections_tool(
     top_n: int = 15,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Find unexpected architectural coupling via composite surprise scoring.
 
@@ -1451,12 +1488,18 @@ async def get_surprising_connections_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full edge records, "minimal" for
             source, target, kind, and score only. Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
+
+    Returns:
+        Ranked surprising edges. When more remain the reply carries
+        ``next_cursor``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_surprising_connections_tool",
         lambda: get_surprising_connections_func(
-            repo_root=root, top_n=top_n, detail_level=detail_level,
+            repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -1544,6 +1587,7 @@ async def cross_repo_search_tool(
     limit: int = 20,
     max_results: int = 50,
     repos: Optional[list[str]] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Search for code entities across registered repositories.
 
@@ -1565,12 +1609,19 @@ async def cross_repo_search_tool(
             and case-sensitive, and paths are not accepted. Names matching no
             registry entry come back in ``unknown``; a name matching several
             entries selects all of them and is listed in ``ambiguous``.
+        cursor: The ``next_cursor`` of a previous reply, to read the next merged
+            results. Omit it for the first page. Only valid for the same query,
+            kind, limit and repos while the merged results are unchanged.
+
+    Returns:
+        Merged results. When more remain the reply carries ``next_cursor``; a
+        page after the first adds ``offset``.
     """
     return await _offload(
         "cross_repo_search_tool",
         lambda: cross_repo_search_func(
             query=query, kind=kind, limit=limit, max_results=max_results,
-            repos=repos,
+            repos=repos, cursor=cursor,
         ),
         None,
         provenance=False,

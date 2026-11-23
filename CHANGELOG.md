@@ -28,6 +28,15 @@
   its ranked window, and a traversal continues the same walk. A cursor is
   refused if the query or graph changed, or the search ranking did. Equal-sized
   large functions now come in a fixed order. See `docs/COMMANDS.md`.
+- `get_bridge_nodes_tool`, `get_surprising_connections_tool`,
+  `get_knowledge_gaps_tool`, `get_community_tool`, `get_architecture_overview_tool`,
+  `get_flow_tool` and `cross_repo_search_tool` no longer stop at their ceiling either.
+  When more rows exist the reply carries `next_cursor`; pass it back as `cursor`
+  for the next page. A knowledge-gaps page moves every category together, the
+  overview pages its cross-community rows and warnings, a community pages its
+  members and a flow its steps. `get_knowledge_gaps_tool` now reports the true
+  count of isolated nodes and untested hotspots, and bridge ranking on large
+  graphs no longer changes between calls. See `docs/COMMANDS.md`.
 - `list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` no longer
   stop at their ceiling. When more rows exist the reply carries `next_cursor`;
   pass it back as `cursor` to read the next page. A page after the first adds

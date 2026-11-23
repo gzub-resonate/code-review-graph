@@ -90,7 +90,9 @@ def find_bridge_nodes(
     if n_nodes > 5000:
         # Sample-based approximation for large graphs
         k = min(500, n_nodes)
-        bc = nx.betweenness_centrality(nxg, k=k, normalized=True)
+        # A fixed seed keeps the sample, and so the ranking, the same on every call:
+        # a ranking read in pages must not be redrawn between pages.
+        bc = nx.betweenness_centrality(nxg, k=k, normalized=True, seed=0)
     elif n_nodes > 0:
         bc = nx.betweenness_centrality(nxg, normalized=True)
     else:
@@ -118,10 +120,9 @@ def find_bridge_nodes(
             "community_id": community_map.get(qn),
         })
 
-    results.sort(
-        key=lambda x: float(x.get("betweenness", 0)),  # type: ignore[arg-type,return-value]
-        reverse=True,
-    )
+    # Equal scores are ordered by qualified name, so a ranking read in pages never
+    # repeats or skips a node.
+    results.sort(key=lambda x: (-float(x["betweenness"]), str(x["qualified_name"])))  # type: ignore[arg-type]
     del nxg, bc
     store.shrink_memory(clear_nx_cache=True)
     return results[:top_n]
@@ -245,7 +246,10 @@ def find_import_cycles(
 
 
 def find_knowledge_gaps(
-    store: GraphStore, repo_root: Path | None = None,
+    store: GraphStore,
+    repo_root: Path | None = None,
+    max_isolated: int | None = 50,
+    max_untested: int | None = 20,
 ) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
 
@@ -255,9 +259,13 @@ def find_knowledge_gaps(
     - untested_hotspots: high-degree nodes with no TESTED_BY edges
     - single_file_communities: entire community in one file
     - import_cycles: files that import each other (see find_import_cycles)
+
+    Isolated nodes and untested hotspots are cut at *max_isolated* and *max_untested*
+    (``None`` keeps every row, for a caller that pages). Every list has a fixed order.
     """
     edges = store.get_all_edges()
-    nodes = store.get_all_nodes(exclude_files=True)
+    # Table order made explicit: the isolated list is read in node id order.
+    nodes = sorted(store.get_all_nodes(exclude_files=True), key=lambda n: n.id)
     community_map = store.get_all_community_ids()
 
     # Build degree map
@@ -292,7 +300,7 @@ def find_knowledge_gaps(
             comm_files[cid].add(n.file_path)
 
     # Thin communities (< 3 members)
-    communities = store.get_communities_list()
+    communities = sorted(store.get_communities_list(), key=lambda c: int(c["id"]))
     thin = []
     for c in communities:
         cid = int(c["id"])
@@ -318,10 +326,7 @@ def find_knowledge_gaps(
                 "file": n.file_path,
                 "degree": d,
             })
-    untested_hotspots.sort(
-        key=lambda x: x.get("degree", 0),  # type: ignore[arg-type,return-value]
-        reverse=True,
-    )
+    untested_hotspots.sort(key=lambda x: (-x["degree"], x["qualified_name"]))  # type: ignore[operator]
 
     # 4. Single-file communities
     single_file = []
@@ -338,9 +343,9 @@ def find_knowledge_gaps(
             })
 
     return {
-        "isolated_nodes": isolated[:50],
+        "isolated_nodes": isolated[:max_isolated],
         "thin_communities": thin,
-        "untested_hotspots": untested_hotspots[:20],
+        "untested_hotspots": untested_hotspots[:max_untested],
         "single_file_communities": single_file,
         "import_cycles": find_import_cycles(store, edges, repo_root),
     }
@@ -377,7 +382,7 @@ def find_surprising_connections(
     median_deg = sorted(degrees)[len(degrees) // 2]
     high_deg_threshold = max(median_deg * 3, 10)
 
-    scored_edges = []
+    scored_edges: list[tuple[int, dict[str, Any]]] = []
     for e in edges:
         src = node_map.get(e.source_qualified)
         tgt = node_map.get(e.target_qualified)
@@ -431,7 +436,7 @@ def find_surprising_connections(
             reasons.append("unusual-edge-kind")
 
         if score > 0:
-            scored_edges.append({
+            scored_edges.append((e.id, {
                 "source": _sanitize_name(src.name),
                 "source_qualified": e.source_qualified,
                 "target": _sanitize_name(tgt.name),
@@ -441,13 +446,15 @@ def find_surprising_connections(
                 "reasons": reasons,
                 "source_community": src_cid,
                 "target_community": tgt_cid,
-            })
+            }))
 
-    scored_edges.sort(
-        key=lambda x: float(x.get("surprise_score", 0)),  # type: ignore[arg-type,return-value]
-        reverse=True,
-    )
-    return scored_edges[:top_n]
+    # Equal scores are ordered by endpoints, edge kind and edge id (two edges can join
+    # the same pair), so a ranking read in pages never repeats or skips an edge.
+    scored_edges.sort(key=lambda item: (
+        -float(item[1]["surprise_score"]), item[1]["source_qualified"],
+        item[1]["target_qualified"], item[1]["edge_kind"], item[0],
+    ))
+    return [row for _, row in scored_edges[:top_n]]
 
 
 def generate_suggested_questions(
