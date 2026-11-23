@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import feign_links as fl
-from .. import js_api_extract
+from .. import js_api_extract, py_api_extract, py_route_prefixes
 from ..errors import GraphStoreError
 from ..graph import GraphNode, GraphStore, _sanitize_name
 from ..incremental import get_db_path
@@ -342,8 +342,18 @@ def _load_endpoints(
 
     clients: list[fl.ClientCall] = []
     servers: list[fl.ServerEndpoint] = []
+    py_maps: dict[str, py_route_prefixes.RouterMap] = {}
+    py_routes: list[tuple[GraphNode, dict[str, Any], str]] = []
     for node in nodes:
         extra = node.extra if isinstance(node.extra, dict) else {}
+        if extra.get("role") == py_api_extract.MAP_ROLE:
+            rel = _relative_file(repo_path, node.file_path)
+            if rel:
+                py_maps[rel] = py_route_prefixes.RouterMap(
+                    rel, extra.get("routers") or {}, extra.get("mounts") or [],
+                    extra.get("imports") or {},
+                )
+            continue
         route = extra.get("route")
         method = extra.get("http_method")
         if not isinstance(route, str) or not isinstance(method, str):
@@ -380,6 +390,8 @@ def _load_endpoints(
                 url_literal=bool(extra.get("url_literal")),
                 url_from_argument=bool(extra.get("url_from_argument")),
             ))
+        elif extra.get("py_route") and file:
+            py_routes.append((node, extra, file))
         else:
             servers.append(fl.ServerEndpoint(
                 repo=_repo_label(entry), file=file, line=node.line_start,
@@ -387,7 +399,42 @@ def _load_endpoints(
                 catch_all=bool(extra.get("catch_all")),
                 optional_catch_all=bool(extra.get("optional_catch_all")),
             ))
+    servers.extend(_python_servers(entry, repo_path, py_routes, py_maps))
     return clients, servers, None
+
+
+def _python_servers(
+    entry: dict[str, Any],
+    repo_path: Path,
+    routes: list[tuple[GraphNode, dict[str, Any], str]],
+    maps: dict[str, py_route_prefixes.RouterMap],
+) -> list[fl.ServerEndpoint]:
+    """Server endpoints for FastAPI/Flask routes, with their prefixes joined.
+
+    A router's prefix is its own plus that of every router that mounts it, in
+    any file of the repo.  A route whose chain has a prefix that is not a
+    literal is left out rather than guessed.
+    """
+    if not routes:
+        return []
+    files = set(maps) | {file for _n, _e, file in routes}
+    resolver = py_route_prefixes.PrefixResolver(maps, files)
+    found: list[fl.ServerEndpoint] = []
+    for node, extra, file in routes:
+        if extra.get("prefix_dynamic"):
+            continue
+        own_path = extra.get("route_path")
+        path = str(own_path if own_path is not None else extra.get("route") or "")
+        for prefix in resolver.prefixes(file, str(extra.get("router_var") or "")):
+            if prefix is None:
+                continue
+            found.append(fl.ServerEndpoint(
+                repo=_repo_label(entry), file=file, line=node.line_start,
+                http_method=str(extra.get("http_method")),
+                route=py_api_extract.join_path(prefix, path),
+                origin=str(repo_path), catch_all=bool(extra.get("catch_all")),
+            ))
+    return found
 
 
 def _route_in_scope(call_route: str, wanted: str) -> bool:

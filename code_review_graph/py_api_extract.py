@@ -1,15 +1,23 @@
 """Python HTTP server routes (FastAPI, Flask) as ``Endpoint`` nodes.
 
-``@app.get("/x")``, ``@app.post(...)``, ``@app.route("/x", methods=[...])`` and
-``@app.api_route(...)`` on a ``FastAPI()`` or ``Flask()`` application built in the
-same file become server ``Endpoint`` nodes with a ``HANDLES`` edge from the handler
-function, the same shape the JavaScript extractor gives Express and Next.js routes,
-so :mod:`code_review_graph.feign_links` can join a caller to them.
+``@router.get("/x")``, ``@app.post(...)``, ``@bp.route("/x", methods=[...])``
+and ``@app.api_route(...)`` become server ``Endpoint`` nodes with a ``HANDLES``
+edge from the handler function, the same shape the JavaScript extractor gives
+Express and Next.js routes, so :mod:`code_review_graph.feign_links` can join a
+caller to them.
 
-A route on an application is complete as written.  A route on an ``APIRouter`` or a
-``Blueprint``, or on an application imported from another file, takes part of its path
-from a prefix set elsewhere, so it is not recorded here.  A path that is not a string
-literal is never guessed: such a route is left out.
+A route's full path is usually split over several files: each ``APIRouter``
+(or ``Blueprint``) has its own ``prefix``, and an ``include_router`` or
+``register_blueprint`` call in another file adds more.  This module records
+what one file says and nothing more:
+
+* the route's own path plus the prefix of the router it is declared on, when
+  that router is built in the same file (``route``);
+* one ``py_map`` node per file that builds a router or mounts one, listing the
+  routers with their prefixes, the mounts and the file's imports.
+
+:mod:`code_review_graph.py_route_prefixes` joins the files at query time.  A
+prefix that is not a string literal is never guessed: such a route is left out.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from typing import Any, Optional
 __all__ = [
     "FASTAPI",
     "FLASK",
+    "MAP_ROLE",
     "MAX_ENDPOINTS",
     "convert_path",
     "extract",
@@ -30,10 +39,20 @@ __all__ = [
 FASTAPI = "fastapi"
 FLASK = "flask"
 
+#: ``extra["role"]`` of the per-file node that lists routers, mounts and imports.
+MAP_ROLE = "py_map"
+
 MAX_ENDPOINTS = 2_000
 
-_APP_CLASSES = {"FastAPI": FASTAPI, "Flask": FLASK}
+_ROUTER_CLASSES = {
+    "APIRouter": FASTAPI, "FastAPI": FASTAPI, "Blueprint": FLASK, "Flask": FLASK,
+}
+_PREFIX_KEYWORDS = {"APIRouter": "prefix", "Blueprint": "url_prefix"}
 _VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+_MOUNT_CALLS = {"include_router": "prefix", "register_blueprint": "url_prefix"}
+_ROUTERISH_RE = re.compile(
+    r"^(?:app|api|router|bp|blueprint|\w+_router|\w+_bp|\w+_blueprint|\w+_api|\w+_app)$",
+)
 _SKIP_DIRS = frozenset({
     "tests", "test", "testing", "fixtures", "examples", "docs", "scripts", "migrations",
     "venv", ".venv", "site-packages", "node_modules", "build", "dist",
@@ -42,7 +61,7 @@ _FLASK_CONVERTER_RE = re.compile(
     r"<(?:(?P<conv>[A-Za-z_]\w*)(?:\([^)]*\))?:)?(?P<name>[A-Za-z_]\w*)>",
 )
 _QUICK_RE = re.compile(
-    rb"FastAPI|Flask|\.(?:route|get|post|put|patch|delete)\(",
+    rb"APIRouter|FastAPI|Blueprint|Flask|\.(?:route|get|post|put|patch|delete)\(",
 )
 _PATH_PARAM_RE = re.compile(r"\{(?P<name>[A-Za-z_]\w*):path\}$")
 
@@ -127,8 +146,11 @@ def join_path(*parts: str) -> str:
 
 @dataclass
 class _Facts:
-    #: variable -> framework, for each ``FastAPI()`` / ``Flask()`` built in the file
-    apps: dict[str, str] = field(default_factory=dict)
+    #: variable -> (framework, prefix or ``None`` when the prefix is not literal)
+    routers: dict[str, tuple[str, Optional[str]]] = field(default_factory=dict)
+    mounts: list[dict[str, Any]] = field(default_factory=list)
+    #: local name -> [module, imported name or ``None``, relative level]
+    imports: dict[str, list[Any]] = field(default_factory=dict)
     decorated: list[Any] = field(default_factory=list)
 
 
@@ -144,22 +166,110 @@ def _callee_name(call: Any) -> Optional[str]:
     return None
 
 
+def _prefix_of(call: Any, keyword: Optional[str]) -> Optional[str]:
+    """The literal prefix a router constructor or mount names; ``""`` when absent."""
+    if keyword is None:
+        return ""
+    _, keywords = _call_parts(call)
+    node = keywords.get(keyword)
+    if node is None:
+        return ""
+    return _literal(node)
+
+
 def _note_assignment(node: Any, facts: _Facts) -> None:
     left = node.child_by_field_name("left")
     right = node.child_by_field_name("right")
     if left is None or right is None or left.type != "identifier" or right.type != "call":
         return
-    framework = _APP_CLASSES.get(_callee_name(right) or "")
-    if framework is not None:
-        facts.apps[_text(left)] = framework
+    name = _callee_name(right)
+    if name in _ROUTER_CLASSES:
+        facts.routers[_text(left)] = (
+            _ROUTER_CLASSES[name], _prefix_of(right, _PREFIX_KEYWORDS.get(name)),
+        )
+
+
+def _child_ref(node: Any) -> Optional[dict[str, str]]:
+    if node.type == "identifier":
+        return {"var": _text(node)}
+    if node.type == "attribute":
+        obj = node.child_by_field_name("object")
+        attr = node.child_by_field_name("attribute")
+        if obj is not None and attr is not None and obj.type == "identifier":
+            return {"obj": _text(obj), "attr": _text(attr)}
+    return None
+
+
+def _note_mount(call: Any, facts: _Facts) -> None:
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "attribute":
+        return
+    attr = fn.child_by_field_name("attribute")
+    parent = fn.child_by_field_name("object")
+    if attr is None or parent is None or parent.type != "identifier":
+        return
+    keyword = _MOUNT_CALLS.get(_text(attr))
+    if keyword is None:
+        return
+    positional, _ = _call_parts(call)
+    ref = _child_ref(positional[0]) if positional else None
+    if ref is None:
+        return
+    facts.mounts.append({
+        "parent": _text(parent), "child": ref, "prefix": _prefix_of(call, keyword),
+    })
+
+
+def _dotted(node: Any) -> str:
+    return "".join(_text(child) for child in node.children)
+
+
+def _note_import_from(node: Any, facts: _Facts) -> None:
+    module = node.child_by_field_name("module_name")
+    if module is None:
+        return
+    level = 0
+    dotted = ""
+    if module.type == "relative_import":
+        for child in module.children:
+            if child.type == "import_prefix":
+                level = _text(child).count(".")
+            elif child.type == "dotted_name":
+                dotted = _dotted(child)
+    else:
+        dotted = _dotted(module)
+    for name in node.children_by_field_name("name"):
+        if name.type == "aliased_import":
+            real = name.child_by_field_name("name")
+            alias = name.child_by_field_name("alias")
+            if real is not None and alias is not None:
+                facts.imports[_text(alias)] = [dotted, _dotted(real), level]
+        elif name.type == "dotted_name":
+            facts.imports[_dotted(name)] = [dotted, _dotted(name), level]
+
+
+def _note_import(node: Any, facts: _Facts) -> None:
+    for name in node.children_by_field_name("name"):
+        if name.type == "aliased_import":
+            real = name.child_by_field_name("name")
+            alias = name.child_by_field_name("alias")
+            if real is not None and alias is not None:
+                facts.imports[_text(alias)] = [_dotted(real), None, 0]
 
 
 def _collect(root: Any) -> _Facts:
     facts = _Facts()
     for node in _walk(root):
-        if node.type == "assignment":
+        kind = node.type
+        if kind == "assignment":
             _note_assignment(node, facts)
-        elif node.type == "decorated_definition":
+        elif kind == "call":
+            _note_mount(node, facts)
+        elif kind == "import_from_statement":
+            _note_import_from(node, facts)
+        elif kind == "import_statement":
+            _note_import(node, facts)
+        elif kind == "decorated_definition":
             facts.decorated.append(node)
     return facts
 
@@ -205,8 +315,9 @@ def _route_of(decorator: Any, handler: Any, facts: _Facts) -> Optional[_Route]:
     attr, var = _text(attr_node), _text(obj)
     if attr not in _VERBS and attr not in ("route", "api_route"):
         return None
-    framework = facts.apps.get(var)
-    if framework is None:
+    if var not in facts.routers and not (
+        var in facts.imports or _ROUTERISH_RE.match(var)
+    ):
         return None
     positional, keywords = _call_parts(call)
     path = _literal(positional[0] if positional else keywords.get("path"))
@@ -214,6 +325,10 @@ def _route_of(decorator: Any, handler: Any, facts: _Facts) -> Optional[_Route]:
     name = handler.child_by_field_name("name")
     if path is None or not methods or name is None:
         return None
+    framework = (
+        facts.routers[var][0] if var in facts.routers
+        else (FLASK if attr == "route" else FASTAPI)
+    )
     return _Route(
         var, methods, path, decorator.start_point[0] + 1, call.end_point[0] + 1,
         _text(name), handler.start_point[0] + 1, framework,
@@ -262,10 +377,10 @@ def extract(
     language: str,
     is_test: bool,
 ) -> int:
-    """Append route ``Endpoint`` nodes and ``HANDLES`` edges; return how many nodes.
+    """Append route ``Endpoint`` nodes, ``HANDLES`` edges and a ``py_map`` node.
 
-    A file whose source does not mention an application class or a route
-    decorator is skipped without being walked.
+    Returns how many nodes were appended.  A file whose source does not mention
+    a router class or a route decorator is skipped without being walked.
     """
     if is_test or any(part in _SKIP_DIRS for part in rel_path.split("/")[:-1]):
         return 0
@@ -279,11 +394,13 @@ def extract(
     for route in routes:
         if counter >= MAX_ENDPOINTS:
             break
+        declared = facts.routers.get(route.var)
+        prefix = declared[1] if declared else ""
         converted, catch_all = convert_path(route.path)
-        local = join_path(converted)
         source_qn = _handler_qn(route, file_path, functions)
         for method in route.methods:
             counter += 1
+            local = join_path(prefix or "", converted) if prefix is not None else converted
             name = f"{route.handler}@{route.framework}[{counter}] {method} {local}"
             meta: dict[str, Any] = {
                 "annotation": route.framework,
@@ -293,7 +410,11 @@ def extract(
                 "framework": route.framework,
                 "origin": "py",
                 "py_route": True,
+                "router_var": route.var,
+                "route_path": converted,
             }
+            if prefix is None:
+                meta["prefix_dynamic"] = True
             if catch_all:
                 meta["catch_all"] = True
             nodes.append(node_cls(
@@ -306,4 +427,16 @@ def extract(
                 line=route.line, extra=meta,
             ))
             emitted += 1
+    if facts.routers or facts.mounts or any(r.var in facts.imports for r in routes):
+        nodes.append(node_cls(
+            kind="Endpoint", name=f"{file_path}@py-routes-map", file_path=file_path,
+            line_start=1, line_end=max(1, source.count(b"\n") + 1), language=language,
+            extra={
+                "role": MAP_ROLE, "origin": "py",
+                "routers": {k: list(v) for k, v in facts.routers.items()},
+                "mounts": facts.mounts[:MAX_ENDPOINTS],
+                "imports": facts.imports,
+            },
+        ))
+        emitted += 1
     return emitted
