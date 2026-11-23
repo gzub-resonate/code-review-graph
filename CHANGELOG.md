@@ -4,6 +4,14 @@
 
 ### Added
 
+- `pr_blast_radius_tool` gives the blast radius of a pull request from its changed files, so files the
+  pull request adds are included although the graph, built from the default branch, has never seen
+  them. It reads the files from Git (`pr=<number>` fetches `refs/pull/<n>/head` into `refs/crg/`),
+  parses them in memory and compares them with the base graph, then reports per file the symbols
+  changed, added and removed and what reaches them, the routes added or removed, the endpoints
+  affected with the client calls in other registered repos that reach them, migrations the pull
+  request adds, and changed members no test names. Nothing is written to the graph. A stacked pull
+  request names its parent as `base`.
 - `cross_repo_requests_tool` no longer reads and joins every repo's `Endpoint`
   nodes on each call. A build or update now stores each repo's client calls and
   server endpoints, FastAPI and Flask router prefixes already joined, in the
