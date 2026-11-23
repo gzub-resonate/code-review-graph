@@ -94,6 +94,9 @@ A synthesised node for a Spring application event, created after the build by
 `event_resolver.py` from `PUBLISHES` and `HANDLES` edges. Its `file_path` is the placeholder
 `event` and `extra` carries `{"event_type": ..., "virtual": true}`.
 
+### Dockerfile stage
+A build stage in a `Dockerfile`, `Dockerfile.*`, `*.Dockerfile` or `Containerfile` is a `Class` node named `stage:<alias>`, or `stage:<index>` when it has no alias. `extra` holds `dockerfile_type: "stage"`, `stage_index`, `stage_name` and `base_image` (the `FROM` image as `name[:tag][@digest]`, without credentials or query; `None` when it uses a build argument). Only `FROM` and `COPY --from` are read; `ARG`, `ENV` and `LABEL` values never enter the graph.
+
 ### YamlPath
 A path-addressable mapping key or sequence shape parsed from generic `.yml` / `.yaml` files. Repeated sequence entries are aggregated under `[*]` paths with bounded occurrence/range samples, allowing similarly shaped files to be compared without one graph node per list item. Scalar values are deliberately discarded.
 
@@ -169,13 +172,13 @@ names the class the call went through. Both are `INFERRED`.
 |---|---|---|
 | CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`) |
 | IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package). An HTML `<script src>`, a Liquid `render` or `include` and an XSLT `xsl:import` or `xsl:include` are imports too |
-| IMPORTS_FROM (infrastructure) | file -> `external:github-actions:<owner/repo[/path]>`, `external:docker-image:<name>` | Workflow `uses`. Not a node: the target is a name outside the repository, and the version, tag or ref is in `extra`. `dynamic` targets (`external:github-actions:dynamic`) hold an expression or a reference that could not be reduced safely; no text is stored. URL credentials, fragments and query strings other than `ref` and `version` are never stored. See [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md) |
+| IMPORTS_FROM (infrastructure) | file -> `external:github-actions:<owner/repo[/path]>`, `external:docker-image:<name>` | Workflow `uses`, Dockerfile `FROM` and `COPY --from`. Not a node: the target is a name outside the repository, and the version, tag or ref is in `extra`. `dynamic` targets (`external:github-actions:dynamic`, `external:docker-image:dynamic`) hold an expression or a reference that could not be reduced safely; no text is stored. URL credentials, fragments and query strings other than `ref` and `version` are never stored. See [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md) |
 | INHERITS | child class -> parent class | |
 | IMPLEMENTS | implementing class -> interface | |
 | CONTAINS | file -> class or function; class -> method | Structural containment |
 | TESTED_BY | function -> test function | |
 | REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment |
-| DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives |
+| DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives, Dockerfile stage to the earlier stage it starts from or copies from |
 | INJECTS | Spring bean -> injected field or constructor parameter type | Spring enrichment |
 | CONSUMES | `@KafkaListener` / `@KafkaHandler` method -> `kafka:<topic>` | Spring Kafka enrichment |
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |

@@ -1,16 +1,17 @@
-"""Reference-shaped strings in infrastructure files: workflow ``uses`` references.
+"""Reference-shaped strings in infrastructure files: workflow ``uses`` and Docker images.
 
 The graph keeps configuration VALUES out (see ``config_keys.py`` and the value-free YAML, JSON
 and Spring parsers). The one exception made here is an allowlist of strings that NAME another
-unit of code: a GitHub Actions ``uses:`` reference. Each is parsed into its parts and stored as
-an ``IMPORTS_FROM`` edge to a stable external target, so a question such as "which repositories
-call this shared workflow" has an answer in the graph.
+unit of code: a GitHub Actions ``uses:`` reference and a Dockerfile base image. Each is parsed
+into its parts and stored as an ``IMPORTS_FROM`` edge to a stable external target, so a question
+such as "which repositories call this shared workflow" has an answer in the graph.
 
-Nothing else is read. ``env``, ``with`` and ``secrets`` are never looked at, so no value in them
-can reach a node or an edge. Nor does a URL credential (``user:password@``, a token), a query
-string other than a ``ref`` or ``version``, or a fragment: they are dropped from every reference
-and the raw remote string is never stored. The helpers here are pure: they take a string and
-return its parts, and the emitters in ``parser.py`` decide where the edges go.
+Nothing else is read. ``env``, ``with``, ``secrets``, ``args``, ``ENV``, ``ARG`` values and
+``LABEL`` are never looked at, so no value in them can reach a node or an edge. Nor does a URL
+credential (``user:password@``, a token), a query string other than a ``ref`` or ``version``, or
+a fragment: they are dropped from every reference and the raw remote string is never stored. The
+helpers here are pure: they take a string and return its parts, and the emitters in
+``parser.py`` decide where the edges go.
 """
 
 from __future__ import annotations
@@ -18,12 +19,17 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-#: Hard cap on the references one file may add. A generated workflow with thousands
-#: of steps stops here, and the file's ``infra_references_truncated`` says so.
+#: Hard cap on the references one file may add. A generated workflow or a Dockerfile with
+#: thousands of stages stops here, and the file's ``infra_references_truncated`` says so.
 MAX_INFRA_REFERENCES_PER_FILE = 500
 
 #: Longest reference string kept. A longer one is not a reference, and is skipped.
 MAX_REFERENCE_CHARS = 512
+
+#: Dockerfile limits. Past either one the rest of the file is not read, and the file node's
+#: ``infra_references_truncated`` says so. Real Dockerfiles are tens of lines.
+MAX_DOCKERFILE_BYTES = 1_048_576
+MAX_DOCKERFILE_LINES = 2_000
 
 #: Target prefixes. A reference to code outside the repository is
 #: ``<prefix><name>``; the ref, tag or digest stays in the edge's ``extra``, so every
@@ -35,6 +41,9 @@ EXTERNAL_DOCKER_IMAGE_PREFIX = "external:docker-image:"
 #: ``${{ matrix.action }}``. It is never guessed, and its text is not stored.
 DYNAMIC_GITHUB_ACTIONS_TARGET = EXTERNAL_GITHUB_ACTIONS_PREFIX + "dynamic"
 
+#: Target of an image reference that uses a build argument or variable (``FROM ${BASE}``).
+EXTERNAL_DYNAMIC_DOCKER_TARGET = EXTERNAL_DOCKER_IMAGE_PREFIX + "dynamic"
+
 _OWNER_REPO_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _PATH_PART = re.compile(r"^[A-Za-z0-9_.+~-]+$")
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -42,6 +51,7 @@ _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _REF_VALUE = re.compile(r"^[A-Za-z0-9_.+/-]{1,255}$")
 _TAG_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _DOCKER_NAME = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+_STAGE_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _DIGEST_TAIL = re.compile(
     r"@([A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:[0-9A-Fa-f]{32,})$"
 )
@@ -82,6 +92,10 @@ def is_plain_local_path(text: str) -> bool:
         and not any(ch in text for ch in "?#@")
     )
 
+
+def clean_stage_alias(alias: str) -> str:
+    """A Dockerfile stage alias, or ``""`` when it is not a plain identifier."""
+    return alias if _STAGE_ALIAS.match(alias) else ""
 
 
 def github_actions_target(owner_repo: str, path: str) -> str:
@@ -140,6 +154,14 @@ def docker_image_target(name: str) -> str:
     """The external target of an image *name* from :func:`parse_docker_image`."""
     return EXTERNAL_DOCKER_IMAGE_PREFIX + name
 
+
+def format_docker_image(parts: dict[str, Any]) -> Optional[str]:
+    """``name[:tag][@digest]`` of :func:`parse_docker_image` parts, ``None`` when dynamic."""
+    if not parts["name"]:
+        return None
+    return parts["name"] + (f":{parts['tag']}" if parts["tag"] else "") + (
+        f"@{parts['digest']}" if parts["digest"] else ""
+    )
 
 
 def parse_github_uses(raw: str, scope: str) -> Optional[dict[str, Any]]:
@@ -224,6 +246,17 @@ def is_github_workflow_path(parts: tuple[str, ...]) -> Optional[int]:
             return github
     return None
 
+
+def is_dockerfile_name(name: str) -> bool:
+    """Whether a file name is a Dockerfile: ``Dockerfile``, ``Dockerfile.*``, ``*.Dockerfile``.
+
+    ``Containerfile`` (Podman and Buildah) is the same format and is matched the same way.
+    """
+    lower = name.lower()
+    for stem in ("dockerfile", "containerfile"):
+        if lower == stem or lower.startswith(stem + ".") or lower.endswith("." + stem):
+            return True
+    return False
 
 
 _GETTER_PREFIX = re.compile(r"^([A-Za-z0-9]+)::")

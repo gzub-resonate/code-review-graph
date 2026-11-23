@@ -47,10 +47,17 @@ from .constants import (
 from .custom_languages import CustomLanguage, load_custom_languages
 from .infra_references import (
     DYNAMIC_GITHUB_ACTIONS_TARGET,
+    EXTERNAL_DYNAMIC_DOCKER_TARGET,
+    MAX_DOCKERFILE_BYTES,
+    MAX_DOCKERFILE_LINES,
     MAX_INFRA_REFERENCES_PER_FILE,
+    clean_stage_alias,
     docker_image_target,
+    format_docker_image,
     github_actions_target,
+    is_dockerfile_name,
     is_github_workflow_path,
+    parse_docker_image,
     parse_github_uses,
 )
 from .npm_alias_resolver import NpmAliasResolver
@@ -1790,6 +1797,7 @@ def _builtin_language_names() -> frozenset[str]:
     """
     return (
         frozenset(EXTENSION_TO_LANGUAGE.values())
+        | frozenset({"dockerfile"})  # detected by file name, not extension
         | frozenset(_CLASS_TYPES)
         | frozenset(_FUNCTION_TYPES)
         | frozenset(_IMPORT_TYPES)
@@ -4008,6 +4016,8 @@ class CodeParser:
         """
         if path.name.lower().endswith(".blade.php"):
             return "blade"
+        if is_dockerfile_name(path.name):
+            return "dockerfile"
         suffix = path.suffix.lower()
         lang = self._extension_map.get(suffix)
         if lang == "yaml" and _is_ansible_path(path):
@@ -4216,6 +4226,10 @@ class CodeParser:
         # dependencies still contribute useful graph structure.
         if language == "robot":
             return self._parse_robot(path, source)
+
+        # Dockerfiles: stages and the images they start from or copy from.
+        if language == "dockerfile":
+            return self._parse_dockerfile(path, source)
 
         # SQL: dedicated parser — tree-sitter for tables/views/functions +
         # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
@@ -11591,6 +11605,150 @@ class CodeParser:
         if not parts.get("owner_repo"):
             return DYNAMIC_GITHUB_ACTIONS_TARGET
         return github_actions_target(parts["owner_repo"], parts.get("path", ""))
+
+    def _parse_dockerfile(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index the build stages of a Dockerfile and the images they reference.
+
+        Only ``FROM`` and ``COPY --from`` are read. A stage is a ``Class`` node named
+        ``stage:<alias>`` (``stage:<index>`` without an alias). ``FROM <image>`` and
+        ``COPY --from=<image>`` give an ``IMPORTS_FROM`` edge from the file to
+        ``external:docker-image:<name>`` with ``tag``, ``digest`` and ``stage`` in ``extra``;
+        ``FROM <stage>`` and ``COPY --from=<stage or index>`` give a ``DEPENDS_ON`` edge from
+        stage to stage. An image that uses a build argument (``FROM ${BASE}``) is recorded
+        as dynamic with no name and is not resolved. The image text itself is never stored:
+        only its name, tag and digest, without credentials or query. ``ARG``, ``ENV``, ``LABEL`` and
+        every other instruction are never read.
+        """
+        file_path = normalize_file_path(path)
+        file_extra: dict[str, Any] = {"values_indexed": False}
+        line_count = source.count(b"\n") + 1
+        nodes = [NodeInfo(
+            kind="File", name=file_path, file_path=file_path, line_start=1,
+            line_end=line_count, language="dockerfile", extra=file_extra,
+        )]
+        edges: list[EdgeInfo] = []
+        if len(source) > MAX_DOCKERFILE_BYTES:
+            file_extra["infra_references_truncated"] = True
+            return nodes, edges
+        parser = self._get_parser("dockerfile")
+        if parser is None:
+            return nodes, edges
+        try:
+            root = parser.parse(source).root_node
+        except (ValueError, RuntimeError) as exc:  # pragma: no cover - defensive
+            logger.debug("Dockerfile parse error in %s: %s", path, exc)
+            return nodes, edges
+
+        def text(node: Any) -> str:
+            return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+        stages: list[NodeInfo] = []
+        stage_by_alias: dict[str, int] = {}
+        references = 0
+
+        def stage_qualified(index: int) -> str:
+            return self._qualify(stages[index].name, file_path, None)
+
+        def add_image(
+            raw: str, line: int, resolution: str, current: Optional[int], via: str,
+        ) -> None:
+            image = parse_docker_image(raw)
+            extra: dict[str, Any] = {"resolution": resolution, "via": via, **image}
+            if current is not None:
+                extra["stage"] = stages[current].extra.get("stage_name") or None
+                extra["stage_index"] = current
+            target = (
+                docker_image_target(image["name"]) if image["name"]
+                else EXTERNAL_DYNAMIC_DOCKER_TARGET
+            )
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM", source=file_path, target=target,
+                file_path=file_path, line=line, extra=extra,
+            ))
+
+        def add_stage_edge(source_index: int, target_index: int, line: int, via: str) -> None:
+            edges.append(EdgeInfo(
+                kind="DEPENDS_ON", source=stage_qualified(source_index),
+                target=stage_qualified(target_index), file_path=file_path, line=line,
+                extra={
+                    "resolution": "dockerfile_stage", "via": via,
+                    "stage": stages[target_index].extra.get("stage_name") or None,
+                    "stage_index": target_index,
+                },
+            ))
+
+        instructions = [
+            c for c in root.children if c.type in ("from_instruction", "copy_instruction")
+        ]
+        truncated = False
+        for node in instructions:
+            line = node.start_point[0] + 1
+            if line > MAX_DOCKERFILE_LINES or references >= MAX_INFRA_REFERENCES_PER_FILE:
+                truncated = True
+                break
+            if node.type == "from_instruction":
+                spec = next((c for c in node.children if c.type == "image_spec"), None)
+                alias_node = next((c for c in node.children if c.type == "image_alias"), None)
+                if spec is None:
+                    continue
+                raw = text(spec).strip()
+                alias = clean_stage_alias(
+                    text(alias_node).strip() if alias_node is not None else ""
+                )
+                index = len(stages)
+                key = alias.lower()
+                name = f"stage:{alias}" if alias and key not in stage_by_alias else f"stage:{index}"
+                stage = NodeInfo(
+                    kind="Class", name=name, file_path=file_path, line_start=line,
+                    line_end=node.end_point[0] + 1, language="dockerfile",
+                    extra={
+                        "dockerfile_type": "stage", "stage_index": index,
+                        "stage_name": alias,
+                        "base_image": format_docker_image(parse_docker_image(raw)),
+                    },
+                )
+                stages.append(stage)
+                if alias and key not in stage_by_alias:
+                    stage_by_alias[key] = index
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path,
+                    target=stage_qualified(index), file_path=file_path, line=line,
+                ))
+                references += 1
+                earlier = stage_by_alias.get(raw.lower())
+                if earlier is not None and earlier < index:
+                    add_stage_edge(index, earlier, line, "from")
+                elif raw.lower() != "scratch":
+                    add_image(raw, line, "dockerfile_from", index, "from")
+            else:
+                param = next(
+                    (c for c in node.children
+                     if c.type == "param" and text(c).startswith("--from=")),
+                    None,
+                )
+                if param is None:
+                    continue
+                raw = text(param)[len("--from="):].strip()
+                current = len(stages) - 1 if stages else None
+                references += 1
+                earlier = stage_by_alias.get(raw.lower())
+                if earlier is None and raw.isdigit() and int(raw) < len(stages):
+                    earlier = int(raw)
+                if current is not None and earlier is not None and earlier < current:
+                    add_stage_edge(current, earlier, line, "copy_from")
+                elif raw:
+                    add_image(raw, line, "dockerfile_copy_from", current, "copy_from")
+        for stage in stages:
+            if stage.line_end > line_count:  # pragma: no cover - defensive
+                stage.line_end = line_count
+        nodes.extend(stages)
+        if truncated:
+            file_extra["infra_references_truncated"] = True
+        return nodes, edges
 
     def _parse_json(
         self,

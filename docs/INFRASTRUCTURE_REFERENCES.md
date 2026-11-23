@@ -1,7 +1,8 @@
 # Infrastructure References
 
-The graph can answer "which files call this shared workflow or action?" for GitHub Actions.
-The parser stores the strings that name another unit of code, and nothing else.
+The graph can answer "which files call this shared workflow or build from this base image?"
+for GitHub Actions and Dockerfiles. The parser stores the strings that name another unit of
+code, and nothing else.
 
 ## What is stored, and what is not
 
@@ -12,11 +13,13 @@ string per construct, parsed into its parts. Everything else in the file is neve
 | File | Read | Never read |
 |---|---|---|
 | `.github/workflows/*.yml`, `.github/actions/**/action.yml` | `jobs.<id>.uses`, `steps[].uses` | `with`, `env`, `secrets`, `run`, `if`, every other key |
+| `Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile` | `FROM` image and stage alias, `COPY --from` | `ARG`, `ENV`, `LABEL`, `RUN`, build arguments and every other instruction |
 
-A reference that is an expression (`${{ matrix.action }}`) is marked `dynamic` and is never evaluated or resolved. Its text is
+A reference that is an expression (`${{ matrix.action }}`, `FROM ${BASE}`) is marked `dynamic` and is never evaluated or resolved. Its text is
 not stored. A string longer than 512 characters, with a line break or with a control character
 is not a reference and is skipped. A file adds at most 500 references (`infra_references_truncated` on
-its `File` node says when more were left out). A malformed file never fails a build; it simply adds no reference.
+its `File` node says when more were left out), and a Dockerfile is read up to 2,000 lines and
+1 MB. A malformed file never fails a build; it simply adds no reference.
 
 ## Credentials and query strings are never stored
 
@@ -46,7 +49,8 @@ one target and a query by target finds them all.
 |---|---|
 | `external:github-actions:<owner/repo[/path]>` | An action or reusable workflow. `owner/repo` is lower case. `path` is the part inside the repository, such as `.github/workflows/build.yml` or `init` in `github/codeql-action/init` |
 | `external:github-actions:dynamic` | A `uses` whose repository part is an expression |
-| `external:docker-image:<name>` | An image from a workflow `docker://` reference. The name keeps the registry and a port (`registry.example.com:5000/base/python`) and is lower case. `python` and `docker.io/library/python` stay two names |
+| `external:docker-image:<name>` | An image from a Dockerfile `FROM` or `COPY --from`, or from a workflow `docker://` reference. The name keeps the registry and a port (`registry.example.com:5000/base/python`) and is lower case. `python` and `docker.io/library/python` stay two names |
+| `external:docker-image:dynamic` | An image that uses a build argument or variable |
 
 A local reference points at the file it names when that file exists in the repository: a
 workflow `uses: ./.github/workflows/x.yml`, a local action directory (its `action.yml`). When the file is missing the edge keeps the relative path as written. Local references are only resolved
@@ -57,15 +61,22 @@ excluded or ignored file; any other plain local path is kept as written.
 
 | Key | Where | Value |
 |---|---|---|
-| `resolution` | all | `github_actions_uses` |
+| `resolution` | all | `github_actions_uses`, `dockerfile_from` or `dockerfile_copy_from` |
 | `dynamic` | all | True when the reference holds an expression or could not be reduced safely. No text is stored |
 | `kind` | GitHub Actions | `action`, `reusable_workflow`, `local` or `docker` |
 | `owner_repo`, `path` | GitHub Actions | The parts of a remote reference |
 | `ref`, `ref_type` | GitHub Actions | The text after `@` when it is a plain ref, and `sha` (40 hex digits), `ref` or `dynamic` (no `ref` then) |
 | `scope`, `job` | GitHub Actions | `job` or `step`, and the job id |
 | `name`, `registry`, `tag`, `digest` | Docker | The parts of an image reference, without credentials or query (`name` is `None` when dynamic) |
+| `via` | Docker | `from` or `copy_from` |
+| `stage`, `stage_index` | Docker | The build stage the reference is in |
 
 A workflow's `File` node also lists its references in `extra.github_actions_uses`.
+
+A Dockerfile build stage is a `Class` node named `stage:<alias>` (`stage:<index>` without an
+alias), with `extra.dockerfile_type = "stage"`, `stage_index`, `stage_name` and `base_image`
+(`name[:tag][@digest]` of the `FROM` image, without credentials; `None` when dynamic). `FROM <earlier stage>` and
+`COPY --from=<earlier stage or index>` are `DEPENDS_ON` edges between stages.
 
 ## Querying
 
