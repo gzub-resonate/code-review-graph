@@ -83,10 +83,11 @@ set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not
 ### Ember roles
 `ember_kind` in a File or Class node's `extra` names the role of an Ember module: `service`,
 `route`, `controller`, `component`, `model`, `adapter`, `serializer`, `helper`, `modifier`,
-`mixin` or `transform`. The module path decides first (`app/services/x.js`, `addon/...`, pods
-such as `app/posts/route.js`, a dummy app under `tests/dummy/app`); the base class
-(`Service.extend`, `extends Component`, imported from an Ember module) decides only where the
-path says nothing. Files under a test directory never get a role.
+`mixin`, `transform` or `template`. The module path decides first (`app/services/x.js`,
+`addon/...`, pods such as `app/posts/route.js`, a dummy app under `tests/dummy/app`); the base
+class (`Service.extend`, `extends Component`, imported from an Ember module) decides only where
+the path says nothing. Files under a test directory never get a role. `.hbs` files are language
+`handlebars`.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`

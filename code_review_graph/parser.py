@@ -32,7 +32,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
-from . import ember_extract
+from . import ember_extract, ember_template
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
     IMPORT_CONTEXT_DEFERRED,
@@ -1312,6 +1312,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".robot": "robot",
     ".resource": "robot",
     ".liquid": "liquid",
+    ".hbs": "handlebars",
 }
 
 # ``.h`` is shared by C and C++. Keep C as the extension default, then promote
@@ -4160,6 +4161,8 @@ class CodeParser:
             return self._parse_blade(path, source)
         if language == "liquid":
             return self._parse_liquid(path, source)
+        if language == "handlebars":
+            return self._parse_handlebars(path, source)
 
         # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
         if language == "vue":
@@ -4804,6 +4807,56 @@ class CodeParser:
                 role = facts.class_roles.get(node.name) or path_role
                 if role:
                     node.extra["ember_kind"] = role
+
+    def _parse_handlebars(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index an Ember template: a File node and what it invokes by name.
+
+        Each distinct component, helper or modifier name becomes one
+        ``IMPORTS_FROM`` edge with an ``ember:<ref>:<name>`` placeholder target
+        that ``ember_resolver`` binds to a file after the build. Template text,
+        attribute values and string literals are never stored.
+        """
+        file_path = normalize_file_path(path)
+        extra: dict = {}
+        role = ember_extract.role_from_path(file_path)
+        if role is not None or "/templates/" in file_path or file_path.endswith("/template.hbs"):
+            extra["ember_kind"] = "template"
+        nodes = [
+            NodeInfo(
+                kind="File",
+                name=file_path,
+                file_path=file_path,
+                line_start=1,
+                line_end=source.count(b"\n") + 1,
+                language="handlebars",
+                is_test=self._is_test_path(file_path),
+                extra=extra,
+            ),
+        ]
+        edges: list[EdgeInfo] = []
+        text = source.decode("utf-8", errors="replace")
+        for inv in ember_template.scan(text):
+            edge_extra: dict = {
+                "framework": "ember",
+                "ember_ref": inv.ref,
+                "ember_name": inv.name,
+                "ember_syntax": inv.syntax,
+            }
+            if inv.count > 1:
+                edge_extra["occurrences"] = inv.count
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path,
+                target=f"ember:{inv.ref}:{inv.name}",
+                file_path=file_path,
+                line=inv.line,
+                extra=edge_extra,
+            ))
+        return nodes, edges
 
     def _parse_vue(
         self, path: Path, source: bytes,

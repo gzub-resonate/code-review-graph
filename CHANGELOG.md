@@ -5,10 +5,12 @@
 ### Added
 
 - Ember.js modules are given a role, `ember_kind` (`service`, `route`, `controller`,
-  `component`, `model`, `adapter`, `serializer`, `helper`, `modifier`, `mixin` or
-  `transform`), from their path and base class. Service injections and Ember Data
-  names are recorded by name for a later step to bind. No literal value is stored.
-  Run `code-review-graph build` once to refresh an existing graph.
+  `component`, `model`, `adapter`, `serializer`, `helper`, `modifier`, `mixin`,
+  `transform` or `template`), from their path and base class, and `.hbs` templates
+  are indexed as the `handlebars` language. Service injections, Ember Data names
+  and the components a template invokes are recorded by name for a later step to
+  bind. No template text or literal value is stored. Run `code-review-graph build`
+  once to refresh an existing graph.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

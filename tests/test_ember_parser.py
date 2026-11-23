@@ -226,3 +226,13 @@ export default Service.extend({
     blob = repr([(n.name, n.extra) for n in nodes]) + repr([(e.target, e.extra) for e in edges])
     assert "very-secret" not in blob and "internal.example" not in blob
     assert "secret-id-123" not in blob
+
+
+def test_hbs_edges_carry_names_only(tmp_path: Path) -> None:
+    nodes, edges = _parse(tmp_path, "app/templates/p.hbs",
+                          '<FooBar @title="leaky-label" class="leaky-class"/>{{x-y "leaky-arg"}}')
+    blob = repr([(n.name, n.extra) for n in nodes]) + repr([(e.target, e.extra) for e in edges])
+    assert "leaky" not in blob
+    assert {e.target for e in edges} == {"ember:component:foo-bar", "ember:invocable:x-y"}
+    assert nodes[0].language == "handlebars"
+    assert nodes[0].extra["ember_kind"] == "template"

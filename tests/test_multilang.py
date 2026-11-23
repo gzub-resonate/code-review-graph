@@ -6213,3 +6213,28 @@ class TestAnsibleMetaParsing:
     def test_depends_on_name_key_collections(self):
         dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
         assert "security.hardening" in dep_targets
+
+
+class TestEmberTemplateParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.path = FIXTURES / "ember" / "classic" / "app" / "templates" / "projects.hbs"
+        self.nodes, self.edges = self.parser.parse_file(self.path)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(self.path) == "handlebars"
+        assert self.parser.detect_language(Path("x.handlebars")) is None
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert file_nodes[0].language == "handlebars"
+
+    def test_invocations_are_imports_with_placeholders(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert targets == {
+            "ember:component:task-card",
+            "ember:invocable:project-link",
+            "ember:modifier:did-render-thing",
+            "ember:invocable:t",
+        }
+
+    def test_no_grammar_is_needed_and_no_extra_nodes_are_made(self):
+        assert [n.kind for n in self.nodes] == ["File"]
