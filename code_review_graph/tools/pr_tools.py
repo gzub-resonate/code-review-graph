@@ -266,6 +266,9 @@ def _build_result(
             row["note"] = report.note
         files.append(row)
 
+    if found.get("reach_truncated"):
+        notes.append("The reach walks hit the per-request visit limit, so `reached` counts are "
+                     "lower bounds.")
     unparsed = sum(1 for r in reports if not r.parsed)
     if unparsed:
         notes.append(f"{unparsed} file(s) could not be parsed (see each file's note); they "
@@ -301,6 +304,9 @@ def _build_result(
         "external_callers": external[:_MAX_CALLERS_SHOWN],
         "external_callers_total": len(external),
         "external_info": external_info,
-        "schema_changes": found["schema"][:_MAX_ENDPOINTS_SHOWN],
+        "schema_changes": [
+            {key: _sanitize_name(value) for key, value in row.items()}
+            for row in found["schema"][:_MAX_ENDPOINTS_SHOWN]
+        ],
         "notes": notes,
     }
