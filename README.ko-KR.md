@@ -237,11 +237,13 @@ code-review-graph build              # once: new file types and fixes reach only
   <img src="diagrams/diagram9_language_coverage.png" alt="분류별 언어 지원: 웹, 백엔드, 시스템, 모바일, 스크립팅, 셸, 도메인, 설정, 기타, 그리고 Jupyter와 Databricks 노트북" width="90%" />
 </p>
 
-파서는 함수, 클래스, 임포트, 호출 지점, 상속, 테스트를 추출합니다. 문법이 있는 곳에서는 Tree-sitter를, 그 밖에는 목적에 맞춘 폴백을 씁니다. 지원: Python, JavaScript/TypeScript/TSX(`.mjs`, `.cjs`, `.mts`, `.cts` 포함), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin(`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, 셸 스크립트, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL(Oracle)과 dbt 모델, Terraform/OpenTofu(`.tf`, 그리고 `.hcl` 파일 안의 Terraform 블록. Terraform 블록이 없는 `.hcl` 파일은 파일 노드만 남김), Ansible YAML(플레이북, 롤, 태스크), Spring Boot 애플리케이션 설정(`application.properties`, `application.yml`, `application.yaml`과 그 `application-<profile>` 변형. 키 이름과 값의 타입만 기록하고 값은 절대 기록하지 않음), 값 없이 구조만 담는 일반 YAML(`locales/` 같은 폴더의 번역 파일은 파일 노드만 생성), XSLT 스타일시트(`.xsl`, `.xslt`), 값 없이 구조만 담는 JSON(`.json`. 번역, 테스트, 문서, 예제, 데이터 파일은 파일 노드만 남기고 lock 파일은 건너뜀), Vue/Svelte SFC, HTML 페이지(`.html`, `.htm`. 인라인 스크립트, 그리고 id가 있는 `div`, `section`, `article` 블록을 `DocSection` 노드로), Astro 파일(TypeScript 문법으로 파싱), Jupyter와 Databricks 노트북(`.ipynb`, 그리고 Databricks `.py` 내보내기), Perl XS 파일(`.xs`), Robot Framework 파일(`.robot`, `.resource`), Liquid 템플릿(`.liquid`). 다른 `.properties` 파일은 소스 코드로 취급하지 않습니다.
+파서는 함수, 클래스, 임포트, 호출 지점, 상속, 테스트를 추출합니다. 문법이 있는 곳에서는 Tree-sitter를, 그 밖에는 목적에 맞춘 폴백을 씁니다. 지원: Python, JavaScript/TypeScript/TSX(`.mjs`, `.cjs`, `.mts`, `.cts` 포함), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin(`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, 셸 스크립트, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL(Oracle)과 dbt 모델, Terraform/OpenTofu(`.tf`, 그리고 `.hcl` 파일 안의 Terraform 블록. Terraform 블록이 없는 `.hcl` 파일은 파일 노드만 남김), Ansible YAML(플레이북, 롤, 태스크), Spring Boot 애플리케이션 설정(`application.properties`, `application.yml`, `application.yaml`과 그 `application-<profile>` 변형. 키 이름과 값의 타입만 기록하고 값은 절대 기록하지 않음), 값 없이 구조만 담는 일반 YAML(`locales/` 같은 폴더의 번역 파일은 파일 노드만 생성), XSLT 스타일시트(`.xsl`, `.xslt`), 값 없이 구조만 담는 JSON(`.json`. 번역, 테스트, 문서, 예제, 데이터 파일은 파일 노드만 남기고 lock 파일은 건너뜀), Vue/Svelte SFC, HTML 페이지(`.html`, `.htm`. 인라인 스크립트, 그리고 id가 있는 `div`, `section`, `article` 블록을 `DocSection` 노드로), Astro 파일(TypeScript 문법으로 파싱), Jupyter와 Databricks 노트북(`.ipynb`, 그리고 Databricks `.py` 내보내기), Perl XS 파일(`.xs`), Robot Framework 파일(`.robot`, `.resource`), Liquid 템플릿(`.liquid`), Ember Handlebars 템플릿(`.hbs`). 다른 `.properties` 파일은 소스 코드로 취급하지 않습니다.
 
 PHP 프로젝트에는 저장소 범위로 제한된 Composer PSR-4 해석, Blade 템플릿 참조, 그리고 소스에 명시적인 프레임워크 임포트, 모델 상속, 수신자 근거가 드러날 때의 Laravel Route 및 Eloquent 엣지가 추가됩니다. `routes/*.php`의 정적 Laravel 라우트는 리터럴 그룹 접두사까지 포함해 Endpoint 노드와 컨트롤러로 가는 HANDLES 엣지를 만듭니다.
 
 Java 프로젝트에는 Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, OpenFeign 클라이언트 요청, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스에서 대상으로 가는 엣지, Temporal 워크플로와 액티비티 엣지가 추가됩니다. 각 리졸버는 파싱 이후에 실행되며, 주입된 필드나 발행된 이벤트, 워크플로 스텁이 저장소 안에서 보여야 합니다.
+
+Ember.js 프로젝트에는 규칙 기반 해석이 적용됩니다. 모든 표기의 `@service`와 `service()` 주입(`this.get('x')` 호출 포함)은 서비스 파일에, `store.findRecord('post')`와 `belongsTo('post')`는 모델에, `.hbs` 템플릿의 컴포넌트·헬퍼·모디파이어 호출은 해당 파일에, `<app>/...` 형태의 임포트는 가리키는 파일에, `router.js`의 라우트는 이를 처리하는 라우트·컨트롤러·템플릿에 연결됩니다. 리졸버는 파싱 뒤에 실행되며 그래프만 읽고, 템플릿 텍스트나 리터럴 값은 저장하지 않습니다. 자세한 내용은 [docs/EMBER.md](docs/EMBER.md)를 참고하세요.
 
 </details>
 
@@ -416,6 +418,7 @@ jobs:
 | **언어와 노트북 지원** | 위의 [언어 지원](#언어-지원과-노트북)을 보세요. |
 | **프레임워크를 아는 PHP 파싱** | 저장소 범위로 제한된 Composer PSR-4 임포트, Blade 템플릿 참조, 근거에 기반한 Laravel Route에서 컨트롤러로 가는 엣지와 Eloquent 관계 엣지 |
 | **프레임워크를 아는 Java 파싱** | Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, OpenFeign 클라이언트 요청, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스 엣지, Temporal 워크플로와 액티비티 엣지, 그리고 값 없이 색인되는 Spring Boot 설정 키 |
+| **프레임워크를 아는 Ember 파싱** | 서비스와 컨트롤러 주입, Ember Data 모델 이름, 템플릿에서 컴포넌트로의 참조, `<app>/...` 모듈 임포트, `router.js` 라우트를 Ember 이름 규칙으로 연결하며 템플릿 텍스트나 값은 저장하지 않습니다 |
 | **영향 범위 분석** | 변경으로 영향을 받을 법한 함수, 클래스, 파일 |
 | **자동 업데이트 훅** | 편집기 훅, git 훅(커밋 전, 그리고 checkout, merge, rebase 후), watch 모드가 작업 중에 그래프를 갱신 |
 | **시맨틱 검색** | 선택적 벡터 임베딩. sentence-transformers, Google Gemini, MiniMax, Voyage AI 또는 OpenAI 호환 엔드포인트 |

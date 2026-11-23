@@ -131,6 +131,13 @@ class (`Service.extend`, `extends Component`, imported from an Ember module) dec
 the path says nothing. Files under a test directory never get a role. `.hbs` files are language
 `handlebars`.
 
+For an Ember application, `router.js` gives one Endpoint per `this.route(...)` (`this.resource`
+and `this.mount` too), named `route:<full name>`. `extra` holds `framework: "ember"`,
+`ember_kind` (`route` or `mount`), `route_name` (the dotted name, honouring `resetNamespace`),
+`route` (the URL, honouring `path:`), and `path_override`, `path_dynamic` or `reset_namespace`
+when they apply. Route, controller and template modules link to it by `HANDLES` edges
+(`ember_resolver.py`); see [EMBER.md](EMBER.md).
+
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
 edge.
@@ -218,20 +225,20 @@ names the class the call went through. Both are `INFERRED`.
 
 | Kind | Source -> target | Notes |
 |---|---|---|
-| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`). A call through an injected interface with several implementations is bound to one class and records `extra.resolution` (`spring_qualifier`, `spring_primary` or `spring_bean_name`) plus the `extra.qualifier` or `extra.bean_name` it used; an undecidable call stays on the interface method |
-| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package). An HTML `<script src>`, a Liquid `render` or `include` and an XSLT `xsl:import` or `xsl:include` are imports too |
+| CALLS | caller -> called function | A call through an injected Ember service property carries `extra.ember_resolved`, `ember_property` and `ember_method` (`ember_receiver` for `this.get('x').m()`); a method the service file does not define keeps the service as its claimed endpoint. Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`). A call through an injected interface with several implementations is bound to one class and records `extra.resolution` (`spring_qualifier`, `spring_primary` or `spring_bean_name`) plus the `extra.qualifier` or `extra.bean_name` it used; an undecidable call stays on the interface method |
+| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package). An HTML `<script src>`, a Liquid `render` or `include` and an XSLT `xsl:import` or `xsl:include` are imports too. In an Ember app a template's component, helper or modifier invocation is an import (`extra.ember_ref` is `component`, `invocable` for a name that may be either, `helper` or `modifier`; `ember_syntax`; `occurrences` when repeated), a component class imports its template (`extra.ember_link: "colocated_template"`), an import written as `<app>/services/x` is bound to its file (`extra.ember_import_spec` keeps the original), and an addon's `export { default } from '...'` under `app/` is an import (`extra.ember_reexport`) |
 | INHERITS | child class -> parent class | |
 | IMPLEMENTS | implementing class -> interface | |
 | CONTAINS | file -> class or function; class -> method | Structural containment |
 | TESTED_BY | function -> test function | |
-| REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment |
+| REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment. An Ember `store.findRecord('post')`, `belongsTo('post')` or `hasMany('post')` references the model: `extra.ember_ref` is `model`, with `ember_store_method` or `ember_relationship` |
 | DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives |
-| INJECTS | Spring bean -> injected field or constructor parameter type (`extra.qualifier` holds a literal `@Qualifier` value; class nodes carry `spring_bean_name` and `spring_qualifiers`) | Spring enrichment |
+| INJECTS | Spring bean -> injected field or constructor parameter type (`extra.qualifier` holds a literal `@Qualifier` value; class nodes carry `spring_bean_name` and `spring_qualifiers`); Ember class or module -> injected service or controller | Spring enrichment; Ember `extra`: `ember_inject` (`service`, `controller`), `ember_name`, `ember_explicit`, `field_name`, `ember_spelling` (`decorator`, `property`), then `ember_resolution` (`bound`, `unresolved`) and `ember_reason` (`no_module`, `ambiguous`). An unbound target stays `ember:<kind>:<name>` |
 | CONSUMES | `@KafkaListener` / `@KafkaHandler` method -> `kafka:<topic>` | Spring Kafka enrichment |
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
 | DEPENDS_ON_CONFIG | `@ConfigurationProperties` class -> `ConfigProperty` | Spring enrichment |
-| HANDLES | handler -> `Endpoint`; listener -> event | Spring and Laravel enrichment |
+| HANDLES | handler -> `Endpoint`; listener -> event | Spring and Laravel enrichment. Ember: route, controller and template module -> route `Endpoint`, `extra.ember_role` says which |
 | REQUESTS | `@FeignClient` interface method -> client `Endpoint` | Spring Cloud OpenFeign enrichment; read with `requests_of` / `requesters_of` |
 | TRIGGERS | `Scheduler` -> `@Scheduled` method | Spring enrichment |
 | PUBLISHES | method -> Spring application event | Spring enrichment |

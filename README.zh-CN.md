@@ -235,11 +235,13 @@ code-review-graph build              # once: new file types and fixes reach only
   <img src="diagrams/diagram9_language_coverage.png" alt="按类别划分的语言覆盖：Web、后端、系统、移动端、脚本、Shell、领域专用、配置和其他，外加 Jupyter 和 Databricks 笔记本" width="90%" />
 </p>
 
-解析器提取函数、类、导入、调用点、继承和测试：有语法的地方用 Tree-sitter，其他地方用有针对性的回退解析。支持范围：Python、JavaScript/TypeScript/TSX（包括 `.mjs`、`.cjs`、`.mts` 和 `.cts`）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、shell 脚本、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）和 dbt 模型、Terraform/OpenTofu（`.tf`，以及 `.hcl` 文件中的 Terraform 块；不含 Terraform 块的 `.hcl` 文件只保留文件节点）、Ansible YAML（playbook、role、task）、Spring Boot 应用配置（`application.properties`、`application.yml`、`application.yaml` 及其 `application-<profile>` 变体；只记录键名和值的类型，绝不记录值）、不含值的通用 YAML 结构（`locales/` 等文件夹中的翻译文件只生成文件节点）、XSLT 样式表（`.xsl`、`.xslt`）、不含值的 JSON 结构（`.json`；翻译、测试、文档、示例和数据文件只保留文件节点，锁文件会被跳过）、Vue/Svelte 单文件组件、HTML 页面（`.html`、`.htm`；内联脚本，以及带 id 的 `div`、`section` 和 `article` 块作为 `DocSection` 节点）、Astro 文件（用 TypeScript 语法解析）、Jupyter 和 Databricks 笔记本（`.ipynb`，以及 Databricks 导出的 `.py` 文件）、Perl XS 文件（`.xs`）、Robot Framework 文件（`.robot`、`.resource`），以及 Liquid 模板（`.liquid`）。其他 `.properties` 文件不被当作源代码。
+解析器提取函数、类、导入、调用点、继承和测试：有语法的地方用 Tree-sitter，其他地方用有针对性的回退解析。支持范围：Python、JavaScript/TypeScript/TSX（包括 `.mjs`、`.cjs`、`.mts` 和 `.cts`）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、shell 脚本、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）和 dbt 模型、Terraform/OpenTofu（`.tf`，以及 `.hcl` 文件中的 Terraform 块；不含 Terraform 块的 `.hcl` 文件只保留文件节点）、Ansible YAML（playbook、role、task）、Spring Boot 应用配置（`application.properties`、`application.yml`、`application.yaml` 及其 `application-<profile>` 变体；只记录键名和值的类型，绝不记录值）、不含值的通用 YAML 结构（`locales/` 等文件夹中的翻译文件只生成文件节点）、XSLT 样式表（`.xsl`、`.xslt`）、不含值的 JSON 结构（`.json`；翻译、测试、文档、示例和数据文件只保留文件节点，锁文件会被跳过）、Vue/Svelte 单文件组件、HTML 页面（`.html`、`.htm`；内联脚本，以及带 id 的 `div`、`section` 和 `article` 块作为 `DocSection` 节点）、Astro 文件（用 TypeScript 语法解析）、Jupyter 和 Databricks 笔记本（`.ipynb`，以及 Databricks 导出的 `.py` 文件）、Perl XS 文件（`.xs`）、Robot Framework 文件（`.robot`、`.resource`），Liquid 模板（`.liquid`），以及 Ember Handlebars 模板（`.hbs`）。其他 `.properties` 文件不被当作源代码。
 
 PHP 项目还会得到仓库范围内的 Composer PSR-4 解析、Blade 模板引用，以及在源码中出现明确的框架导入、模型继承和接收者证据时生成的 Laravel Route 与 Eloquent 边。`routes/*.php` 中的静态 Laravel 路由会生成 Endpoint 节点和指向控制器的 HANDLES 边，包括字面量的路由组前缀。
 
 Java 项目会得到 Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、OpenFeign 客户端请求、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知到目标的边，以及 Temporal 工作流与活动的边。每个解析器都在解析之后运行，并且需要被注入的字段、发布的事件或工作流 stub 在仓库中可见。
+
+Ember.js 项目会得到基于约定的解析：各种写法的 `@service` 与 `service()` 注入（包括 `this.get('x')` 调用）会绑定到服务文件，`store.findRecord('post')` 与 `belongsTo('post')` 绑定到模型，`.hbs` 模板中的组件、辅助函数与修饰符调用绑定到对应文件，`<app>/...` 形式的导入绑定到其指向的文件，`router.js` 中的路由绑定到处理它的路由、控制器和模板。解析器在解析之后运行，只读取图，从不存储模板文本或字面值；详见 [docs/EMBER.md](docs/EMBER.md)。
 
 </details>
 
@@ -414,6 +416,7 @@ jobs:
 | **语言与笔记本支持** | 见上文[语言覆盖](#语言覆盖与笔记本)。 |
 | **框架感知的 PHP 解析** | 仓库范围内的 Composer PSR-4 导入、Blade 模板引用、有证据支撑的 Laravel Route 到控制器以及 Eloquent 关系边 |
 | **框架感知的 Java 解析** | Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、OpenFeign 客户端请求、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知边、Temporal 工作流与活动的边，以及只索引键名不索引值的 Spring Boot 配置键 |
+| **框架感知的 Ember 解析** | 按 Ember 命名约定绑定服务与控制器注入、Ember Data 模型名、模板到组件的引用、`<app>/...` 模块导入和 `router.js` 路由，不存储模板文本或值 |
 | **影响半径分析** | 一次改动可能影响哪些函数、类和文件 |
 | **自动更新钩子** | 编辑器钩子、git 钩子（每次提交前，以及 checkout、merge 和 rebase 之后）和 watch 模式在你工作时更新图谱 |
 | **语义搜索** | 可选的向量嵌入，通过 sentence-transformers、Google Gemini、MiniMax、Voyage AI，或任何 OpenAI 兼容端点 |
