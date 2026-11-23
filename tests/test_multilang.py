@@ -2327,6 +2327,83 @@ class TestScalaParsing:
         calls = [e for e in self.edges if e.kind == "CALLS"]
         assert len(calls) >= 3
 
+    def _parse(self, source: str):
+        return self.parser.parse_bytes(Path("Demo.scala"), source.encode())
+
+    def test_records_package_and_type_kind(self):
+        classes = {n.name: n.extra for n in self.nodes if n.kind == "Class"}
+        kinds = [n.extra["scala_kind"] for n in self.nodes if n.name == "UserService"]
+        assert kinds == ["class", "object"]  # the class and its companion
+        assert classes["Repository"]["scala_kind"] == "trait"
+        assert classes["User"]["scala_kind"] == "case_class"
+        assert classes["Color"]["scala_kind"] == "enum"
+        assert classes["UserService"]["scala_package"] == "com.example.auth"
+
+    def test_records_the_parents_as_written(self):
+        classes = {n.name: n.extra for n in self.nodes if n.kind == "Class"}
+        assert classes["InMemoryRepo"]["scala_parents"] == ["Repository", "Serializable"]
+
+    def test_chained_and_braced_package_clauses(self):
+        nodes, _ = self._parse("package a\npackage b\nclass One\n")
+        one = next(n.extra for n in nodes if n.name == "One")
+        assert one["scala_package"] == "a.b"
+        assert one["scala_package_scopes"] == ["a.b", "a"]
+        nodes, _ = self._parse("package c { package d { object Two } }\n")
+        two = next(n.extra for n in nodes if n.name == "Two")
+        assert two["scala_package"] == "c.d"
+        assert two["scala_package_scopes"] == ["c.d", "c"]
+        assert two["scala_kind"] == "object"
+
+    def test_renamed_hidden_wildcard_and_given_imports(self):
+        _, edges = self._parse(
+            "import x.{A, B => C, D => _, _}\n"
+            "import x.y.{E as F}\n"
+            "import x.given\n"
+            "import x.z.*\n"
+        )
+        imports = [(e.target, e.extra) for e in edges if e.kind == "IMPORTS_FROM"]
+        assert [t for t, _ in imports] == [
+            "x.A", "x.B", "x.*", "x.y.E", "x.*", "x.z.*",
+        ]
+        assert imports[1][1] == {"scala_import": "x.B", "scala_alias": "C"}
+        assert imports[2][1] == {"scala_import": "x", "scala_wildcard": True}
+        assert imports[3][1]["scala_alias"] == "F"
+        assert imports[4][1]["scala_given"] is True
+
+    def test_call_extra_records_form_receiver_and_declared_type(self):
+        _, edges = self._parse(
+            "class K(val p: Foo) {\n"
+            "  def f(a: Bar, b: List[Baz]): Unit = {\n"
+            "    val c = new Qux(1)\n"
+            "    a.go(); p.go(); c.go(); b.go(); Obj.run(1, 2); helper(); new Zed\n"
+            "    items.map(x => x.go())\n"
+            "    val Obj2 = other; Obj2.run()\n"
+            "  }\n"
+            "}\n"
+        )
+        calls = [e.extra for e in edges if e.kind == "CALLS"]
+        by = {(c["scala_name"], c.get("scala_receiver")): c for c in calls}
+        assert by[("go", "a")]["scala_receiver_type"] == "Bar"
+        assert by[("go", "p")]["scala_receiver_type"] == "Foo"
+        assert by[("go", "c")]["scala_receiver_new"] == "Qux"
+        # ``List[Baz]`` is a List: the element type says nothing about ``b``.
+        assert by[("go", "b")]["scala_receiver_type"] == "List"
+        assert by[("run", "Obj")]["scala_argc"] == 2
+        assert "scala_receiver_local" not in by[("run", "Obj")]
+        assert by[("helper", None)]["scala_form"] == "bare"
+        assert by[("go", "x")]["scala_receiver_local"] is True
+        assert "scala_receiver_type" not in by[("go", "x")]
+        assert by[("run", "Obj2")]["scala_receiver_local"] is True
+        assert {c["scala_form"] for c in calls if c["scala_name"] == "Zed"} == {"new"}
+
+    def test_private_members_are_marked(self):
+        nodes, _ = self._parse(
+            "class K {\n  private def a() = 1\n  private[this] def b() = 1\n"
+            "  private[pkg] def c() = 1\n  def d() = 1\n}\n"
+        )
+        marked = {n.name: n.extra.get("scala_private") for n in nodes if n.kind == "Function"}
+        assert marked == {"a": True, "b": True, "c": None, "d": None}
+
 
 class TestSolidityParsing:
     def setup_method(self):

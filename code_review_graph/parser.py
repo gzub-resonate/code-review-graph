@@ -33,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 from . import ember_extract, ember_template, js_api_extract, py_api_extract
+from . import scala_parse as _scala_parse
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
     IMPORT_CONTEXT_DEFERRED,
@@ -4351,10 +4352,16 @@ class CodeParser:
             python_property_read_edges = []
 
         # Walk the tree
-        self._extract_from_tree(
-            tree.root_node, source, language, file_path_str, nodes, edges,
-            import_map=import_map, defined_names=defined_names,
-        )
+        if language == "scala":
+            _scala_parse.begin_file()
+        try:
+            self._extract_from_tree(
+                tree.root_node, source, language, file_path_str, nodes, edges,
+                import_map=import_map, defined_names=defined_names,
+            )
+        finally:
+            if language == "scala":
+                _scala_parse.end_file()
 
         if ember_enabled:
             ember_facts = ember_extract.extract(
@@ -17166,6 +17173,8 @@ class CodeParser:
                 )
             if any(c.type == "modifier" and c.text == b"partial" for c in child.children):
                 extra["csharp_partial"] = True
+        if language == "scala":
+            extra.update(_scala_parse.class_extra(child))
         # TypeScript interfaces and type aliases share kind Class but have no
         # runtime body, so changes.py must not report them as test gaps (#1109).
         if language in ("typescript", "tsx") and child.type in (
@@ -17672,6 +17681,9 @@ class CodeParser:
             # for one, cannot intercept constructors.
             method_extra["java_constructor"] = True
 
+        if language == "scala":
+            method_extra.update(_scala_parse.function_extra(child))
+
         docstring = self._get_docstring_summary(child, language)
         if docstring:
             method_extra["docstring"] = docstring
@@ -17765,6 +17777,8 @@ class CodeParser:
         invocation). Returning False lets the dispatcher fall through to call
         extraction instead of silently dropping the call. See: Ruby call graph.
         """
+        if language == "scala":
+            return self._extract_scala_imports(child, file_path, edges)
         specs = self._extract_import_specs(child, language, source, file_path)
         csharp_extra = {}
         if language == "csharp":
@@ -17806,6 +17820,35 @@ class CodeParser:
                 file_path=file_path,
                 line=spec.line,
                 extra={**csharp_extra, **extra},
+            ))
+        return bool(specs)
+
+    def _extract_scala_imports(
+        self, child, file_path: str, edges: list[EdgeInfo],
+    ) -> bool:
+        """IMPORTS_FROM edges for one Scala import, one per name it brings in.
+
+        The target stays the dotted name; ``scala_resolver`` binds it to a file
+        once every file's declarations are known. The extra says what the
+        import brought in (a name, a rename or a wildcard).
+        """
+        specs = _scala_parse.import_specs(child)
+        line = child.start_point[0] + 1
+        for spec in specs:
+            module = _scala_parse.import_edge_target(spec)
+            target, scope = self._resolve_import_target(module, file_path, "scala")
+            extra: dict = _scala_parse.import_edge_extra(spec)
+            if target is None:
+                target = module
+            elif scope:
+                extra[IMPORT_SCOPE_KEY] = scope
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path,
+                target=target,
+                file_path=file_path,
+                line=line,
+                extra=extra,
             ))
         return bool(specs)
 
@@ -18042,6 +18085,9 @@ class CodeParser:
                     call_extra["receiver_form"] = "expression"
                 if language == "java" and child.type == "method_reference":
                     call_extra["call_syntax"] = "method_reference"
+
+            if language == "scala":
+                call_extra.update(_scala_parse.call_extra(child, call_name))
 
             if language == "java" and child.type == "method_invocation":
                 self._emit_spring_webflux_endpoint(
