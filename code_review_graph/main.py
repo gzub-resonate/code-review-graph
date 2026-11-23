@@ -1527,6 +1527,7 @@ async def cross_repo_requests_tool(
     limit: int = 20,
     max_results: int = 50,
     origin: Optional[str] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
 
@@ -1562,12 +1563,14 @@ async def cross_repo_requests_tool(
         max_results: Maximum rows overall, at most 100. ``counts`` and
             ``total`` cover every call that passed the filters. Default: 50.
         origin: Only ``feign`` or only ``js`` calls. Default: both.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            the same query. Omit it for the first page.
     """
     return await _offload(
         "cross_repo_requests_tool",
         lambda: cross_repo_requests_func(
             repos=repos, service=service, route=route, status=status,
-            limit=limit, max_results=max_results, origin=origin,
+            limit=limit, max_results=max_results, origin=origin, cursor=cursor,
         ),
         None,
         provenance=False,

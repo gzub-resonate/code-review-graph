@@ -13,6 +13,7 @@ from .. import js_api_extract, py_api_extract, py_route_prefixes
 from ..errors import GraphStoreError
 from ..graph import GraphNode, GraphStore, _sanitize_name
 from ..incremental import get_db_path
+from ..paging import content_stamp, make_scope, paginate_groups, shown_range
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
 from ..search import hybrid_search
 from ._common import _bounded, _shown_of, _validate_positive_int
@@ -464,6 +465,7 @@ def cross_repo_requests_func(
     limit: int = 20,
     max_results: int = 50,
     origin: str | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Join outbound Spring Feign and JavaScript/TypeScript calls to server endpoints.
 
@@ -492,12 +494,17 @@ def cross_repo_requests_func(
         max_results: Maximum rows returned overall (default 50, capped at
             100). ``counts`` and ``total`` cover every call that passed the
             filters, not just the rows shown.
+        cursor: ``next_cursor`` from the previous reply, to read the next page of
+            the same query. Each page takes up to ``limit`` more rows from every
+            client repo, then keeps the first ``max_results``. Omit it for the
+            first page.
         origin: Only ``feign`` or only ``js`` calls. Default: both.
 
     Returns:
         ``results`` rows, ``counts`` by status, ``total``, ``truncated``,
         ``repos_searched`` and ``unreadable`` (repos whose graph could not be
         read), plus ``unknown``/``ambiguous`` when ``repos`` was given.
+        When rows remain, ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     from ..registry import Registry
 
@@ -713,11 +720,17 @@ def cross_repo_requests_func(
                     ]
                     row["candidates_total"] = len(result.candidates)
                 repo_rows.append(row)
-            rows_by_repo.append(repo_rows[:limit])
+            rows_by_repo.append(repo_rows)
 
-        merged = [row for rows in rows_by_repo for row in rows]
-        results, _shown_total, truncated = _bounded(merged, max_results, _MAX_REQUEST_ROWS)
-        truncated = truncated or len(merged) < total
+        page = paginate_groups(
+            rows_by_repo, limit, max_results, _MAX_REQUEST_ROWS, cursor,
+            scope=make_scope(
+                "cross_repo_requests_tool", repos=sorted(repos) if repos else None,
+                service=service, route=route, status=status, origin=origin,
+            ),
+            stamp=content_stamp(rows_by_repo),
+        )
+        results, truncated = page.items, page.truncated
         shown_unreadable, unreadable_total, unreadable_truncated = _bounded(
             unreadable, _MAX_UNREADABLE, _MAX_UNREADABLE,
         )
@@ -740,13 +753,14 @@ def cross_repo_requests_func(
                     else f"{total} Feign call(s) in {len(searched)} repo(s)"
                 )
                 + (f": {ordered}" if ordered else "")
-                + _shown_of(len(results), total)
+                + shown_range(page)
                 + notes
             ),
             "results": results,
             "counts": counts,
             "total": total,
             "truncated": truncated,
+            **page.fields(),
             "repos_searched": searched,
             "unreadable": shown_unreadable,
             "unreadable_total": unreadable_total,

@@ -4,6 +4,10 @@
 
 ### Added
 
+- `cross_repo_requests_tool` reads past its row ceilings the same way: a reply
+  with more calls than fit carries `next_cursor`, and `cursor` returns the next
+  page, taking up to `limit` more rows from each calling repo. The cursor is
+  refused if the filters or the calls changed since it was made.
 - `list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` no longer
   stop at their ceiling. When more rows exist the reply carries `next_cursor`;
   pass it back as `cursor` to read the next page. A page after the first adds

@@ -350,3 +350,112 @@ def test_hub_ties_break_by_qualified_name(repo):
 def test_the_mcp_tools_take_a_cursor(name):
     parameter = inspect.signature(getattr(main_module, name)).parameters["cursor"]
     assert parameter.default is None
+
+
+# ---------------------------------------------------------------------------
+# Several lists read in turn
+# ---------------------------------------------------------------------------
+
+
+def walk_groups(groups, per_group, limit, hard_cap=1000):
+    pages = []
+    cursor = None
+    while True:
+        page = paging.paginate_groups(
+            groups, per_group, limit, hard_cap, cursor, scope=SCOPE, stamp=STAMP,
+        )
+        pages.append(page)
+        if page.next_cursor is None:
+            return pages
+        cursor = page.next_cursor
+        assert len(pages) < 10_000
+
+
+GROUPS = [[f"a{i}" for i in range(7)], [], [f"c{i}" for i in range(20)], ["d0"]]
+
+
+def test_the_first_group_page_is_a_per_group_cap_then_an_overall_cap():
+    page = paging.paginate_groups(GROUPS, 3, 5, 100, scope=SCOPE, stamp=STAMP)
+    assert page.items == ["a0", "a1", "a2", "c0", "c1"]
+    assert page.total == 28 and page.offset == 0 and page.truncated
+
+
+@pytest.mark.parametrize(("per_group", "limit"), [(1, 1), (3, 5), (5, 4), (20, 50), (4, 100)])
+def test_group_pages_cover_every_row_once(per_group, limit):
+    pages = walk_groups(GROUPS, per_group, limit)
+    rows = [row for page in pages for row in page.items]
+    assert sorted(rows) == sorted(r for group in GROUPS for r in group)
+    assert len(rows) == len(set(rows)) == 28
+    assert all(len(page.items) <= limit for page in pages)
+    assert [page.offset for page in pages] == [
+        sum(len(p.items) for p in pages[:i]) for i in range(len(pages))
+    ]
+
+
+def test_a_group_continues_where_the_overall_cap_cut_it_off():
+    first = paging.paginate_groups(GROUPS, 20, 9, 100, scope=SCOPE, stamp=STAMP)
+    assert first.items == [f"a{i}" for i in range(7)] + ["c0", "c1"]
+    second = paging.paginate_groups(
+        GROUPS, 20, 9, 100, first.next_cursor, scope=SCOPE, stamp=STAMP,
+    )
+    assert second.items == [f"c{i}" for i in range(2, 11)]
+
+
+def test_the_ceiling_bounds_a_group_page():
+    pages = walk_groups(GROUPS, 100, 500, hard_cap=6)
+    assert all(len(page.items) <= 6 for page in pages)
+    assert sum(len(page.items) for page in pages) == 28
+
+
+def test_a_group_list_that_fits_has_no_cursor():
+    page = paging.paginate_groups([["x"], ["y"]], 5, 10, 100, scope=SCOPE, stamp=STAMP)
+    assert page.items == ["x", "y"] and page.next_cursor is None and page.fields() == {}
+    empty = paging.paginate_groups([], 5, 10, 100, scope=SCOPE, stamp=STAMP)
+    assert empty.items == [] and empty.total == 0 and empty.next_cursor is None
+
+
+@pytest.mark.parametrize("position", [
+    [1, 2], 3, "x", True, {"x": 1}, {"-1": 1}, {"9": 1}, {"0": -1}, {"0": 8}, {"0": True},
+    {"0": "1"}, {"0": 1.5},
+])
+def test_a_group_cursor_with_a_bad_position_is_refused(position):
+    cursor = _cursor(v=1, o=position, s=SCOPE, g=STAMP)
+    with pytest.raises(paging.CursorError, match="start over"):
+        paging.paginate_groups(GROUPS, 3, 5, 100, cursor, scope=SCOPE, stamp=STAMP)
+
+
+def test_a_group_cursor_belongs_to_its_query_and_content():
+    page = paging.paginate_groups(GROUPS, 3, 5, 100, scope=SCOPE, stamp=STAMP)
+    with pytest.raises(paging.CursorError, match="different query"):
+        paging.paginate_groups(
+            GROUPS, 3, 5, 100, page.next_cursor,
+            scope=paging.make_scope("t", sort_by="other"), stamp=STAMP,
+        )
+    with pytest.raises(paging.CursorError, match="graph changed"):
+        paging.paginate_groups(
+            GROUPS, 3, 5, 100, page.next_cursor, scope=SCOPE, stamp="changed",
+        )
+
+
+def test_a_list_cursor_is_not_a_group_cursor():
+    page = paging.paginate(list(range(10)), 3, 100, scope=SCOPE, stamp=STAMP)
+    with pytest.raises(paging.CursorError, match="start over"):
+        paging.paginate_groups(GROUPS, 3, 5, 100, page.next_cursor, scope=SCOPE, stamp=STAMP)
+    group_page = paging.paginate_groups(GROUPS, 3, 5, 100, scope=SCOPE, stamp=STAMP)
+    with pytest.raises(paging.CursorError, match="start over"):
+        paging.paginate(list(range(10)), 3, 100, group_page.next_cursor, scope=SCOPE, stamp=STAMP)
+
+
+def test_content_stamp_follows_the_content_and_not_its_key_order():
+    assert paging.content_stamp([{"a": 1, "b": 2}]) == paging.content_stamp([{"b": 2, "a": 1}])
+    assert paging.content_stamp([{"a": 1}]) != paging.content_stamp([{"a": 2}])
+
+
+def test_a_group_cursor_stays_small_for_many_groups():
+    groups = [[f"g{i}-{j}" for j in range(3)] for i in range(150)]
+    page = paging.paginate_groups(groups, 1, 120, 120, scope=SCOPE, stamp=STAMP)
+    assert page.next_cursor is not None and len(page.next_cursor) < 2048
+    again = paging.paginate_groups(
+        groups, 1, 120, 120, page.next_cursor, scope=SCOPE, stamp=STAMP,
+    )
+    assert again.items[0] == "g0-1"

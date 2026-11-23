@@ -917,6 +917,7 @@ status: str | None           # matched | ambiguous | case_mismatch | no_route_ma
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js; default: both
+cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 ```
 
 Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
@@ -926,6 +927,11 @@ needed beyond a graph that already indexes Feign clients. Each row has the
 calling repo, file and line, the HTTP method, route and service name, a
 `status`, and `candidates` (repo, file, line, method, route; at most five,
 with `candidates_total`).
+
+A page takes up to `limit` rows from each calling repo and keeps the first
+`max_results` of them; `next_cursor` then continues each repo where it stopped,
+so every call can be read. `counts` and `total` always cover every call. A
+cursor is refused if the filters or any of the rows changed since it was made.
 
 How a call is classified:
 
@@ -1058,8 +1064,8 @@ context window (see #849). The contract is the same everywhere:
 
 ### Paging
 
-`list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` do not stop at
-their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
+`list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool` and
+`cross_repo_requests_tool` do not stop at their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
 back as `cursor` returns the next page, so the ceiling bounds one reply, not what
 you can read. This follows the cursor pagination the MCP specification defines for
 its list operations (`cursor` in, `nextCursor` out), with the result key spelled in
