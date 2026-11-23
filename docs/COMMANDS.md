@@ -687,10 +687,11 @@ repo_root: str | None
 #### `list_flows_tool`
 ```
 sort_by: str = "criticality"  # criticality, depth, node_count, file_count, name
-limit: int = 50               # Flows returned (max 200)
+limit: int = 50               # Flows per page (max 200)
 kind: str | None              # Entry point kind (e.g. "Test", "Function")
 repo_root: str | None
 detail_level: str = "standard"
+cursor: str | None            # next_cursor of the previous reply (see Result Bounds)
 ```
 
 #### `get_flow_tool`
@@ -723,8 +724,9 @@ sort_by: str = "size"    # size, cohesion, name
 min_size: int = 0
 repo_root: str | None
 detail_level: str = "standard"
-max_results: int = 50    # Communities returned (max 200)
+max_results: int = 50    # Communities per page (max 200)
 max_members: int = 10    # Member names per community in standard mode (max 25)
+cursor: str | None       # next_cursor of the previous reply (see Result Bounds)
 ```
 `size` reports the true member count; `members_truncated` marks a cut member list.
 
@@ -751,9 +753,10 @@ Minimal responses may include estimated `context_savings` metadata.
 
 #### `get_hub_nodes_tool`
 ```
-top_n: int = 10                  # Capped at 100
+top_n: int = 10                  # Hubs per page (max 100)
 repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
+cursor: str | None               # next_cursor of the previous reply (see Result Bounds)
 ```
 
 #### `get_bridge_nodes_tool`
@@ -1052,6 +1055,27 @@ context window (see #849). The contract is the same everywhere:
   summary says how many of how many are shown.
 - Cap parameters reject values below 1 and reject booleans.
 - Hard ceilings are enforced in code and pinned by `tests/test_token_budget.py`.
+
+### Paging
+
+`list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` do not stop at
+their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
+back as `cursor` returns the next page, so the ceiling bounds one reply, not what
+you can read. This follows the cursor pagination the MCP specification defines for
+its list operations (`cursor` in, `nextCursor` out), with the result key spelled in
+snake_case like the other keys here.
+
+- A reply with no `next_cursor` is the last page. `truncated` is `true` exactly
+  when `next_cursor` is present, `total` is always the whole list, and a page after
+  the first adds `offset`, the index of its first row. The first page is the same
+  as before, plus `next_cursor` when the list was cut.
+- A cursor is opaque. It is valid only for the same query on the same graph, and
+  the page size (`limit`, `max_results` or `top_n`) may change between pages.
+  A cursor from a different query or tool, or from before the graph was rebuilt or
+  updated, is refused with an error that says to start over without a cursor.
+  Cursors are not signed and hold no state on the server.
+- Ties in a ranking are ordered by a fixed key (flow and community id, a hub's
+  qualified name), so a page never repeats or skips a row.
 
 ## MCP Prompts (5 workflow templates)
 

@@ -1159,7 +1159,7 @@ def get_communities(
     # dedicated GraphStore method (it's a domain-specific table managed
     # entirely by the communities module).  We use _conn for this query.
     rows = store._conn.execute(
-        f"SELECT * FROM communities WHERE size >= ? ORDER BY {sort_by} {order}",  # nosec B608
+        f"SELECT * FROM communities WHERE size >= ? ORDER BY {sort_by} {order}, id",  # nosec B608
         (min_size,),
     ).fetchall()
 

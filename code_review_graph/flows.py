@@ -1020,7 +1020,7 @@ def get_flows(
     # NOTE: get_flows reads from the flows table which is managed by
     # the flows module; _conn access is documented coupling.
     rows = store._conn.execute(
-        f"SELECT * FROM flows ORDER BY {sort_by} {order} LIMIT ?",  # nosec B608
+        f"SELECT * FROM flows ORDER BY {sort_by} {order}, id LIMIT ?",  # nosec B608
         (limit,),
     ).fetchall()
 

@@ -877,6 +877,7 @@ async def list_flows_tool(
     kind: Optional[str] = None,
     detail_level: str = "standard",
     repo_root: Optional[str] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """List execution flows in the codebase, sorted by criticality.
 
@@ -891,13 +892,15 @@ async def list_flows_tool(
         detail_level: "standard" (default) returns full flow data; "minimal"
                       returns only name, criticality, and node_count per flow.
         repo_root: Repository root path. Auto-detected if omitted.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "list_flows_tool",
         lambda: list_flows(
             repo_root=root, sort_by=sort_by, limit=limit, kind=kind,
-            detail_level=detail_level,
+            detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -985,6 +988,7 @@ async def list_communities_tool(
     repo_root: Optional[str] = None,
     max_results: int = 50,
     max_members: int = 10,
+    cursor: Optional[str] = None,
 ) -> dict:
     """List detected code communities in the codebase.
 
@@ -1004,6 +1008,8 @@ async def list_communities_tool(
         max_members: Maximum member names listed per community in standard
             mode. Each community's size still reports its true member
             count. Default: 10.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1011,7 +1017,7 @@ async def list_communities_tool(
         lambda: list_communities_func(
             repo_root=root, sort_by=sort_by, min_size=min_size,
             detail_level=detail_level, max_results=max_results,
-            max_members=max_members,
+            max_members=max_members, cursor=cursor,
         ),
         root,
     )
@@ -1290,6 +1296,7 @@ async def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1301,12 +1308,14 @@ async def get_hub_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and total_degree only. Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_hub_nodes_tool",
         lambda: get_hub_nodes_func(
-            repo_root=root, top_n=top_n, detail_level=detail_level,
+            repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )

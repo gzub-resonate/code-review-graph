@@ -4,6 +4,13 @@
 
 ### Added
 
+- `list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` no longer
+  stop at their ceiling. When more rows exist the reply carries `next_cursor`;
+  pass it back as `cursor` to read the next page. A page after the first adds
+  `offset`. A cursor is refused, with a message to start over, if the query or
+  the graph changed since it was made. Equal-ranked flows, communities and hubs
+  now come in a fixed order, so pages never repeat or skip a row. See
+  `docs/COMMANDS.md`.
 - FastAPI and Flask routes are indexed as server endpoints, with
   `APIRouter(prefix=...)`, `Blueprint(url_prefix=...)`, `include_router` and
   `register_blueprint` prefixes joined across files, so a JavaScript caller or
