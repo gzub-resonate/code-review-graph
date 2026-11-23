@@ -217,6 +217,8 @@ Then use `cross_repo_search_tool` to search every registered repository, or pass
 
 To see which endpoint in another registered repository an outbound Spring Feign call reaches, call `cross_repo_requests_tool`. It lists the calls of every registered repository (or of `repos=["mylib"]`), with the matching endpoint's repository, file, line and route, or the reason there is none (`status="ambiguous"` and `status="no_route_match"` are the usual follow-ups). It reads the existing graphs read-only; each graph's endpoints come from an index its build stored, and the join is computed on every call. See [COMMANDS.md](COMMANDS.md#cross_repo_requests_tool).
 
+To see what a pull request touches, call `pr_blast_radius_tool` with the pull request number (`pr=353`) and, for a stacked one, its parent branch as `base`. It reads the changed files from Git, so files the pull request adds are included although the graph, built from the default branch, has never seen them. See [COMMANDS.md](COMMANDS.md#pr_blast_radius_tool).
+
 A repository can also be known by extra names that you keep in `repo-aliases.toml`. See [REPO_ALIASES.md](REPO_ALIASES.md).
 
 `code-review-graph repos` lists each repository's registered `data_dir`, marking

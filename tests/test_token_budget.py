@@ -568,6 +568,12 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default_max": 4_000,
         "worst_max": 30_000,
     },
+    "pr_blast_radius_tool": {
+        "default": {"head": "HEAD", "base": "HEAD"},
+        "worst": {"head": "HEAD", "base": "HEAD", "depth": HUGE},
+        "default_max": 6_000,
+        "worst_max": 30_000,
+    },
     "cross_repo_requests_tool": {
         "no_repo_root": True,
         "needs_registry": True,

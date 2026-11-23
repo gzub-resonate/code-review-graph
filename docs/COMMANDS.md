@@ -1053,6 +1053,34 @@ capped by `limit` and `max_results`, and `truncated` says so. A repository whose
 graph is missing or unreadable is listed in `unreadable` (with its role,
 `client` or `target`, and a short reason) and does not stop the call.
 
+#### `pr_blast_radius_tool`
+```
+pr: int | None               # Pull request number; the server fetches refs/pull/<pr>/head from origin
+head: str | None             # A ref or commit to read the new files from, when no pr is given
+base: str | None             # The branch the PR merges into; default: the remote's default branch
+depth: int = 3               # Hops the reach walk follows from a changed symbol (max 6)
+include_external: bool = True  # Join affected endpoints to client calls in the other registered repos
+repo_root: str | None        # Repository root; auto-detected
+```
+
+The graph holds the default branch, so a pull request's new files are not in it. This tool reads only the files the
+pull request touches, straight from Git, parses each in memory with the parser a build uses and compares the result with
+the base graph. Nothing is written to the graph. Files are fetched into `refs/crg/` of the checkout, so no branch or
+working tree is touched.
+
+Per file it reports the symbols **changed** (a symbol the base graph has, overlapped by a changed line), **added** (only the
+new file has it) and **removed** (only the base graph has it), `reached` (what depends on the changed and removed symbols,
+over the same edge kinds the impact radius follows, `depth` hops out; `reached_tests` counts the tests among them
+separately), `same_repo_files` and the changed members no test
+names (`untested`). `contract_changes` lists routes the pull request adds or removes. `endpoints` lists the endpoints it
+adds, removes or reaches, each with `external_callers`; `external_callers` lists the client calls in the other registered
+repos (Feign, JavaScript and TypeScript) that reach them, read from each repo's stored endpoint index. `schema_changes`
+lists the DDL in migration files the pull request adds or changes. `notes` states what the answer rests on: a stacked
+pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow
+clone without a merge base, Python routes whose router prefix sits in a file the pull request does not touch, and files
+that could not be parsed. At most 300 files are parsed per request; lists are capped, with `files_truncated` and
+`external_callers_total` reporting the real size.
+
 ## Result Bounds
 
 Every tool that returns a list is bounded, so one MCP response cannot fill a

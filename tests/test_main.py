@@ -194,6 +194,7 @@ class TestLongRunningToolsAreAsync:
         "traverse_graph_tool",
         "cross_repo_search_tool",
         "cross_repo_requests_tool",
+        "pr_blast_radius_tool",
     }
 
     #: The only tools allowed to run inline on the event loop.

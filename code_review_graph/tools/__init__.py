@@ -1,6 +1,6 @@
 """MCP tool definitions for the Code Review Graph server.
 
-Exposes 31 tools (each registered in main.py with a ``_tool`` suffix):
+Exposes 32 tools (each registered in main.py with a ``_tool`` suffix):
 1. build_or_update_graph  - full or incremental build
 2. get_impact_radius      - blast radius from changed files
 3. query_graph            - predefined graph queries
@@ -88,6 +88,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "cross_repo_requests_func": (".registry_tools", "cross_repo_requests_func"),
     "cross_repo_search_func": (".registry_tools", "cross_repo_search_func"),
     "list_repos_func": (".registry_tools", "list_repos_func"),
+    # pr_tools
+    "pr_blast_radius_func": (".pr_tools", "pr_blast_radius_func"),
     # review
     "detect_changes_func": (".review", "detect_changes_func"),
     "get_affected_flows_func": (".review", "get_affected_flows_func"),
@@ -131,6 +133,8 @@ __all__ = [
     "cross_repo_requests_func",
     "cross_repo_search_func",
     "list_repos_func",
+    # pr_tools
+    "pr_blast_radius_func",
     # review
     "detect_changes_func",
     "get_affected_flows_func",

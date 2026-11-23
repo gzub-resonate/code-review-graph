@@ -594,7 +594,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>31 MCP टूल</strong></summary>
+<summary><strong>32 MCP टूल</strong></summary>
 <br>
 
 ग्राफ़ बन जाने के बाद असिस्टेंट इनका उपयोग करता है। जो 25 टूल सिर्फ़ पढ़ते हैं, उन पर `readOnlyHint: true` लगा है, इसलिए क्लाइंट उन्हें बिना पूछे चला सकता है; लिखने वाले पाँच टूल (`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`) पर यह नहीं लगा।
@@ -632,6 +632,7 @@ alias = "project-b"
 | `list_repos_tool` | दर्ज रिपॉज़िटरी |
 | `cross_repo_search_tool` | दर्ज रिपॉज़िटरी में खोज; `repos` से खोज को एक उपसमूह तक सीमित किया जा सकता है |
 | `cross_repo_requests_tool` | Spring Feign कॉल को अन्य दर्ज रिपॉज़िटरी में उनके संबंधित एंडपॉइंट से जोड़ता है |
+| `pr_blast_radius_tool` | पुल रिक्वेस्ट की बदली गई फ़ाइलों (नई फ़ाइलों सहित) को Git से पढ़कर आधार ग्राफ़ के ज़रिए प्रभाव क्षेत्र निकालता है |
 
 **MCP प्रॉम्प्ट** (5 वर्कफ़्लो टेम्पलेट):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
@@ -743,7 +744,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### टूल फ़िल्टरिंग
 
-CRG डिफ़ॉल्ट रूप से 31 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
+CRG डिफ़ॉल्ट रूप से 32 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
 
 ```bash
 # CLI flag

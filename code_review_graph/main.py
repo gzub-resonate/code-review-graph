@@ -60,6 +60,7 @@ if TYPE_CHECKING:
         list_communities_func,
         list_flows,
         list_graph_stats,
+        pr_blast_radius_func,
         query_graph,
         refactor_func,
         run_postprocess,
@@ -97,6 +98,7 @@ _LAZY_TOOL_NAMES = frozenset({
     "query_graph",
     "refactor_func",
     "run_postprocess",
+    "pr_blast_radius_func",
     "semantic_search_nodes",
     "traverse_graph_func",
     "with_provenance",
@@ -1575,6 +1577,47 @@ async def cross_repo_requests_tool(
         ),
         None,
         provenance=False,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def pr_blast_radius_tool(
+    pr: Optional[int] = None,
+    head: Optional[str] = None,
+    base: Optional[str] = None,
+    depth: int = 3,
+    include_external: bool = True,
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Blast radius of a pull request, read from its changed files and the base graph.
+
+    The graph holds the default branch, so a pull request's new files are not in it. This
+    reads only the files the pull request touches, straight from Git, parses them in memory
+    and compares them with the base graph. Nothing is written to the graph. It reports, per
+    file, the symbols changed, added and removed and what reaches the changed ones; the
+    routes the pull request adds or removes; the endpoints affected; the client calls in
+    the other registered repos that reach them; migrations the pull request adds; and
+    changed members no test names. A stacked pull request should pass its parent branch as
+    ``base``; the result then also says how many files differ from the default branch.
+
+    Args:
+        pr: A pull request number. The server fetches ``refs/pull/<pr>/head`` from the
+            checkout's ``origin`` into ``refs/crg/``; no branch or working tree is touched.
+        head: A ref or commit to read the new files from, when no ``pr`` is given.
+        base: The branch the pull request merges into. Default: the remote's default branch.
+        depth: Hops the reach walk follows from a changed symbol. Default: 3, at most 6.
+        include_external: Join the affected endpoints to the client calls of the other
+            registered repos. Default: True.
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    root = _resolve_repo_root(repo_root)
+    return await _offload(
+        "pr_blast_radius_tool",
+        lambda: pr_blast_radius_func(
+            pr=pr, head=head, base=base, depth=depth,
+            include_external=include_external, repo_root=root,
+        ),
+        root,
     )
 
 

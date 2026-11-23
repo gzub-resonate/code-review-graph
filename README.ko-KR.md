@@ -594,7 +594,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>MCP 도구 31개</strong></summary>
+<summary><strong>MCP 도구 32개</strong></summary>
 <br>
 
 그래프를 만들고 나면 어시스턴트가 이 도구들을 씁니다. 읽기만 하는 도구 25개에는 `readOnlyHint: true`가 붙어 있어 클라이언트가 묻지 않고 실행할 수 있습니다. 쓰기를 하는 도구 5개(`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`)에는 붙어 있지 않습니다.
@@ -632,6 +632,7 @@ alias = "project-b"
 | `list_repos_tool` | 등록된 저장소 |
 | `cross_repo_search_tool` | 등록된 저장소 검색. `repos`로 대상을 좁힐 수 있음 |
 | `cross_repo_requests_tool` | Spring Feign 호출을 다른 등록된 저장소에서 대응하는 엔드포인트와 연결 |
+| `pr_blast_radius_tool` | 풀 리퀘스트의 변경 파일(새 파일 포함)을 Git에서 읽고 기준 그래프를 따라 영향 범위를 구합니다 |
 
 **MCP 프롬프트**(워크플로 템플릿 5개):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
@@ -743,7 +744,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 도구 필터링
 
-CRG는 기본으로 MCP 도구 31개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
+CRG는 기본으로 MCP 도구 32개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
 
 ```bash
 # CLI flag
