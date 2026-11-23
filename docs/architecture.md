@@ -175,7 +175,7 @@ node type tables (`_CLASS_TYPES`, `_FUNCTION_TYPES` and similar in `parser.py`) 
 Languages that have a bundled Tree-sitter grammar but no built-in parser can be added
 through `.code-review-graph/languages.toml` (`docs/CUSTOM_LANGUAGES.md`). Some formats have a parser of their own. For notebooks, Vue,
 Svelte and Blade files, HTML pages, XSLT, JSON and SQL it still uses a Tree-sitter grammar;
-Liquid, Robot Framework, ReScript, VB.NET, generic YAML, Ansible and Spring configuration are
+Liquid, Robot Framework, ReScript, VB.NET, Step Functions state machines, generic YAML, Ansible and Spring configuration are
 read without one.
 
 ### C# namespace identity and binding
