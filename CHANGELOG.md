@@ -4,6 +4,13 @@
 
 ### Added
 
+- JavaScript and TypeScript frontends now record the HTTP calls they make with
+  a statically known route (`axios` and `axios.create` instances, `fetch`,
+  `$.ajax`, Ember `ajax`) as client `Endpoint` nodes with `REQUESTS` edges from
+  the enclosing function. A variable URL is never guessed, and a query string
+  glued to the path (`/feeds${query}`) is dropped when the name only ever holds
+  a query string. Rebuild a graph to index existing JavaScript; see
+  `docs/COMMANDS.md`.
 - New `cross_repo_requests_tool` answers "which endpoint does this Feign call
   reach?" across your registered repositories. For each outbound Spring Feign
   call it names the controller endpoint in the repository the service name

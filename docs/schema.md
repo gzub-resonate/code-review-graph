@@ -106,6 +106,14 @@ Known gaps in Feign support:
   matches routes (`cross_repo_requests_tool` strips them, and ignores a trailing slash and the
   names inside `{...}`, when it joins a call to a server endpoint in another registered repo).
 - Feign's native `@RequestLine` contract and Kotlin clients are not supported.
+
+JavaScript and TypeScript client calls use the same node shape, written by `js_api_extract.py`. A
+client `Endpoint` has `role: "client"`, `client: "js_http"`, `origin: "js"`, `client_kind` (`axios`,
+`fetch`, `jquery`, `ember-ajax`), `http_method`, `route` and `route_dynamic`;
+a call that cannot be joined also has `method_dynamic` or `absolute_url`, and `base_url`,
+`base_url_dynamic`, `instance` or `receiver_inferred` say how sure the route is.
+A URL that is not statically known is `<unresolved>` with `route_dynamic: true`. `{param}` is the
+placeholder for a `${expr}` piece of a call.
 - `requests_of` and `requesters_of` take a method or an endpoint qualified name. A class name
   returns nothing, as it does for `endpoints_for` and `handlers_of`.
 

@@ -944,6 +944,26 @@ How a call is classified:
   kept. A `{name}` in the call does not match a fixed segment on the server.
   One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
 
+What the parser records for JavaScript and TypeScript client calls (a plain
+`Endpoint` node with `role: "client"` and a `REQUESTS` edge from the enclosing
+function):
+
+- Calls: `axios.get/post/put/patch/delete/head/options(url)`,
+  `axios({method, url})`, `axios.request`, instances from `axios.create`
+  (their `baseURL` is applied only when it is a string literal in the same
+  file, or set by `instance.defaults.baseURL = '...'`), `fetch(url, {method})`,
+  `$.ajax`, `$.getJSON`, `$.get`, `$.post`, and Ember `this.ajax`,
+  `this.ajax.request` and `ajax`. The URL may be a string, a template literal
+  (each `${expr}` becomes `{param}`), a `+` concatenation, or a same-file
+  top-level `const` string; a leading unknown piece is never guessed. A query
+  string glued to the path (`` `/feeds${query}` `` where `query` is
+  `cond ? `?${q}` : ''`) is dropped with the rest of the query, but only when
+  every declaration of that name in the file is a `const` holding an empty or
+  `?...` string; a parameter or any other binding of the same name keeps it a
+  path parameter. A call whose URL cannot be read is recorded as unmatchable
+  only for a certain HTTP client (axios, `$.ajax`, Ember ajax, `fetch`), never
+  for an imported instance. Test files are skipped.
+
 `repos` selects the calling repositories only; targets are always looked up
 across the whole registry. Names that match no entry are returned in
 `unknown`, ambiguous ones in `ambiguous`, as for `cross_repo_search_tool`.
