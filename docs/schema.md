@@ -240,6 +240,16 @@ names in `target_placeholders`. No other value from `Parameters`, `Arguments`, `
 `OutputPath`, `ResultPath`, `Choices`, `Comment`, `Error` or `Cause` is read into the graph.
 These targets name no node, so `target_resolution` is `unresolved` for them by construction.
 
+When the same repository defines the Lambda function or ECS task definition in Terraform, a second
+`REFERENCES` edge runs from the Task state to the `aws_lambda_function` or `aws_ecs_task_definition`
+resource node (`asl_resolver.py`). The graph keeps values out, so this is a naming convention: the name
+and the resource label are compared ignoring case and `-` / `_` (`order-validator` and
+`order_validator`), and only when exactly one resource of that type has the label. The edge is
+`INFERRED` at 0.6, with `extra.resolution: "asl_name_convention"` and `extra.external_target`
+holding the external target it stands for. The external edge stays, so a function defined in another
+repository, or one whose name does not match, keeps it. Every pass removes these links and makes
+them again, so an update gives what a full build does.
+
 `CONTAINS` joins the file to the machine, the machine to its top-level states, and a Parallel or
 Map state to the states of its branches and processor.
 

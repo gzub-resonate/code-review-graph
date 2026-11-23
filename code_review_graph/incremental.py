@@ -366,6 +366,16 @@ def _run_hcl_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_asl_resolver(store: GraphStore) -> Optional[dict]:
+    """Link Step Functions states to the Terraform they run without failing a build."""
+    try:
+        from .asl_resolver import resolve_asl_local_targets
+        return resolve_asl_local_targets(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Step Functions resolver failed: %s", exc)
+        return None
+
+
 def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
     """Resolve static/scoped ``Class::method`` calls without failing a build."""
     try:
@@ -3161,6 +3171,7 @@ def full_build(
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
     ember_stats = _run_ember_resolver(store)
+    _run_asl_resolver(store)
     scoped_stats = _run_scoped_resolver(store, repo_root)
     _run_endpoint_index(store, repo_root)
     jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
@@ -3696,6 +3707,10 @@ def incremental_update(
         for path in candidate_paths
     )
     ember_stats = _run_ember_resolver(store) if ember_changed else None
+    if has_graph_changes and any(
+        rp.endswith((".tf", ".hcl", ".asl", ".asl.json")) for rp in all_files
+    ):
+        _run_asl_resolver(store)
     # Project-only edits can rebind C# calls without reparsing a source file,
     # so a project file runs the resolver even when no source was stored.
     scoped_changed = any(
