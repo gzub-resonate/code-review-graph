@@ -149,47 +149,66 @@ def pr_blast_radius_func(
         raise ValueError("give a pull request number (pr) or a head ref (head)")
     store, root = _get_store(repo_root)
     try:
-        repo = str(root)
-        notes: list[str] = []
-        if pr is not None:
-            base_ref, head_sha = pbr.fetch_pull_request(repo, pr, base)
-        else:
-            head_sha = pbr.resolve_commit(repo, head or "", "head")
-            base_ref = pbr.resolve_commit(repo, base or pbr.default_branch(repo), "base")
-        changes, merge_based = pbr.changed_files(repo, base_ref, head_sha)
-        if len(changes) > pbr.MAX_CHANGED_FILES:
-            notes.append(
-                f"{len(changes)} files changed; only the first {pbr.MAX_CHANGED_FILES} were "
-                "read."
-            )
-            changes = changes[:pbr.MAX_CHANGED_FILES]
-        if not merge_based:
-            notes.append(
-                "Git has no merge base for the base and head (a shallow clone): the files are "
-                "compared directly, so changes made on the base since they diverged can show up."
-            )
-        if not changes:
+        loaded = load_pull_request(store, str(root), pr, head, base, depth)
+        if loaded["found"] is None:
             return {
                 "status": "ok",
                 "summary": "No files differ between the base and the head.",
-                "files": [], "total_files": 0, "notes": notes,
+                "files": [], "total_files": 0, "notes": loaded["notes"],
             }
-        ranges = pbr.diff_ranges(repo, base_ref, head_sha, merge_based)
-        sizes = pbr.blob_sizes(
-            repo, head_sha, [c.path for c in changes if c.status != "deleted"],
+        return _build_result(
+            root, loaded["found"], loaded["changes"], loaded["notes"], include_external, depth,
         )
-        found = pbr.analyse(
-            store, repo, changes, ranges, pbr.git_file_reader(repo, head_sha), depth=depth,
-            sizes=sizes,
-        )
-        stacked = _stacked_note(repo, base_ref, head_sha, base)
-        if stacked:
-            notes.append(stacked)
-        return _build_result(root, found, changes, notes, include_external, depth)
     except pbr.PullRequestError as exc:
         return {"status": "error", "error": _sanitize_name(str(exc))}
     finally:
         store.close()
+
+
+def load_pull_request(
+    store: Any, repo: str, pr: int | None, head: str | None, base: str | None, depth: int,
+) -> dict[str, Any]:
+    """Fetch a pull request's files and compare them with the base graph in memory.
+
+    Shared by ``pr_blast_radius_tool`` and ``detect_changes_tool``. Returns ``found`` (the
+    :func:`pbr.analyse` result, or None when no file differs), ``changes``, ``notes``,
+    ``base_ref`` and ``head_sha``. Raises :class:`pbr.PullRequestError`.
+    """
+    if pr is None and not head:
+        raise pbr.PullRequestError("give a pull request number (pr) or a head ref (head)")
+    notes: list[str] = []
+    if pr is not None:
+        base_ref, head_sha = pbr.fetch_pull_request(repo, pr, base)
+    else:
+        head_sha = pbr.resolve_commit(repo, head or "", "head")
+        base_ref = pbr.resolve_commit(repo, base or pbr.default_branch(repo), "base")
+    changes, merge_based = pbr.changed_files(repo, base_ref, head_sha)
+    if len(changes) > pbr.MAX_CHANGED_FILES:
+        notes.append(
+            f"{len(changes)} files changed; only the first {pbr.MAX_CHANGED_FILES} were read."
+        )
+        changes = changes[:pbr.MAX_CHANGED_FILES]
+    if not merge_based:
+        notes.append(
+            "Git has no merge base for the base and head (a shallow clone): the files are "
+            "compared directly, so changes made on the base since they diverged can show up."
+        )
+    out: dict[str, Any] = {
+        "found": None, "changes": changes, "notes": notes,
+        "base_ref": base_ref, "head_sha": head_sha,
+    }
+    if not changes:
+        return out
+    ranges = pbr.diff_ranges(repo, base_ref, head_sha, merge_based)
+    sizes = pbr.blob_sizes(repo, head_sha, [c.path for c in changes if c.status != "deleted"])
+    out["found"] = pbr.analyse(
+        store, repo, changes, ranges, pbr.git_file_reader(repo, head_sha), depth=depth,
+        sizes=sizes,
+    )
+    stacked = _stacked_note(repo, base_ref, head_sha, base)
+    if stacked:
+        notes.append(stacked)
+    return out
 
 
 def _stacked_note(repo: str, base_ref: str, head: str, base_given: Optional[str]) -> Optional[str]:

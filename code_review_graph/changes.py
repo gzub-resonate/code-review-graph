@@ -1487,6 +1487,7 @@ def analyze_changes(
     base: str = "HEAD~1",
     include_churn: bool = False,
     require_vcs: bool = False,
+    changed_nodes: list[GraphNode] | None = None,
 ) -> dict[str, Any]:
     """Analyze changes and produce risk-scored review guidance.
 
@@ -1505,6 +1506,10 @@ def analyze_changes(
             :class:`~code_review_graph.errors.ChangeDiscoveryError` when the
             diff cannot be read at all, rather than silently degrading to a
             file-level analysis. Review gates pass this.
+        changed_nodes: Graph nodes already known to be changed (a pull request's
+            symbols matched in memory). When given, no diff is read and the
+            range mapping is skipped; scoring, flows, test gaps and churn run on
+            these nodes as usual.
 
     Returns:
         Dict with ``summary``, ``risk_score``, ``changed_functions``,
@@ -1530,6 +1535,8 @@ def analyze_changes(
     """
     # Compute changed ranges if not provided.
     ranges_unavailable = ""
+    if changed_nodes is not None:
+        changed_ranges = DiffRanges()
     if changed_ranges is None and repo_root is not None:
         # Diff keys are forward-slash paths relative to the repo root, but
         # the graph stores absolute native paths. Remap so lookups work on
@@ -1578,7 +1585,9 @@ def analyze_changes(
         changed_ranges.deletions if isinstance(changed_ranges, DiffRanges) else {}
     )
     deletion_review = _DeletionReview()
-    if deletions and isinstance(changed_ranges, DiffRanges):
+    if changed_nodes is not None:
+        changed_nodes = list(changed_nodes)
+    elif deletions and isinstance(changed_ranges, DiffRanges):
         # A pure deletion has no new lines, and the lines around the hole are
         # lines it never touched (PR #1167 reported the case). Code symbols
         # are judged from the old side instead; other kinds, such as YAML

@@ -4,6 +4,11 @@
 
 ### Added
 
+- `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The
+  files are read from Git and parsed in memory as `pr_blast_radius_tool` does, matched to the base
+  graph, and scored by the same analysis as a working-tree diff (risk score, flows, test gaps,
+  priorities, churn). A `pull_request` section lists the symbols the pull request adds and removes.
+  `analyze_changes` accepts `changed_nodes` for callers that already know the changed symbols.
 - `pr_blast_radius_tool` gives the blast radius of a pull request from its changed files, so files the
   pull request adds are included although the graph, built from the default branch, has never seen
   them. It reads the files from Git (`pr=<number>` fetches `refs/pull/<n>/head` into `refs/crg/`),
