@@ -944,9 +944,9 @@ How a call is classified:
   kept. A `{name}` in the call does not match a fixed segment on the server.
   One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
 
-What the parser records for JavaScript and TypeScript client calls (a plain
-`Endpoint` node with `role: "client"` and a `REQUESTS` edge from the enclosing
-function):
+What the parser records for JavaScript and TypeScript (all of it is a plain
+`Endpoint` node: client ones have `role: "client"` and a `REQUESTS` edge from
+the enclosing function, server ones a `HANDLES` edge from the handler):
 
 - Calls: `axios.get/post/put/patch/delete/head/options(url)`,
   `axios({method, url})`, `axios.request`, instances from `axios.create`
@@ -963,6 +963,20 @@ function):
   path parameter. A call whose URL cannot be read is recorded as unmatchable
   only for a certain HTTP client (axios, `$.ajax`, Ember ajax, `fetch`), never
   for an imported instance. Test files are skipped.
+- Servers: Next.js app router `route.ts|js` exports (`GET`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `HEAD`, `OPTIONS`; the path comes from the directory,
+  `[id]` becomes `{id}`, `(group)` and `@slot` directories are dropped,
+  `[...path]` and `[[...path]]` are catch-alls), the pages router under
+  `pages/api` (methods read from `req.method` comparisons, otherwise `ANY`), and
+  `app.get('/x', handler)` style calls in files that load Express, Koa, Fastify,
+  Hono, restify, Hapi, polka or connect (also `router.route('/x').get(...)`
+  and `fastify.route({method, url})`). `:id` becomes `{id}`. `app.use('/prefix',
+  router)` mounting is not followed, so a mounted router's routes are
+  recorded without the prefix. A handler written inline, `app.get('/x', (req,
+  res) => ...)`, becomes a Function node named by where it sits
+  (`handler@L12C20`), so every route has its own handler; the calls in its body
+  belong to it, except those on its first line, which stay with the code that
+  registered the route.
 
 `repos` selects the calling repositories only; targets are always looked up
 across the whole registry. Names that match no entry are returned in

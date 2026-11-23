@@ -1,16 +1,21 @@
-"""Parse-time HTTP API calls in JavaScript and TypeScript modules.
+"""Parse-time HTTP routes and API calls in JavaScript and TypeScript modules.
 
-Client calls with a statically known route are read out of one parsed file
-and recorded as ``Endpoint`` nodes, in the same shape the Spring Feign code
-uses: ``axios`` (the default export and instances made with ``axios.create``),
-``fetch``, ``$.ajax`` and friends, and Ember ``ajax``.  Each is a client
-``Endpoint`` (``role`` is ``"client"``) with a ``REQUESTS`` edge from the
-enclosing function.
+Two things are read out of one parsed file and recorded as ``Endpoint``
+nodes, in the same shape the Spring Feign and controller code uses:
+
+* **Client calls** with a statically known route: ``axios`` (the default
+  export and instances made with ``axios.create``), ``fetch``, ``$.ajax`` and
+  friends, and Ember ``ajax``.  Each is a client ``Endpoint`` (``role`` is
+  ``"client"``) with a ``REQUESTS`` edge from the enclosing function.
+* **Server routes**: the Next.js app router (``route.ts``) and pages router
+  (``pages/api``), and Express, Koa, Fastify or Hono style
+  ``app.get('/x', handler)``.  Each is a server ``Endpoint`` with a
+  ``HANDLES`` edge from the handler.
 
 Nothing is guessed.  A URL that is not a string literal, a template literal, a
 concatenation of literals or a same-file ``const`` string is recorded as
 *unmatchable* with a reason (when the call is certainly an HTTP call) or left
-out.
+out; ``tools/registry_tools.py`` joins the rest at query time.
 
 Known limits, also in ``docs/COMMANDS.md``:
 
@@ -19,6 +24,8 @@ Known limits, also in ``docs/COMMANDS.md``:
   ``axios.create`` in the same file (or ``instance.defaults.baseURL = '...'``)
   is applied.
 * Test files are skipped.
+* ``app.use('/prefix', router)`` mounting is not followed; a router's routes
+  are recorded relative to the router.
 """
 
 from __future__ import annotations
@@ -48,21 +55,28 @@ MAX_ENDPOINTS = 2_000
 UNRESOLVED = "<unresolved>"
 
 _HTTP_VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+_SERVER_VERBS = _HTTP_VERBS | {"all"}
+_NEXT_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 #: Verbs whose axios call takes the config as the third argument.
 _BODY_VERBS = frozenset({"post", "put", "patch"})
 
-#: Cheap pre-filter: a file with none of these cannot hold a call.
+#: Cheap pre-filter: a file with none of these cannot hold a call or route.
 _QUICK_RE = re.compile(
     rb"axios|fetch\s*\(|\bajax\b|\$\.|jQuery|getJSON"
-    rb"|\.(?:get|post|put|patch|delete)\s*\(|\bapi\b|[Cc]lient|[Hh]ttp"
+    rb"|\.(?:get|post|put|patch|delete|all|route)\s*\(|\bapi\b|[Cc]lient|[Hh]ttp"
 )
+_SERVER_EVIDENCE_RE = re.compile(
+    rb"""(?:require\(|from\s+|import\s+)['"](?:express|koa|@koa/router|koa-router|fastify"""
+    rb"""|hono|restify|@hapi/hapi|polka|connect)['"/]"""
+)
+_ROUTER_NAME_RE = re.compile(r"^(?:app|server|router|\w*[Rr]outer|\w*[Aa]pp|fastify|api)$")
 _INSTANCE_NAME_RE = re.compile(
     r"^[$_]*(?:api|http|axios|request|fetcher|client|ajax)|(?:Api|Http|Axios|Client|Request|Fetcher|Ajax)$"
 )
 _ABSOLUTE_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//")
 _INTERNAL_IMPORT_PREFIXES = (".", "/", "@/", "~/", "#", "$", "src/", "app/", "lib/")
 
-#: Directories whose files are test doubles, stubs or demos, never real calls.
+#: Directories whose files are test doubles, stubs or demos, never real routes or calls.
 _SKIP_DIRS = frozenset({
     "mocks", "__mocks__", "mock", "fixtures", "__fixtures__", "stories", ".storybook",
     "e2e", "cypress", "playwright", "node_modules", "dist", "build",
@@ -650,6 +664,287 @@ def _client_hit(call: Any, facts: _FileFacts) -> Optional[ClientHit]:
 
 
 # ---------------------------------------------------------------------------
+# Server routes
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ServerHit:
+    """One recognised served route, before it becomes a node."""
+
+    framework: str
+    method: str
+    route: str
+    line: int
+    end_line: int
+    handler: Optional[str] = None
+    catch_all: bool = False
+    optional_catch_all: bool = False
+    # (line, column, end line) of an inline handler function, else None
+    inline: Optional[tuple[int, int, int]] = None
+
+
+_INLINE_HANDLER_TYPES = frozenset({"arrow_function", "function_expression", "function"})
+
+
+def _inline_span(node: Any) -> Optional[tuple[int, int, int]]:
+    """Where an inline handler function sits, so each one gets its own identity."""
+    node = _unwrap(node)
+    if node is None or node.type not in _INLINE_HANDLER_TYPES:
+        return None
+    return node.start_point[0] + 1, node.start_point[1] + 1, node.end_point[0] + 1
+
+
+def _segment_to_route(segment: str) -> tuple[Optional[str], bool, bool]:
+    """Next.js directory segment -> (route piece or ``None`` to drop, catch-all, optional)."""
+    if segment.startswith("[[...") and segment.endswith("]]"):
+        return "{..." + segment[5:-2] + "}", True, True
+    if segment.startswith("[...") and segment.endswith("]"):
+        return "{..." + segment[4:-1] + "}", True, False
+    if segment.startswith("[") and segment.endswith("]"):
+        return "{" + segment[1:-1] + "}", False, False
+    if segment.startswith("(") or segment.startswith("@"):
+        return None, False, False
+    return segment, False, False
+
+
+def next_route_path(parts: list[str]) -> Optional[tuple[str, bool, bool]]:
+    """Route of a Next.js route file from its repo-relative directory parts."""
+    pieces: list[str] = []
+    catch_all = optional = False
+    for segment in parts:
+        piece, is_catch, is_optional = _segment_to_route(segment)
+        if piece is None:
+            continue
+        pieces.append(piece)
+        catch_all = catch_all or is_catch
+        optional = optional or is_optional
+    return "/" + "/".join(pieces), catch_all, optional
+
+
+def _next_hits(rel: str, root: Any, source: bytes) -> list[ServerHit]:
+    parts = rel.split("/")
+    stem = parts[-1].rsplit(".", 1)[0]
+    ext = parts[-1].rsplit(".", 1)[-1]
+    if ext not in ("ts", "tsx", "js", "jsx", "mjs", "cjs") or "node_modules" in parts:
+        return []
+    dirs = parts[:-1]
+    hits: list[ServerHit] = []
+    if stem == "route" and "app" in dirs:
+        base = dirs.index("app")
+        route, catch_all, optional = next_route_path(dirs[base + 1:]) or ("/", False, False)
+        for child in root.children:
+            if child.type != "export_statement":
+                continue
+            for name, handler in _exported_names(child):
+                if name in _NEXT_METHODS:
+                    hits.append(ServerHit(
+                        "nextjs-app", name, route, child.start_point[0] + 1,
+                        child.end_point[0] + 1, handler, catch_all, optional,
+                    ))
+        return hits
+    for index in range(len(dirs) - 1):
+        if dirs[index] == "pages" and dirs[index + 1] == "api":
+            tail = dirs[index + 1:] + ([] if stem == "index" else [stem])
+            if stem.startswith("_"):
+                return []
+            route, catch_all, optional = next_route_path(tail) or ("/", False, False)
+            handler = _default_export_name(root)
+            methods = _pages_methods(source)
+            line = 1
+            for method in methods or ["ANY"]:
+                hits.append(ServerHit(
+                    "nextjs-pages", method, route, line, root.end_point[0] + 1,
+                    handler, catch_all, optional,
+                ))
+            return hits
+    return hits
+
+
+def _exported_names(export: Any) -> list[tuple[str, Optional[str]]]:
+    """``(exported name, local function name)`` pairs of one ``export`` statement."""
+    found: list[tuple[str, Optional[str]]] = []
+    decl = export.child_by_field_name("declaration")
+    if decl is not None:
+        if decl.type in ("function_declaration", "generator_function_declaration"):
+            name = decl.child_by_field_name("name")
+            if name is not None:
+                found.append((_text(name), _text(name)))
+        elif decl.type == "lexical_declaration":
+            for sub in decl.children:
+                if sub.type == "variable_declarator":
+                    name = sub.child_by_field_name("name")
+                    if name is not None and name.type == "identifier":
+                        found.append((_text(name), _text(name)))
+    for child in export.children:
+        if child.type == "export_clause":
+            for spec in child.children:
+                if spec.type == "export_specifier":
+                    name = spec.child_by_field_name("name")
+                    alias = spec.child_by_field_name("alias")
+                    if name is not None:
+                        found.append((_text(alias if alias is not None else name), _text(name)))
+    return found
+
+
+def _default_export_name(root: Any) -> Optional[str]:
+    for child in root.children:
+        if child.type != "export_statement":
+            continue
+        if not any(c.type == "default" for c in child.children):
+            continue
+        decl = child.child_by_field_name("declaration")
+        if decl is not None and decl.type in ("function_declaration", "function_expression"):
+            name = decl.child_by_field_name("name")
+            return _text(name) if name is not None else None
+        value = child.child_by_field_name("value")
+        if value is not None and value.type == "identifier":
+            return _text(value)
+    return None
+
+
+_PAGES_METHOD_RE = re.compile(
+    rb"""(?:method\s*(?:===|==)\s*|case\s+)['"](GET|POST|PUT|PATCH|DELETE)['"]"""
+)
+
+
+def _pages_methods(source: bytes) -> list[str]:
+    seen: list[str] = []
+    for match in _PAGES_METHOD_RE.finditer(source):
+        method = match.group(1).decode()
+        if method not in seen:
+            seen.append(method)
+    return seen
+
+
+def _express_route(path: str) -> tuple[str, bool]:
+    """Express ``:id`` to ``{id}``; a ``*`` segment is a catch-all."""
+    catch_all = False
+    out: list[str] = []
+    for segment in path.split("/"):
+        if segment.startswith(":"):
+            name = re.sub(r"[^A-Za-z0-9_].*$", "", segment[1:]) or "param"
+            out.append("{" + name + "}")
+        elif segment in ("*", "(.*)", "*path"):
+            out.append("{...rest}")
+            catch_all = True
+        else:
+            out.append(segment)
+    return "/".join(out), catch_all
+
+
+def _server_call_hits(call: Any, facts: _FileFacts) -> list[ServerHit]:
+    func = _callee(call)
+    if func is None or func.type != "member_expression":
+        return []
+    prop = func.child_by_field_name("property")
+    verb = _text(prop)
+    if verb not in _SERVER_VERBS and verb != "route":
+        return []
+    obj = _unwrap(func.child_by_field_name("object"))
+    args = _args(call)
+    line = call.start_point[0] + 1
+    end_line = call.end_point[0] + 1
+
+    # fastify.route({ method, url, handler })
+    first_arg = _unwrap(args[0]) if args else None
+    if verb == "route" and first_arg is not None and first_arg.type == "object":
+        return _object_route_hits(first_arg, line, end_line)
+
+    # router.route('/x').get(h).post(h): the verb call's object is a route() call
+    if verb in _SERVER_VERBS and obj is not None and obj.type == "call_expression":
+        inner = _chain_route_path(obj)
+        if inner is None or not args:
+            return []
+        route, catch_all = _express_route(inner)
+        return [ServerHit(
+            "express", "ANY" if verb == "all" else verb.upper(), route, line, end_line,
+            _handler_name(args[-1]), catch_all, inline=_inline_span(args[-1]),
+        )]
+    if verb == "route":
+        return []
+
+    owner = _chain(obj) if obj is not None else []
+    if len(owner) != 1 or owner[0] in facts.axios_names or not _ROUTER_NAME_RE.match(owner[0]):
+        return []
+    if len(args) < 2:
+        return []
+    path = _string_literal(_unwrap(args[0]))
+    if path is None or not path.startswith("/"):
+        return []
+    handler_node = _unwrap(args[-1])
+    if handler_node is None or handler_node.type not in (
+        "arrow_function", "function_expression", "function", "identifier",
+        "member_expression", "call_expression", "await_expression",
+    ):
+        return []
+    route, catch_all = _express_route(path)
+    return [ServerHit(
+        "express", "ANY" if verb == "all" else verb.upper(), route, line, end_line,
+        _handler_name(args[-1]), catch_all, inline=_inline_span(args[-1]),
+    )]
+
+
+def _chain_route_path(call: Any) -> Optional[str]:
+    """Path of a ``x.route('/p')`` call, else ``None``; verbs chained on it recurse."""
+    func = _callee(call)
+    if func is None or func.type != "member_expression":
+        return None
+    prop = _text(func.child_by_field_name("property"))
+    if prop == "route":
+        args = _args(call)
+        return _string_literal(_unwrap(args[0])) if args else None
+    if prop in _SERVER_VERBS:
+        inner = _unwrap(func.child_by_field_name("object"))
+        if inner is not None and inner.type == "call_expression":
+            return _chain_route_path(inner)
+    return None
+
+
+def _object_route_hits(obj: Any, line: int, end_line: int) -> list[ServerHit]:
+    method_node = url_node = handler_node = None
+    for child in obj.children:
+        if child.type != "pair":
+            continue
+        key = _text(child.child_by_field_name("key"))
+        value = child.child_by_field_name("value")
+        if key == "method":
+            method_node = value
+        elif key in ("url", "path"):
+            url_node = value
+        elif key == "handler":
+            handler_node = value
+    path = _string_literal(_unwrap(url_node)) if url_node is not None else None
+    if path is None or not path.startswith("/"):
+        return []
+    methods: list[str] = []
+    value = _unwrap(method_node)
+    if value is not None and value.type == "string":
+        methods = [(_string_literal(value) or "").upper()]
+    elif value is not None and value.type == "array":
+        methods = [
+            (_string_literal(_unwrap(c)) or "").upper() for c in value.children if c.is_named
+        ]
+    methods = [m for m in methods if m]
+    if not methods:
+        return []
+    route, catch_all = _express_route(path)
+    handler = _handler_name(handler_node) if handler_node is not None else None
+    inline = _inline_span(handler_node) if handler_node is not None else None
+    return [
+        ServerHit("express", m, route, line, end_line, handler, catch_all, inline=inline)
+        for m in methods
+    ]
+
+
+def _handler_name(node: Any) -> Optional[str]:
+    node = _unwrap(node)
+    if node is not None and node.type == "identifier":
+        return _text(node)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -682,10 +977,10 @@ def extract(
     language: str,
     is_test: bool,
 ) -> int:
-    """Append HTTP client endpoint nodes and edges for one JS/TS file; return how many.
+    """Append HTTP endpoint nodes and edges for one JS/TS file; return how many.
 
     *file_path* is the identity path used for nodes; *rel_path* is the
-    repo-relative path that excludes test-double directories; *path* is the
+    repo-relative path that decides the Next.js layout; *path* is the
     on-disk path of the file.
     """
     if is_test or any(part in _SKIP_DIRS for part in rel_path.split("/")[:-1]):
@@ -699,6 +994,14 @@ def extract(
             return file_path, None
         return _qualified(node.name, file_path, node.parent_name), node.name
 
+    # -- Next.js route files (no call needed) ---------------------------
+    server_hits: list[ServerHit] = []
+    next_candidate = rel_path.rsplit("/", 1)[-1].startswith("route.") or "/pages/api/" in (
+        "/" + rel_path
+    ) or rel_path.startswith("pages/api/")
+    if next_candidate:
+        server_hits.extend(_next_hits(rel_path, root, source))
+
     wants_calls = bool(_QUICK_RE.search(source)) or (
         "axios" in source.decode("utf-8", errors="ignore")
     )
@@ -706,10 +1009,14 @@ def extract(
     if wants_calls:
         facts = _FileFacts()
         _collect(root, facts, source)
+        server_ok = bool(_SERVER_EVIDENCE_RE.search(source))
         for call in facts.calls:
             hit = _client_hit(call, facts)
             if hit is not None:
                 client_hits.append(hit)
+                continue
+            if server_ok:
+                server_hits.extend(_server_call_hits(call, facts))
 
     counter = 0
     for hit in client_hits[:MAX_ENDPOINTS]:
@@ -752,4 +1059,78 @@ def extract(
             file_path=file_path, line=hit.line, extra=edge_extra,
         ))
         emitted += 1
+
+    function_names = {n.name for n in functions if n.parent_name is None}
+    inline_handlers: dict[tuple[int, int, int], tuple[str, str]] = {}
+    for hit_s in server_hits[:MAX_ENDPOINTS]:
+        handler = hit_s.handler if hit_s.handler in function_names else None
+        if handler:
+            source_qn = _qualified(handler, file_path, None)
+            label = handler
+        elif hit_s.inline is not None:
+            # An inline handler is its own function: one node per function, so two routes
+            # never share a handler, and the routes of one method list (fastify) share one.
+            if hit_s.inline not in inline_handlers:
+                line_s, col_s, end_s = hit_s.inline
+                inline_name = f"handler@L{line_s}C{col_s}"
+                registrar, _ = caller_of(line_s)
+                inline_handlers[hit_s.inline] = (inline_name, registrar)
+                inline_qn = _qualified(inline_name, file_path, None)
+                nodes.append(node_cls(
+                    kind="Function", name=inline_name, file_path=file_path, line_start=line_s,
+                    line_end=end_s, language=language,
+                    extra={"inline_handler": True, "framework": hit_s.framework},
+                ))
+                edges.append(edge_cls(
+                    kind="CONTAINS", source=file_path, target=inline_qn,
+                    file_path=file_path, line=line_s,
+                ))
+                # The registering code uses the handler, as it uses a named one.
+                edges.append(edge_cls(
+                    kind="REFERENCES", source=registrar, target=inline_qn,
+                    file_path=file_path, line=line_s,
+                ))
+            label = inline_handlers[hit_s.inline][0]
+            source_qn = _qualified(label, file_path, None)
+        else:
+            source_qn, caller = caller_of(hit_s.line)
+            label = caller or hit_s.handler or "<anonymous>"
+        name = f"{label}@{hit_s.framework}[{counter}] {hit_s.method} {hit_s.route}"
+        counter += 1
+        meta = {
+            "annotation": hit_s.framework,
+            "handler": label,
+            "http_method": hit_s.method,
+            "route": hit_s.route,
+            "framework": hit_s.framework,
+            "origin": "js",
+        }
+        if hit_s.catch_all:
+            meta["catch_all"] = True
+        if hit_s.optional_catch_all:
+            meta["optional_catch_all"] = True
+        nodes.append(node_cls(
+            kind="Endpoint", name=name, file_path=file_path, line_start=hit_s.line,
+            line_end=hit_s.end_line, language=language, extra=meta,
+        ))
+        edges.append(edge_cls(
+            kind="HANDLES", source=source_qn, target=_qualified(name, file_path, None),
+            file_path=file_path, line=hit_s.line, extra=meta,
+        ))
+        emitted += 1
+
+    # What an inline handler's body calls belongs to the handler, not to the code that
+    # registered it. Edges carry only a line, so a call on the handler's first line stays with
+    # the registrar: that line also holds the registering call itself.
+    for key, (inline_name, registrar) in inline_handlers.items():
+        line_s, _col, end_s = key
+        inline_qn = _qualified(inline_name, file_path, None)
+        for edge in edges:
+            if (
+                edge.kind in ("CALLS", "REFERENCES", REQUESTS_EDGE)
+                and edge.source == registrar
+                and edge.target != inline_qn
+                and line_s < edge.line <= end_s
+            ):
+                edge.source = inline_qn
     return emitted

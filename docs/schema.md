@@ -107,13 +107,17 @@ Known gaps in Feign support:
   names inside `{...}`, when it joins a call to a server endpoint in another registered repo).
 - Feign's native `@RequestLine` contract and Kotlin clients are not supported.
 
-JavaScript and TypeScript client calls use the same node shape, written by `js_api_extract.py`. A
-client `Endpoint` has `role: "client"`, `client: "js_http"`, `origin: "js"`, `client_kind` (`axios`,
+JavaScript and TypeScript use the same node shape, written by `js_api_extract.py`. A client
+`Endpoint` has `role: "client"`, `client: "js_http"`, `origin: "js"`, `client_kind` (`axios`,
 `fetch`, `jquery`, `ember-ajax`), `http_method`, `route` and `route_dynamic`;
 a call that cannot be joined also has `method_dynamic` or `absolute_url`, and `base_url`,
 `base_url_dynamic`, `instance` or `receiver_inferred` say how sure the route is.
-A URL that is not statically known is `<unresolved>` with `route_dynamic: true`. `{param}` is the
-placeholder for a `${expr}` piece of a call.
+A URL that is not statically known is `<unresolved>` with `route_dynamic: true`. A server
+`Endpoint` has `framework` (`nextjs-app`, `nextjs-pages`, `express`), `origin: "js"` and, for a
+rest-of-path route, `catch_all` (and `optional_catch_all`). `{param}` is the placeholder for a `${expr}`
+piece of a call, `{...name}` marks a catch-all piece of a served route. An inline handler is a
+Function node with `extra.inline_handler`, named `handler@L<line>C<column>`; its route's `HANDLES`
+edge starts there.
 - `requests_of` and `requesters_of` take a method or an endpoint qualified name. A class name
   returns nothing, as it does for `endpoints_for` and `handlers_of`.
 

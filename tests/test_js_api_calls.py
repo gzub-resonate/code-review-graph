@@ -1,7 +1,7 @@
 # ruff: noqa: E501
-"""HTTP API calls in JavaScript and TypeScript.
+"""HTTP API calls and served routes in JavaScript and TypeScript.
 
-Cases build files in a temp directory and read the client nodes and edges back.
+Cases build files in a temp directory and read the nodes and edges back.
 Repository, service and route names are invented.
 """
 
@@ -30,6 +30,10 @@ def parse(root: Path, rel: str, text: str | None = None):
 
 def clients(nodes):
     return [n for n in nodes if n.kind == "Endpoint" and n.extra.get("role") == "client"]
+
+
+def servers(nodes):
+    return [n for n in nodes if n.kind == "Endpoint" and n.extra.get("role") != "client"]
 
 
 def sigs(nodes):
@@ -230,7 +234,7 @@ const m = new Map<string, string>();
 export const a = () => m.get('/x');
 export const b = (q: any) => q.get('/y');
 """)
-    assert clients(nodes) == []
+    assert clients(nodes) == [] and servers(nodes) == []
 
 
 def test_a_query_string_glued_to_the_path_is_not_a_path_parameter(tmp_path):
@@ -290,12 +294,171 @@ export async function four() {
     ]
 
 
+# ---------------------------------------------------------------------------
+# Server routes
+# ---------------------------------------------------------------------------
+
+_NEXT = "export async function {m}(req: Request) {{ return new Response('x'); }}\n"
+
+
+def test_next_app_router_route_params_groups_and_methods(tmp_path):
+    nodes, edges = parse(tmp_path, "src/app/(main)/api/tags/[id]/route.ts", _NEXT.format(m="GET") + _NEXT.format(m="DELETE") + "export async function helper() {}\n")
+    assert sigs(servers(nodes)) == [("DELETE", "/api/tags/{id}"), ("GET", "/api/tags/{id}")]
+    handles = edges_of(edges, "HANDLES")
+    assert {e.source.split("::")[-1] for e in handles} == {"GET", "DELETE"}
+    assert all(n.extra["framework"] == "nextjs-app" for n in servers(nodes))
+
+
+def test_next_app_router_const_export_and_clause(tmp_path):
+    nodes, _ = parse(tmp_path, "app/api/x/route.js", """
+const handler = async () => new Response('x');
+export const POST = handler;
+async function put() {}
+export { put as PUT };
+""")
+    assert sigs(servers(nodes)) == [("POST", "/api/x"), ("PUT", "/api/x")]
+
+
+def test_next_catch_all_route_is_marked(tmp_path):
+    nodes, _ = parse(tmp_path, "app/api/proxy/[...path]/route.ts", _NEXT.format(m="GET") + _NEXT.format(m="POST"))
+    found = servers(nodes)
+    assert {n.extra["route"] for n in found} == {"/api/proxy/{...path}"}
+    assert all(n.extra["catch_all"] for n in found)
+    nodes, _ = parse(tmp_path, "app/docs/[[...slug]]/route.ts", _NEXT.format(m="GET"))
+    assert servers(nodes)[0].extra["optional_catch_all"] is True
+
+
+def test_route_file_in_an_ember_pods_app_is_not_a_next_route(tmp_path):
+    nodes, _ = parse(tmp_path, "app/posts/route.js", "import Route from '@ember/routing/route';\nexport default Route.extend({});\n")
+    assert servers(nodes) == []
+
+
+def test_next_pages_router(tmp_path):
+    nodes, edges = parse(tmp_path, "pages/api/users/[id].ts", """
+export default function handler(req, res) {
+  if (req.method === 'PUT') { return res.json({}); }
+  switch (req.method) { case 'DELETE': return res.end(); }
+}
+""")
+    assert sigs(servers(nodes)) == [("DELETE", "/api/users/{id}"), ("PUT", "/api/users/{id}")]
+    assert {e.source.split("::")[-1] for e in edges_of(edges, "HANDLES")} == {"handler"}
+    nodes, _ = parse(tmp_path, "pages/api/index.ts", "export default function handler(req, res) { res.end(); }\n")
+    assert sigs(servers(nodes)) == [("ANY", "/api")]
+
+
+def test_express_routes(tmp_path):
+    nodes, edges = parse(tmp_path, "server/routes.js", """
+const express = require('express');
+const app = express();
+const router = express.Router();
+function listUsers(req, res) { res.json([]); }
+app.get('/users', listUsers);
+router.post('/users/:userId/keys', (req, res) => res.sendStatus(201));
+app.all('/ping', (req, res) => res.end());
+app.get('/files/*', (req, res) => res.end());
+router.route('/orders/:id').get(listUsers).delete(listUsers);
+app.get('/not-a-route');
+app.get(dynamicPath, listUsers);
+""")
+    found = {(n.extra["http_method"], n.extra["route"]): n for n in servers(nodes)}
+    assert set(found) == {
+        ("GET", "/users"), ("POST", "/users/{userId}/keys"), ("ANY", "/ping"),
+        ("GET", "/files/{...rest}"), ("GET", "/orders/{id}"), ("DELETE", "/orders/{id}"),
+    }
+    assert found[("GET", "/files/{...rest}")].extra["catch_all"] is True
+    handles = {e.target.split("::")[-1].split("@")[0]: e.source.split("::")[-1] for e in edges_of(edges, "HANDLES")}
+    assert handles["listUsers"] == "listUsers"
+
+
+def test_inline_handlers_each_have_their_own_identity(tmp_path):
+    nodes, edges = parse(tmp_path, "src/b.ts", """
+import express from 'express';
+const app = express();
+app.get('/a', () => first()); app.get('/b', () => second());
+app.post('/c', function (req, res) {
+  save(req.body);
+  res.end();
+});
+function first() {}
+function second() {}
+function save(x) {}
+""")
+    handlers = {n.name for n in nodes if n.extra.get("inline_handler")}
+    assert len(handlers) == 3  # two on one line are told apart by column
+    by_route = {n.extra["route"]: n.extra["handler"] for n in servers(nodes)}
+    assert set(by_route) == {"/a", "/b", "/c"} and set(by_route.values()) == handlers
+    handles = {e.target.split("::")[-1].split(" ", 1)[-1]: e.source.split("::")[-1]
+               for e in edges_of(edges, "HANDLES")}
+    assert handles == {f"{'POST' if r == '/c' else 'GET'} {r}": h for r, h in by_route.items()}
+    # the registering code still uses each handler, so none is reported as dead code
+    referenced = {e.target.split("::")[-1] for e in edges_of(edges, "REFERENCES")}
+    assert handlers <= referenced
+
+
+def test_inline_handler_body_calls_belong_to_the_handler(tmp_path):
+    nodes, edges = parse(tmp_path, "src/c.ts", """
+import express from 'express';
+const app = express();
+app.post('/c', function (req, res) {
+  save(req.body);
+  res.end();
+});
+setup();
+function save(x) {}
+function setup() {}
+""")
+    (handler,) = [n.name for n in nodes if n.extra.get("inline_handler")]
+    calls = {(e.source.split("::")[-1], e.target.split("::")[-1]) for e in edges_of(edges, "CALLS")}
+    assert (handler, "save") in calls and (handler, "end") in calls
+    # the registering call and the call after the handler stay with the module
+    modules = {t for s, t in calls if s.endswith("src/c.ts")}
+    assert {"post", "setup"} <= modules
+
+
+def test_one_handler_for_several_methods_is_one_function(tmp_path):
+    nodes, edges = parse(tmp_path, "src/f.ts", """
+import Fastify from 'fastify';
+const fastify = Fastify();
+fastify.route({ method: ['GET', 'HEAD'], url: '/health', handler: async () => 'ok' });
+""")
+    assert len([n for n in nodes if n.extra.get("inline_handler")]) == 1
+    assert len({e.source for e in edges_of(edges, "HANDLES")}) == 1
+    assert len(edges_of(edges, "HANDLES")) == 2
+
+
+def test_fastify_object_route_and_koa_router(tmp_path):
+    nodes, _ = parse(tmp_path, "src/f.ts", """
+import Fastify from 'fastify';
+const fastify = Fastify();
+fastify.route({ method: ['GET', 'HEAD'], url: '/health', handler: async () => 'ok' });
+fastify.get('/v1/things/:id', async () => ({}));
+""")
+    assert sigs(servers(nodes)) == [("GET", "/health"), ("GET", "/v1/things/{id}"), ("HEAD", "/health")]
+
+
+def test_server_calls_need_framework_evidence(tmp_path):
+    nodes, _ = parse(tmp_path, "src/x.ts", "const app = new Thing();\napp.get('/x', () => 1);\n")
+    assert servers(nodes) == []
+
+
+def test_axios_calls_are_never_server_routes(tmp_path):
+    nodes, _ = parse(tmp_path, "src/x.ts", """
+import axios from 'axios';
+import express from 'express';
+export const a = (cb) => axios.get('/x', cb);
+""")
+    assert servers(nodes) == [] and len(clients(nodes)) == 1
+
+
 def test_mock_and_story_directories_are_skipped(tmp_path):
     for rel in ("server/mocks/a.js", ".storybook/mocks/b.ts", "stories/c.ts"):
         nodes, _ = parse(tmp_path, rel, """
+const express = require('express');
+const app = express();
+app.get('/x', (q, r) => r.end());
 export const go = () => fetch('/y');
 """)
-        assert clients(nodes) == [], rel
+        assert clients(nodes) == [] and servers(nodes) == [], rel
 
 
 def test_awaited_call_with_type_arguments_is_read(tmp_path):

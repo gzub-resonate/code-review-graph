@@ -4,6 +4,13 @@
 
 ### Added
 
+- JavaScript and TypeScript servers now take part too: the parser records served
+  routes (the Next.js app and pages routers, and Express, Koa, Fastify and Hono
+  style `app.get('/x', handler)`) as server `Endpoint` nodes with `HANDLES`
+  edges. A rest-of-path route such as a Next.js `[...path]` is marked
+  `catch_all`. A handler written inline gets its own function node, so each
+  route has its own handler. Rebuild a graph to index existing JavaScript; see
+  `docs/COMMANDS.md`.
 - JavaScript and TypeScript frontends now record the HTTP calls they make with
   a statically known route (`axios` and `axios.create` instances, `fetch`,
   `$.ajax`, Ember `ajax`) as client `Endpoint` nodes with `REQUESTS` edges from
