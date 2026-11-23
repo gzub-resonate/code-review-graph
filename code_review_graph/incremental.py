@@ -350,6 +350,16 @@ def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
         return None
 
 
+def _run_endpoint_index(store: GraphStore, repo_root: Path) -> Optional[dict]:
+    """Store the repository's HTTP endpoints for the cross-repo tool, without failing a build."""
+    try:
+        from .endpoint_index import build_endpoint_index
+        return build_endpoint_index(store, repo_root)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Endpoint index failed: %s", exc)
+        return None
+
+
 def _enrichment_skip_reason(enrich: Optional[bool]) -> Optional[str]:
     """Why the Jedi step does not run, or ``None`` when it was asked for.
 
@@ -3120,6 +3130,7 @@ def full_build(
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
     scoped_stats = _run_scoped_resolver(store, repo_root)
+    _run_endpoint_index(store, repo_root)
     jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
     _relink_stored_edges(store, repo_root, followed_dirs)
     _refresh_target_resolution(store)
@@ -3646,6 +3657,8 @@ def incremental_update(
         for rp in candidate_paths
     )
     scoped_stats = _run_scoped_resolver(store, repo_root) if scoped_changed else None
+    if has_graph_changes:
+        _run_endpoint_index(store, repo_root)
     reparsed_py = [p for p in reparsed_paths if p.endswith(".py")]
     jedi_stats = (
         _run_jedi_enrichment(store, repo_root, files=reparsed_py, enrich=enrich)

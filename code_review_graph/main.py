@@ -1533,7 +1533,8 @@ async def cross_repo_requests_tool(
 
     Lists the Feign client calls of the registered repos and, for each, the
     controller endpoint in the repo its service name points at, found by HTTP
-    method and route. Read-only and computed on every call; nothing is stored.
+    method and route. Read-only; the join is computed on every call from each
+    repo's stored endpoint index (or its graph when it has none).
     A call is ``matched`` (one endpoint), ``ambiguous`` (several),
     ``case_mismatch`` (no exact route, but one that differs only in letter
     case: a low-confidence lead, not a match), ``no_route_match``,

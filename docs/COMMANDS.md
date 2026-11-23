@@ -921,9 +921,13 @@ cursor: str | None           # next_cursor of the previous reply (see Result Bou
 ```
 
 Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
-call, to the server endpoint it reaches in another registered repository. It is computed on every call from the graphs
-that already exist, opened read-only; nothing is stored, so no rebuild is
-needed beyond a graph that already indexes Feign clients. Each row has the
+call, to the server endpoint it reaches in another registered repository. The join is computed on every call from the
+graphs that already exist, opened read-only. Each repo's side of it (its client calls and its server endpoints, with
+FastAPI and Flask router prefixes already joined) is worked out when its graph is built and kept in the graph's
+`metadata` table under `endpoint_index`, so a call does not re-read every `Endpoint` node. A graph built before that, or
+one whose `Endpoint` rows changed since, is read the old way and gives the same answer; the reply's `endpoint_index`
+field says how many repos came from each (`stored`, `computed`), and an `update` or `build` refreshes a repo's index.
+Each row has the
 calling repo, file and line, the HTTP method, route and service name, a
 `status`, and `candidates` (repo, file, line, method, route; at most five,
 with `candidates_total`).

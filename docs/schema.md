@@ -311,6 +311,11 @@ CREATE TABLE metadata (
 );
 ```
 
+The `endpoint_index` key holds a JSON document (`v`, `stamp`, `clients`, `servers`) with the repository's HTTP client
+calls and server endpoints, written by every build and by an update that changed the graph (`endpoint_index.py`).
+`stamp` digests the `Endpoint` rows it was made from; a reader whose stamp differs, or that does not know `v`, ignores
+the key and reads the nodes. A graph with no `Endpoint` node has no such key.
+
 Tables added by migrations:
 
 ```sql

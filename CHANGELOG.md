@@ -4,6 +4,13 @@
 
 ### Added
 
+- `cross_repo_requests_tool` no longer reads and joins every repo's `Endpoint`
+  nodes on each call. A build or update now stores each repo's client calls and
+  server endpoints, FastAPI and Flask router prefixes already joined, in the
+  graph's `metadata` table (no schema change). The tool reads that and falls
+  back to the graph for a repo with no current index, with the same answer; the
+  reply's `endpoint_index` says how many repos were read each way. On a
+  synthetic repo of 4,410 endpoints the load took 16.5 ms instead of 110.4 ms.
 - `cross_repo_requests_tool` reads past its row ceilings the same way: a reply
   with more calls than fit carries `next_cursor`, and `cursor` returns the next
   page, taking up to `limit` more rows from each calling repo. The cursor is

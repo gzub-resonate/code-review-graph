@@ -215,7 +215,7 @@ code-review-graph register /path/to/other/repo --alias mylib
 ```
 Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset. `code-review-graph serve --http --multi-repo` runs one HTTP server for every registered repository; each tool call must then name one in `repo_root`.
 
-To see which endpoint in another registered repository an outbound Spring Feign call reaches, call `cross_repo_requests_tool`. It lists the calls of every registered repository (or of `repos=["mylib"]`), with the matching endpoint's repository, file, line and route, or the reason there is none (`status="ambiguous"` and `status="no_route_match"` are the usual follow-ups). Nothing is stored; it reads the existing graphs read-only each time. See [COMMANDS.md](COMMANDS.md#cross_repo_requests_tool).
+To see which endpoint in another registered repository an outbound Spring Feign call reaches, call `cross_repo_requests_tool`. It lists the calls of every registered repository (or of `repos=["mylib"]`), with the matching endpoint's repository, file, line and route, or the reason there is none (`status="ambiguous"` and `status="no_route_match"` are the usual follow-ups). It reads the existing graphs read-only; each graph's endpoints come from an index its build stored, and the join is computed on every call. See [COMMANDS.md](COMMANDS.md#cross_repo_requests_tool).
 
 A repository can also be known by extra names that you keep in `repo-aliases.toml`. See [REPO_ALIASES.md](REPO_ALIASES.md).
 

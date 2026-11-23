@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import feign_links as fl
-from .. import js_api_extract, py_api_extract, py_route_prefixes
+from ..endpoint_index import attach as attach_endpoints
+from ..endpoint_index import extract_endpoints, read_endpoint_index
 from ..errors import GraphStoreError
-from ..graph import GraphNode, GraphStore, _sanitize_name
+from ..graph import GraphStore, _sanitize_name
 from ..incremental import get_db_path
 from ..paging import content_stamp, make_scope, paginate_groups, shown_range
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
@@ -303,139 +304,37 @@ def _repo_label(entry: dict[str, Any]) -> str:
     return str(entry.get("alias") or Path(entry["path"]).name)
 
 
-def _relative_file(repo_path: Path, file_path: Optional[str]) -> Optional[str]:
-    """Return ``file_path`` relative to the repo, or ``None`` when it is not inside.
-
-    A path outside the repository is dropped rather than echoed: the response
-    only ever names files the registry entry owns.
-    """
-    if not file_path:
-        return None
-    try:
-        return Path(file_path).relative_to(repo_path).as_posix()
-    except ValueError:
-        pass
-    try:
-        return Path(file_path).resolve().relative_to(repo_path.resolve()).as_posix()
-    except (ValueError, OSError):
-        return None
+_STORED = "stored"
+_COMPUTED = "computed"
 
 
 def _load_endpoints(
     entry: dict[str, Any],
-) -> tuple[list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str]]:
+) -> tuple[list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str]]:
     """Read one repo's Feign client calls and server endpoints, read-only.
 
     The third item is ``None`` on success, else ``"no_database"`` or
     ``"unreadable"``; nothing from the failure (a path, an exception text) is
-    carried out.
+    carried out. The fourth says where the endpoints came from: ``"stored"`` (the
+    index the build wrote) or ``"computed"`` (read from the ``Endpoint`` nodes, for a
+    graph with no current index).
     """
     repo_path = Path(entry["path"])
     try:
         db_path = get_db_path(repo_path, read_only=True)
         if not db_path.is_file():
-            return [], [], "no_database"
+            return [], [], "no_database", None
         with GraphStore(db_path, read_only=True) as store:
-            nodes: list[GraphNode] = store.get_nodes_by_kind(["Endpoint"])
+            endpoints = read_endpoint_index(store)
+            source = _STORED
+            if endpoints is None:
+                source = _COMPUTED
+                endpoints = extract_endpoints(store.get_nodes_by_kind(["Endpoint"]), repo_path)
     except (GraphStoreError, sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("Cannot read endpoints of %s: %s", repo_path, exc)
-        return [], [], "unreadable"
-
-    clients: list[fl.ClientCall] = []
-    servers: list[fl.ServerEndpoint] = []
-    py_maps: dict[str, py_route_prefixes.RouterMap] = {}
-    py_routes: list[tuple[GraphNode, dict[str, Any], str]] = []
-    for node in nodes:
-        extra = node.extra if isinstance(node.extra, dict) else {}
-        if extra.get("role") == py_api_extract.MAP_ROLE:
-            rel = _relative_file(repo_path, node.file_path)
-            if rel:
-                py_maps[rel] = py_route_prefixes.RouterMap(
-                    rel, extra.get("routers") or {}, extra.get("mounts") or [],
-                    extra.get("imports") or {},
-                )
-            continue
-        route = extra.get("route")
-        method = extra.get("http_method")
-        if not isinstance(route, str) or not isinstance(method, str):
-            continue
-        file = _relative_file(repo_path, node.file_path)
-        if extra.get("role") == "client":
-            client_tag = extra.get("client")
-            if client_tag == js_api_extract.CLIENT_TAG:
-                notes: list[str] = []
-                if extra.get("receiver_inferred"):
-                    notes.append("receiver_inferred")
-                if extra.get("base_url_dynamic"):
-                    notes.append("base_url_not_literal")
-                kind = extra.get("client_kind")
-                clients.append(fl.ClientCall(
-                    repo=_repo_label(entry), file=file, line=node.line_start,
-                    http_method=method, route=route, origin="js",
-                    client_kind=kind if isinstance(kind, str) else None,
-                    route_dynamic=bool(extra.get("route_dynamic")),
-                    method_dynamic=bool(extra.get("method_dynamic")),
-                    absolute_url=bool(extra.get("absolute_url")),
-                    notes=tuple(notes),
-                ))
-                continue
-            if client_tag != "feign":
-                continue
-            service = extra.get("service")
-            clients.append(fl.ClientCall(
-                repo=_repo_label(entry), file=file, line=node.line_start,
-                http_method=method, route=route,
-                service=service if isinstance(service, str) else None,
-                service_unresolved=bool(extra.get("service_unresolved")),
-                route_dynamic=bool(extra.get("route_dynamic")),
-                url_literal=bool(extra.get("url_literal")),
-                url_from_argument=bool(extra.get("url_from_argument")),
-            ))
-        elif extra.get("py_route") and file:
-            py_routes.append((node, extra, file))
-        else:
-            servers.append(fl.ServerEndpoint(
-                repo=_repo_label(entry), file=file, line=node.line_start,
-                http_method=method, route=route, origin=str(repo_path),
-                catch_all=bool(extra.get("catch_all")),
-                optional_catch_all=bool(extra.get("optional_catch_all")),
-            ))
-    servers.extend(_python_servers(entry, repo_path, py_routes, py_maps))
-    return clients, servers, None
-
-
-def _python_servers(
-    entry: dict[str, Any],
-    repo_path: Path,
-    routes: list[tuple[GraphNode, dict[str, Any], str]],
-    maps: dict[str, py_route_prefixes.RouterMap],
-) -> list[fl.ServerEndpoint]:
-    """Server endpoints for FastAPI/Flask routes, with their prefixes joined.
-
-    A router's prefix is its own plus that of every router that mounts it, in
-    any file of the repo.  A route whose chain has a prefix that is not a
-    literal is left out rather than guessed.
-    """
-    if not routes:
-        return []
-    files = set(maps) | {file for _n, _e, file in routes}
-    resolver = py_route_prefixes.PrefixResolver(maps, files)
-    found: list[fl.ServerEndpoint] = []
-    for node, extra, file in routes:
-        if extra.get("prefix_dynamic"):
-            continue
-        own_path = extra.get("route_path")
-        path = str(own_path if own_path is not None else extra.get("route") or "")
-        for prefix in resolver.prefixes(file, str(extra.get("router_var") or "")):
-            if prefix is None:
-                continue
-            found.append(fl.ServerEndpoint(
-                repo=_repo_label(entry), file=file, line=node.line_start,
-                http_method=str(extra.get("http_method")),
-                route=py_api_extract.join_path(prefix, path),
-                origin=str(repo_path), catch_all=bool(extra.get("catch_all")),
-            ))
-    return found
+        return [], [], "unreadable", None
+    clients, servers = attach_endpoints(_repo_label(entry), repo_path, endpoints)
+    return clients, servers, None, source
 
 
 def _route_in_scope(call_route: str, wanted: str) -> bool:
@@ -475,7 +374,10 @@ def cross_repo_requests_func(
     points at. JavaScript and TypeScript calls (axios, fetch, jQuery and Ember
     ajax) have no service name: they are matched by method and
     route against the server endpoints of every other registered repo.
-    Nothing is stored; the join is recomputed on every call.
+    Each repo's endpoints are read from the index its build stored (see
+    ``endpoint_index.py``), or worked out from its graph when it has none that is
+    current; the join itself depends on the whole registry and is recomputed on
+    every call.
 
     Args:
         repos: Optional aliases or folder names of the CLIENT repos whose
@@ -502,8 +404,10 @@ def cross_repo_requests_func(
 
     Returns:
         ``results`` rows, ``counts`` by status, ``total``, ``truncated``,
-        ``repos_searched`` and ``unreadable`` (repos whose graph could not be
-        read), plus ``unknown``/``ambiguous`` when ``repos`` was given.
+        ``repos_searched``, ``endpoint_index`` (how many of the repos read had their
+        endpoints from the stored index and how many from their graph) and
+        ``unreadable`` (repos whose graph could not be read), plus
+        ``unknown``/``ambiguous`` when ``repos`` was given.
         When rows remain, ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     from ..registry import Registry
@@ -571,7 +475,10 @@ def cross_repo_requests_func(
         # Each repo's graph is read at most once, whether it turns up as a
         # client repo, a target, or both.
         loaded: dict[
-            int, tuple[list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str]]
+            int,
+            tuple[
+                list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str],
+            ],
         ] = {}
         unreadable: list[dict[str, str]] = []
         unreadable_seen: set[tuple[str, str]] = set()
@@ -585,14 +492,14 @@ def cross_repo_requests_func(
                 })
 
         def load(index: int) -> tuple[
-            list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str]
+            list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str]
         ]:
             if index not in loaded:
                 loaded[index] = _load_endpoints(all_repos[index])
             return loaded[index]
 
         def servers_of(index: int) -> Optional[list[fl.ServerEndpoint]]:
-            _c, srv, why = load(index)
+            _c, srv, why, _src = load(index)
             if why:
                 note_unreadable(all_repos[index], "target", why)
                 return None
@@ -634,7 +541,7 @@ def cross_repo_requests_func(
         for index, entry in enumerate(all_repos):
             if id(entry) not in selected_ids:
                 continue
-            clients, _own_servers, why = load(index)
+            clients, _own_servers, why, _src = load(index)
             if why:
                 note_unreadable(entry, "client", why)
                 continue
@@ -762,6 +669,10 @@ def cross_repo_requests_func(
             "truncated": truncated,
             **page.fields(),
             "repos_searched": searched,
+            "endpoint_index": {
+                kind: sum(1 for item in loaded.values() if item[3] == kind)
+                for kind in (_STORED, _COMPUTED)
+            },
             "unreadable": shown_unreadable,
             "unreadable_total": unreadable_total,
             "unreadable_truncated": unreadable_truncated,
