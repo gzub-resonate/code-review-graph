@@ -4,6 +4,13 @@
 
 ### Added
 
+- The Scala parser records what a cross-file resolver needs: the package clauses a
+  type sits in, its kind (class, trait, object, enum, case class), its parents as
+  written, private and override members, and for each call how it is written, its
+  receiver and the receiver's declared type. Scala imports become one
+  `IMPORTS_FROM` edge per imported name, so a rename, a wildcard and a `given`
+  import are kept instead of dropped. Run `code-review-graph build` once to
+  refresh an existing Scala graph.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

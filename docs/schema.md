@@ -165,6 +165,16 @@ wrote `<path>::Leaf.handle` and only `Alpha` declares `handle`, the target becom
 checks the move again. When the bare-name resolver binds a call this way, `extra.inherited_through`
 names the class the call went through. Both are `INFERRED`.
 
+The Scala parser records what a cross-file resolver reads: on a `Class` node `extra.scala_kind`
+(`class`, `trait`, `object`, `enum` or the `case_` form), `scala_package`,
+`scala_package_scopes` (when package clauses are chained or braced) and `scala_parents` (the
+`extends` clause as written, `?` for a parent that is no plain name); on a `Function` node
+`scala_private` and `scala_override`; on an `IMPORTS_FROM` edge `scala_import` (the dotted
+name), `scala_alias` (a rename), `scala_wildcard` and `scala_given`; on a `CALLS` edge
+`scala_form` (`bare`, `member`, `new` or `other`), `scala_receiver`, `scala_receiver_type`,
+`scala_receiver_new`, `scala_receiver_apply`, `scala_receiver_expr_new`,
+`scala_receiver_local`, `scala_shadowed`, `scala_type` and `scala_argc`.
+
 | Kind | Source -> target | Notes |
 |---|---|---|
 | CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`) |
