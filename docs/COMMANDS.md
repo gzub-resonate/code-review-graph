@@ -850,9 +850,12 @@ file_pattern: str | None     # (dead_code) File path substring
 repo_root: str | None
 max_results: int = 50        # Edits/symbols/suggestions returned (max 150)
 detail_level: str = "standard"  # "minimal" keeps identifying fields only
+cursor: str | None           # next_cursor of the previous reply (see Paging)
 ```
 Truncating a rename preview truncates only the response. The stored preview
-keeps every edit, so `apply_refactor_tool` applies the full set.
+keeps every edit, so `apply_refactor_tool` applies the full set. Paging a rename
+preview only reads: a later page issues no new `refactor_id` and never applies an
+edit, so apply with the id the first page returned, before it expires.
 
 `old_name` is matched exactly: a name, `Class.method` or a qualified name such as
 `pkg/util.py::helper`. When a bare name belongs to several symbols, the first by
@@ -1077,6 +1080,9 @@ context window (see #849). The contract is the same everywhere:
 
 `list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool` and
 `cross_repo_requests_tool` do not stop at their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
+`list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool` and `refactor_tool`
+do not stop at
+their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
 back as `cursor` returns the next page, so the ceiling bounds one reply, not what
 you can read. This follows the cursor pagination the MCP specification defines for
 its list operations (`cursor` in, `nextCursor` out), with the result key spelled in
@@ -1093,6 +1099,9 @@ snake_case like the other keys here.
   Cursors are not signed and hold no state on the server.
 - Ties in a ranking are ordered by a fixed key (flow and community id, a hub's
   qualified name), so a page never repeats or skips a row.
+- `refactor_tool` pages the edit list of a rename, the dead-code list and the
+  suggestion list. A cursor is bound to the mode and its arguments (`old_name` and
+  `new_name`, or `kind` and `file_pattern`), so one from another mode is refused.
 
 ## MCP Prompts (5 workflow templates)
 

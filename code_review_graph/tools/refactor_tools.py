@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from ..hints import generate_hints, get_session
 from ..incremental import find_project_root
+from ..paging import graph_stamp, make_scope, paginate, shown_range
 from ..refactor import (
     apply_refactor,
     find_dead_code,
+    rename_edit_list,
     rename_preview,
     suggest_refactorings,
 )
 from ._common import (
-    _bounded,
     _get_store,
-    _shown_of,
     _validate_positive_int,
     _validate_repo_root,
 )
@@ -39,6 +41,12 @@ def _project(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[s
     return [{k: r[k] for k in fields if k in r} for r in rows]
 
 
+def _digest(edits: list[dict[str, Any]]) -> str:
+    """Short digest of a rename's edit list, to tell a changed list from the same one."""
+    text = json.dumps(edits, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def refactor_func(
     mode: str = "rename",
     old_name: str | None = None,
@@ -48,6 +56,7 @@ def refactor_func(
     repo_root: str | None = None,
     max_results: int = 50,
     detail_level: str = "standard",
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Unified refactoring entry point.
 
@@ -70,9 +79,17 @@ def refactor_func(
             edit, so ``apply_refactor_tool`` still applies the full set.
         detail_level: "standard" (default) returns full records; "minimal"
             keeps only the identifying fields per record.
+        cursor: ``next_cursor`` from the previous reply, to read the next
+            page of the same mode and arguments. Omit it for the first page.
+            A cursor is opaque and only valid for the same graph. Paging only
+            reads: a later rename page issues no new ``refactor_id`` and
+            applies nothing; apply with the id the first page returned,
+            before it expires.
 
     Returns:
-        Mode-specific results dict with ``total`` and ``truncated``.
+        Mode-specific results dict with ``total`` and ``truncated``. When
+        ``max_results`` or the ceiling cut the list, ``next_cursor`` is the
+        ``cursor`` that returns the next page; a later page adds ``offset``.
     """
     valid_modes = {"rename", "dead_code", "suggest"}
     if mode not in valid_modes:
@@ -95,33 +112,53 @@ def refactor_func(
                         "rename mode requires both old_name and new_name."
                     ),
                 }
-            preview = rename_preview(store, old_name, new_name)
+            # A cursor only reads: it recomputes the edits and registers nothing,
+            # so it can neither mint a refactor_id nor extend an expiry.
+            preview = (
+                rename_edit_list(store, old_name, new_name) if cursor
+                else rename_preview(store, old_name, new_name)
+            )
             if preview is None:
                 return {
                     "status": "not_found",
                     "summary": f"No node found matching '{old_name}'.",
                 }
-            # Bound only the response copy. ``preview`` is the object held in
+            # Page only the response copy. ``preview`` is the object held in
             # the pending-refactor registry, so apply_refactor still writes
             # every edit; slicing it here would silently drop real edits.
-            edits, total, truncated = _bounded(
-                preview["edits"], max_results, _MAX_REFACTOR_RESULTS,
+            # The stamp covers the edits themselves, which also depend on
+            # source files the graph stamp does not see.
+            page = paginate(
+                preview["edits"], max_results, _MAX_REFACTOR_RESULTS, cursor,
+                scope=make_scope(
+                    "refactor_tool", mode=mode, old_name=old_name, new_name=new_name,
+                ),
+                stamp=graph_stamp(store, _digest(preview["edits"])),
             )
+            edits, total = page.items, page.total
             if detail_level == "minimal":
                 edits = _project(edits, _MINIMAL_EDIT_FIELDS)
+            if cursor:
+                note = (
+                    "No new refactor_id is issued by a later page; apply with "
+                    "the one from the first page."
+                )
+            else:
+                note = (
+                    f"Use apply_refactor_tool(refactor_id='{preview['refactor_id']}') "
+                    "to apply."
+                )
             result = {
                 "status": "ok",
                 "summary": (
                     f"Rename preview: {old_name} -> {new_name}, "
-                    f"{total} edit(s)"
-                    + _shown_of(len(edits), total) + ". "
-                    f"Use apply_refactor_tool(refactor_id="
-                    f"'{preview['refactor_id']}') to apply."
+                    f"{total} edit(s)" + shown_range(page) + ". " + note
                 ),
                 **preview,
                 "edits": edits,
                 "total": total,
-                "truncated": truncated,
+                "truncated": page.truncated,
+                **page.fields(),
             }
             result["_hints"] = generate_hints(
                 "refactor_tool", result, get_session()
@@ -129,24 +166,29 @@ def refactor_func(
             return result
 
         elif mode == "dead_code":
-            dead, total, truncated = _bounded(
+            page = paginate(
                 find_dead_code(
                     store, kind=kind, file_pattern=file_pattern, root=root
                 ),
-                max_results,
-                _MAX_REFACTOR_RESULTS,
+                max_results, _MAX_REFACTOR_RESULTS, cursor,
+                scope=make_scope(
+                    "refactor_tool", mode=mode, kind=kind, file_pattern=file_pattern,
+                ),
+                stamp=graph_stamp(store),
             )
+            dead, total = page.items, page.total
             if detail_level == "minimal":
                 dead = _project(dead, _MINIMAL_DEAD_FIELDS)
             result = {
                 "status": "ok",
                 "summary": (
                     f"Found {total} dead code symbol(s)"
-                    + _shown_of(len(dead), total) + "."
+                    + shown_range(page) + "."
                 ),
                 "dead_code": dead,
                 "total": total,
-                "truncated": truncated,
+                "truncated": page.truncated,
+                **page.fields(),
             }
             result["_hints"] = generate_hints(
                 "refactor_tool", result, get_session()
@@ -154,20 +196,23 @@ def refactor_func(
             return result
 
         else:  # suggest
-            suggestions, total, truncated = _bounded(
-                suggest_refactorings(store), max_results, _MAX_REFACTOR_RESULTS,
+            page = paginate(
+                suggest_refactorings(store), max_results, _MAX_REFACTOR_RESULTS, cursor,
+                scope=make_scope("refactor_tool", mode=mode), stamp=graph_stamp(store),
             )
+            suggestions, total = page.items, page.total
             if detail_level == "minimal":
                 suggestions = _project(suggestions, _MINIMAL_SUGGESTION_FIELDS)
             result = {
                 "status": "ok",
                 "summary": (
                     f"Generated {total} refactoring suggestion(s)"
-                    + _shown_of(len(suggestions), total) + "."
+                    + shown_range(page) + "."
                 ),
                 "suggestions": suggestions,
                 "total": total,
-                "truncated": truncated,
+                "truncated": page.truncated,
+                **page.fields(),
             }
             result["_hints"] = generate_hints(
                 "refactor_tool", result, get_session()

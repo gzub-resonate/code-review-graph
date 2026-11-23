@@ -1669,6 +1669,56 @@ def _rename_target(store: GraphStore, old_name: str) -> Optional[GraphNode]:
     return min(candidates, key=lambda n: (n.file_path, n.line_start))
 
 
+def _build_rename(
+    store: GraphStore, old_name: str, new_name: str,
+) -> Optional[tuple[GraphNode, list[dict[str, Any]], dict[str, int]]]:
+    """The target node, its edits and their confidence counts; stores nothing."""
+    node = _rename_target(store, old_name)
+    if node is None:
+        logger.warning("rename_preview: node %r not found", old_name)
+        return None
+
+    edits = _rename_edits(store, node, new_name)
+    if edits is None:
+        logger.warning(
+            "rename_preview: %s is not at %s:%d any more; the graph is stale",
+            node.name, node.file_path, node.line_start,
+        )
+        return None
+
+    stats = {"high": 0, "medium": 0, "low": 0}
+    for e in edits:
+        stats[e["confidence"]] += 1
+    return node, edits, stats
+
+
+def rename_edit_list(
+    store: GraphStore, old_name: str, new_name: str,
+) -> Optional[dict[str, Any]]:
+    """Recompute a rename's edits for reading a later page of them.
+
+    Read-only: unlike :func:`rename_preview` it registers nothing, so it issues no
+    ``refactor_id`` and starts no expiry clock. A preview can be applied only through
+    the id its first call returned, and only until that id expires.
+
+    Returns:
+        ``type``, ``old_name``, ``new_name``, ``qualified_name``, ``edits`` and
+        ``stats``, or ``None`` when :func:`rename_preview` would return ``None``.
+    """
+    built = _build_rename(store, old_name, new_name)
+    if built is None:
+        return None
+    node, edits, stats = built
+    return {
+        "type": "rename",
+        "old_name": _sanitize_name(old_name),
+        "new_name": _sanitize_name(new_name),
+        "qualified_name": _sanitize_name(node.qualified_name),
+        "edits": edits,
+        "stats": stats,
+    }
+
+
 def rename_preview(
     store: GraphStore,
     old_name: str,
@@ -1694,22 +1744,10 @@ def rename_preview(
         symbol has that name or its definition is no longer where the graph
         says (the graph is stale).
     """
-    node = _rename_target(store, old_name)
-    if node is None:
-        logger.warning("rename_preview: node %r not found", old_name)
+    built = _build_rename(store, old_name, new_name)
+    if built is None:
         return None
-
-    edits = _rename_edits(store, node, new_name)
-    if edits is None:
-        logger.warning(
-            "rename_preview: %s is not at %s:%d any more; the graph is stale",
-            node.name, node.file_path, node.line_start,
-        )
-        return None
-
-    stats = {"high": 0, "medium": 0, "low": 0}
-    for e in edits:
-        stats[e["confidence"]] += 1
+    node, edits, stats = built
 
     refactor_id = uuid.uuid4().hex[:8]
     preview: dict[str, Any] = {
