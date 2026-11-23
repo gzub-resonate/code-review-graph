@@ -167,7 +167,7 @@ names the class the call went through. Both are `INFERRED`.
 
 | Kind | Source -> target | Notes |
 |---|---|---|
-| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`) |
+| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`). A call through an injected interface with several implementations is bound to one class and records `extra.resolution` (`spring_qualifier`, `spring_primary` or `spring_bean_name`) plus the `extra.qualifier` or `extra.bean_name` it used; an undecidable call stays on the interface method |
 | IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package). An HTML `<script src>`, a Liquid `render` or `include` and an XSLT `xsl:import` or `xsl:include` are imports too |
 | INHERITS | child class -> parent class | |
 | IMPLEMENTS | implementing class -> interface | |
@@ -175,7 +175,7 @@ names the class the call went through. Both are `INFERRED`.
 | TESTED_BY | function -> test function | |
 | REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment |
 | DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives |
-| INJECTS | Spring bean -> injected field or constructor parameter type | Spring enrichment |
+| INJECTS | Spring bean -> injected field or constructor parameter type (`extra.qualifier` holds a literal `@Qualifier` value; class nodes carry `spring_bean_name` and `spring_qualifiers`) | Spring enrichment |
 | CONSUMES | `@KafkaListener` / `@KafkaHandler` method -> `kafka:<topic>` | Spring Kafka enrichment |
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |

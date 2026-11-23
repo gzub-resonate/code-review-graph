@@ -18,6 +18,11 @@
   finished, and which git and editor hooks are installed and the version of
   the copy they run. It changes nothing, exits 1 when a check
   fails, and takes `--json`.
+- Calls to an injected interface that has several implementations now resolve
+  to the one implementation picked by `@Qualifier`, `@Primary` or the bean or
+  field name, so call graphs and impact analysis reach the real class. Calls
+  that cannot be decided stay on the interface as before. Run
+  `code-review-graph build` once to update an existing graph.
 
 ### Changed
 
