@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
 from pathlib import Path, PurePath
@@ -27,6 +29,7 @@ from ..incremental import (
     path_within_repo,
     resolve_review_base,
 )
+from ..paging import CursorError, graph_stamp, make_scope, paginate, shown_range
 from ..parser import is_test_file, normalize_file_path
 from ._common import (
     _bounded,
@@ -55,6 +58,16 @@ _MAX_CHANGED_FUNCTIONS = 100
 _MAX_DETECT_SOURCE_LINES = 600
 # Symbols a diff deleted, each with up to three users: ~180 tokens a row.
 _MAX_REMOVED_SYMBOLS = 25
+
+
+def _digest_of(*parts: Any) -> str:
+    """Short digest of the exact rows a cursor pages over (changed files, row names).
+
+    A review's rows come from a git diff recomputed on every call, not from one graph
+    row set, so a cursor also records what the list held and is refused once it differs.
+    """
+    text = json.dumps(parts, default=str, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 # The source budget above used to be spent first come first served over the
 # changed-file list, which is the order Git happened to emit. One
@@ -441,6 +454,7 @@ def get_review_context(
     detail_level: str = "standard",
     max_results: int = 50,
     max_files: int = 25,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Generate a focused review context from changed files.
 
@@ -464,10 +478,20 @@ def get_review_context(
             (default 25, capped at 200). A whole-repo diff otherwise inlined
             every tracked file's source. Snippets additionally share an
             800-line budget and ``max_lines_per_file`` is capped at 500.
+        cursor: ``next_cursor`` from the previous reply, to read the next page
+            of changed files. Omit it for the first page. A cursor is opaque
+            and only valid for the same base, changed-file list, depth and
+            detail level on the same graph; ``"minimal"`` has no pages.
 
     Returns:
         Structured review context with subgraph, source snippets, and
-        review guidance, plus a ``truncated`` flag. ``changed_files`` is
+        review guidance, plus a ``truncated`` flag. When more changed files
+        remain, ``context.next_cursor`` is the ``cursor`` that returns the
+        next page (``context.offset`` names where a later page starts). Only
+        the risk-ranked changed files are paged, each page with its own
+        ``file_risk`` and source snippets; ``impacted_files``, the ``graph``
+        lists and ``review_guidance`` describe the whole change, so they are
+        on the first page only and stay bounded by ``max_results``. ``changed_files`` is
         ordered by the risk score ``detect_changes`` reports (highest
         first, reported per file in ``file_risk``), and both the file cap
         and the shared source-line budget are spent in that order. The
@@ -518,6 +542,10 @@ def get_review_context(
         )
 
         if detail_level == "minimal":
+            if cursor:
+                raise CursorError(
+                    'detail_level="minimal" has no pages; call again without a cursor'
+                )
 
             key_entities = [
                 n.name for n in impact["changed_nodes"][:5]
@@ -592,9 +620,16 @@ def get_review_context(
                 for i, rel in enumerate(changed_files)
             )
         ]
-        shown_files, files_total, files_cut = _bounded(
-            ranked_files, max_files, _MAX_REVIEW_FILES,
+        page = paginate(
+            ranked_files, max_files, _MAX_REVIEW_FILES, cursor,
+            scope=make_scope(
+                "get_review_context_tool", base=base, changed_files=changed_files,
+                max_depth=max_depth, detail_level=detail_level,
+            ),
+            stamp=graph_stamp(store, _digest_of(changed_files, ranked_files)),
         )
+        shown_files, files_total, files_cut = page.items, page.total, page.truncated
+        later_page = page.offset > 0
         impacted_files, impacted_total, impacted_cut = _bounded(
             impact["impacted_files"], max_files, _MAX_REVIEW_FILES,
         )
@@ -617,18 +652,24 @@ def get_review_context(
             "file_risk": {
                 rel: round(file_risk.get(rel, 0.0), 4) for rel in shown_files
             },
-            "impacted_files": impacted_files,
-            "impacted_files_total": impacted_total,
-            "graph": {
-                "changed_nodes": [node_to_dict(n) for n in changed_nodes],
-                "changed_nodes_total": changed_nodes_total,
-                "impacted_nodes": [node_to_dict(n) for n in impacted_nodes],
-                "impacted_nodes_total": impacted_nodes_total,
-                "edges": [edge_to_dict(e) for e in edges],
-                "edges_total": edges_total,
-            },
-            "truncated": truncated,
         }
+        if not later_page:
+            context.update({
+                "impacted_files": impacted_files,
+                "impacted_files_total": impacted_total,
+                "graph": {
+                    "changed_nodes": [node_to_dict(n) for n in changed_nodes],
+                    "changed_nodes_total": changed_nodes_total,
+                    "impacted_nodes": [node_to_dict(n) for n in impacted_nodes],
+                    "impacted_nodes_total": impacted_nodes_total,
+                    "edges": [edge_to_dict(e) for e in edges],
+                    "edges_total": edges_total,
+                },
+            })
+        # Later pages carry the changed files only; the whole-change lists were
+        # on the first page, so their cut no longer says anything about this one.
+        context["truncated"] = page.truncated if later_page else truncated
+        context.update(page.fields())
 
         # Add source snippets for the bounded file list, spending a shared
         # line budget. Snippets were 109k of a 134k-token worst case: without
@@ -728,20 +769,24 @@ def get_review_context(
             if graph_files
             else "- None of these files are in the graph, so the blast radius is unknown."
         )
-        context["review_guidance"] = guidance
-
-        summary_parts = [
-            f"Review context for {files_total} changed file(s)"
-            + _shown_of(len(shown_files), files_total) + ":",
-            f"  - {changed_nodes_total} directly changed nodes"
-            + _shown_of(len(changed_nodes), changed_nodes_total),
-            f"  - {impacted_nodes_total} impacted nodes"
-            f" in {impacted_total} files"
-            + _shown_of(len(impacted_nodes), impacted_nodes_total),
-            "",
-            "Review guidance:",
-            guidance,
-        ]
+        header = (
+            f"Review context for {files_total} changed file(s)" + shown_range(page) + ":"
+        )
+        if later_page:
+            summary_parts = [header]
+        else:
+            context["review_guidance"] = guidance
+            summary_parts = [
+                header,
+                f"  - {changed_nodes_total} directly changed nodes"
+                + _shown_of(len(changed_nodes), changed_nodes_total),
+                f"  - {impacted_nodes_total} impacted nodes"
+                f" in {impacted_total} files"
+                + _shown_of(len(impacted_nodes), impacted_nodes_total),
+                "",
+                "Review guidance:",
+                guidance,
+            ]
         if unmatched_files:
             summary_parts.append(_unmatched_file_warning(unmatched_files))
 
@@ -981,6 +1026,7 @@ def detect_changes_func(
     detail_level: str = "standard",
     max_results: int = 25,
     max_flows: int = 20,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Detect changes and produce risk-scored review guidance.
 
@@ -1007,10 +1053,21 @@ def detect_changes_func(
         max_flows: Maximum affected flows to embed (default 20, capped at
             200). The embedded flows carry per-flow metadata only; use
             get_affected_flows_tool for step detail. See #849.
+        cursor: ``next_cursor`` from the previous reply, to read the next page
+            of changed functions. Omit it for the first page. A cursor is opaque
+            and only valid for the same base, changed-file list, depth and
+            detail level on the same graph; ``"minimal"`` has no pages.
 
     Returns:
         Risk-scored analysis with changed functions, YAML paths, affected
-        flows, test gaps, and review priorities, plus ``truncated``.
+        flows, test gaps, and review priorities, plus ``truncated``. When
+        more changed functions remain, ``next_cursor`` is the ``cursor`` that
+        returns the next page (``offset`` names where a later page starts).
+        Only ``changed_functions`` is paged; a later page carries just those
+        rows with the risk score and totals. The other lists (YAML and JSON
+        paths, test gaps, flows, removed symbols, changed files) are on the
+        first page only and stay bounded by ``max_results`` and ``max_flows``,
+        so the first page's ``truncated`` can be true without ``next_cursor``.
     """
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_flows, "max_flows")
@@ -1044,6 +1101,11 @@ def detect_changes_func(
                 "review_priorities": [],
             }
 
+        if cursor and detail_level == "minimal":
+            raise CursorError(
+                'detail_level="minimal" has no pages; call again without a cursor'
+            )
+
         original_tokens = estimate_file_tokens(root, changed_files)
 
         # Convert to absolute paths for graph lookup. Graph identity uses
@@ -1075,13 +1137,34 @@ def detect_changes_func(
             include_churn=True,
         )
 
+        # The changed functions are the paged list. The cursor is bound to the exact
+        # review (base, changed files, depth, detail level), to the graph, and to the
+        # ordered function names, since a diff is recomputed on every call.
+        page = None
+        source_funcs = analysis.get("changed_functions", [])
+        if detail_level != "minimal":
+            page = paginate(
+                analysis.get("changed_functions", []), max_results, _MAX_CHANGED_FUNCTIONS,
+                cursor,
+                scope=make_scope(
+                    "detect_changes_tool", base=base, changed_files=changed_files,
+                    max_depth=max_depth, detail_level=detail_level,
+                ),
+                stamp=graph_stamp(store, _digest_of(
+                    changed_files,
+                    [f.get("qualified_name") for f in analysis.get("changed_functions", [])],
+                )),
+            )
+            source_funcs = page.items
+
         # Optionally include source snippets for changed functions, spending a
         # shared line budget. Inlining every changed function body turned a
-        # whole-repo diff into a 30k-token ``changed_functions`` list.
+        # whole-repo diff into a 30k-token ``changed_functions`` list. The budget is
+        # spent on the page being returned, in order.
         if include_source:
             budget = _MAX_DETECT_SOURCE_LINES
             followed = followed_files(store)
-            for func in analysis.get("changed_functions", []):
+            for func in source_funcs:
                 if budget <= 0:
                     break
                 fp = func.get("file_path")
@@ -1124,11 +1207,22 @@ def detect_changes_func(
                 # missing the change-frequency term.
                 "churn_status": analysis.get("churn_status", "off"),
             }
+        elif page is not None and page.offset > 0:
+            result = {
+                "status": "ok",
+                "summary": (
+                    f"Changed function(s) of this review: {page.total}" + shown_range(page)
+                    + "\n  - The other lists are on the first page."
+                ),
+                "risk_score": analysis.get("risk_score", 0.0),
+                "changed_functions": page.items,
+                "changed_functions_total": page.total,
+                "truncated": page.truncated,
+                **page.fields(),
+            }
         else:
-            funcs, funcs_total, funcs_cut = _bounded(
-                analysis.get("changed_functions", []),
-                max_results, _MAX_CHANGED_FUNCTIONS,
-            )
+            assert page is not None
+            funcs, funcs_total, funcs_cut = page.items, page.total, page.truncated
             gaps, gaps_total, gaps_cut = _bounded(
                 analysis.get("test_gaps", []),
                 max_results, _MAX_CHANGED_FUNCTIONS,
@@ -1200,6 +1294,7 @@ def detect_changes_func(
                 "affected_flows": _project(flows, _DETECT_FLOW_FIELDS),
                 "affected_flows_total": flows_total,
                 "truncated": any_cut,
+                **page.fields(),
             }
         if notes:
             # Said once, first: the review covers different files than the

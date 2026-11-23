@@ -655,6 +655,7 @@ async def get_review_context_tool(
     detail_level: str = "standard",
     max_results: int = 100,
     max_files: int = 25,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Generate a focused, token-efficient review context for code changes.
 
@@ -674,6 +675,14 @@ async def get_review_context_tool(
             Default: 50. Each list reports its untruncated ``*_total``.
         max_files: Maximum files listed and given source snippets.
             Default: 25. Snippets share an 800-line budget.
+        cursor: The ``next_cursor`` of a previous reply (``context.next_cursor``),
+            to read the next page of changed files. Only valid for the same base,
+            changed files, depth and detail level on the same graph.
+
+    Returns:
+        The review context. When more changed files remain, ``context.next_cursor``
+        is the ``cursor`` for the next page; only the changed files and their
+        snippets are paged, the graph lists are on the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -682,7 +691,7 @@ async def get_review_context_tool(
             changed_files=changed_files, max_depth=max_depth,
             include_source=include_source, max_lines_per_file=max_lines_per_file,
             repo_root=root, base=base, detail_level=detail_level,
-            max_results=max_results, max_files=max_files,
+            max_results=max_results, max_files=max_files, cursor=cursor,
         ),
         root,
     )
@@ -1107,6 +1116,7 @@ async def detect_changes_tool(
     detail_level: str = "standard",
     max_results: int = 25,
     max_flows: int = 20,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Detect changes and produce risk-scored, priority-ordered review guidance.
 
@@ -1130,6 +1140,14 @@ async def detect_changes_tool(
         max_flows: Maximum affected flows to embed. Embedded flows carry
             per-flow metadata only — use get_affected_flows_tool for step
             detail. Default: 20.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            changed functions. Only valid for the same base, changed files, depth
+            and detail level on the same graph.
+
+    Returns:
+        The risk-scored analysis. When more changed functions remain,
+        ``next_cursor`` is the ``cursor`` for the next page; the other lists
+        are on the first page only.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1138,7 +1156,7 @@ async def detect_changes_tool(
             base=base, changed_files=changed_files,
             include_source=include_source, max_depth=max_depth,
             repo_root=root, detail_level=detail_level,
-            max_results=max_results, max_flows=max_flows,
+            max_results=max_results, max_flows=max_flows, cursor=cursor,
         ),
         root,
         timeout_hint=_DETECT_CHANGES_TIMEOUT_HINT,
