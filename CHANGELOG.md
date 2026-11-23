@@ -11,7 +11,7 @@
   `analyze_changes` accepts `changed_nodes` for callers that already know the changed symbols.
 - `pr_blast_radius_tool` gives the blast radius of a pull request from its changed files, so files the
   pull request adds are included although the graph, built from the default branch, has never seen
-  them. It reads the files from Git (`pr=<number>` fetches `refs/pull/<n>/head` into `refs/crg/`),
+  them. It reads the files from Git (`pr=<number>` fetches `refs/pull/<n>/head` into a temporary repository that is removed after the call),
   parses them in memory and compares them with the base graph, then reports per file the symbols
   changed, added and removed and what reaches them, the routes added or removed, the endpoints
   affected with the client calls in other registered repos that reach them, migrations the pull
@@ -251,6 +251,11 @@
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - Feign client methods are no longer listed as served routes by `endpoints_for`
   or `handlers_of`. Run `code-review-graph build` once to re-index existing
   Feign interfaces.
@@ -268,6 +273,14 @@
 
 ### Fixed
 
+- `pr_blast_radius_tool` and `detect_changes_tool` accept a `head` commit or a `base` branch the
+  checkout has not fetched. A full commit SHA, or a branch name, is fetched from `origin` when the
+  checkout lacks it. An unresolvable ref now fails with an error naming the ref (`head` or
+  `base`) and Git's own message, instead of "git rev-parse failed: no detail".
+- Server logs now carry every tool error reply (tool name, repository and error), so a failed call
+  can be found in the server's log.
+- A write that fails part-way (a full disk, an unencodable string) no longer leaves a `.tmp` file
+  behind for the install manifest or the watcher health file.
 - When class names, file-name parts or keywords tie on count, a community is
   now named after the alphabetically first one, not the one that came first
   among its members, so presenting the same files in another order no longer
@@ -650,6 +663,11 @@ settings are off unless you turn them on. Read the
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - Dependency minimums are raised to versions that are tested and that install
   on every supported Python: `mcp>=1.29.0`, `anyio>=4.8.0`, `tree-sitter>=0.26.0`,
   `tree-sitter-language-pack>=0.13.0` and `pyyaml>=6.0.2`. PyYAML 6.0 fails to
@@ -1431,6 +1449,11 @@ settings are off unless you turn them on. Read the
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - Keyword search is rebuilt, and it needs a rebuilt graph. `_fts_search`
   wrapped the whole query in one pair of double quotes, so every multi-word
   search was an exact-adjacency phrase match: on a build of this repository
@@ -2061,6 +2084,11 @@ breaking changes.
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - Updated supported async, embedding, watchdog, checkout, cache, and Python
   setup dependencies while keeping the published compatibility bounds explicit
   (PRs #544, #629, and #631).
@@ -2138,6 +2166,11 @@ reviews its own pull requests with its own graph. No breaking changes.
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - README benchmarks section now leads with the ~82x median per-question
   reduction (528x presented as the best case, not the headline), the
   limitations block is visible instead of collapsed, and "100% impact recall"
@@ -2295,6 +2328,11 @@ Focused reliability and token-efficiency release for MCP/CLI review workflows. N
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - **Architecture overview is compact by default**: `get_architecture_overview_tool` now defaults to `detail_level="minimal"`, dropping per-community member lists and aggregating cross-community edges by community pair. Full per-edge output remains available with `detail_level="standard"`.
 - **Bounded change analysis**: `detect_changes_tool` can now cap very large changed-function and transitive-test frontiers with `CRG_MAX_CHANGED_FUNCS` and `CRG_MAX_TRANSITIVE_FRONTIER`, and can return a structured timeout error via `CRG_TOOL_TIMEOUT`.
 
@@ -2499,6 +2537,11 @@ Major feature release — 15 new capabilities, 6 community PRs merged, 6 new MCP
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - MCP tool count: 22 → 28.
 - Schema version: 8 → 9 (edge confidence columns).
 - Community detection uses resolution scaling for large graphs.
@@ -2536,6 +2579,11 @@ Additive feature release — new language parsers, new platform install target, 
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - `install` and `init` commands now preview instruction-file targets before writing (no-op if nothing would change). This is always-on and does not require `--dry-run`.
 - Default embedding path remains fully local (`sentence-transformers`); no behavior change unless you explicitly opt in to a cloud provider.
 

@@ -1060,11 +1060,12 @@ def detect_changes_func(
             and only valid for the same base, changed-file list, depth and
             detail level on the same graph; ``"minimal"`` has no pages.
         pr: A pull request number. The files the pull request changes are read from
-            ``refs/pull/<pr>/head`` (fetched into ``refs/crg/``), parsed in memory and
+            ``refs/pull/<pr>/head`` (fetched into a temporary repository), parsed in memory and
             compared with the graph, so new files and unmerged code are covered. ``base``
             then names the branch the pull request merges into (default: the remote's
             default branch). ``include_source`` is not available in this mode.
         head: A ref or commit to read the changed files from, instead of ``pr``.
+            A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
 
     Returns:
         Risk-scored analysis with changed functions, YAML paths, affected
