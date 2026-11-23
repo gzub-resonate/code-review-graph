@@ -1,15 +1,22 @@
 # ruff: noqa: E501
-"""HTTP API calls and served routes in JavaScript and TypeScript.
+"""HTTP routes and API calls in JavaScript and TypeScript, and their cross-repo join.
 
-Cases build files in a temp directory and read the nodes and edges back.
-Repository, service and route names are invented.
+Parse-time cases build files in a temp directory and read the nodes and edges
+back; join cases index real files into graph databases registered in a temp
+registry.  Repository, service and route names are invented.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from code_review_graph.parser import CodeParser
+import pytest
+
+from code_review_graph import feign_links as fl
+from code_review_graph.graph import GraphStore
+from code_review_graph.parser import CodeParser, NodeInfo
+from code_review_graph.registry import Registry
+from code_review_graph.tools.registry_tools import cross_repo_requests_func
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -155,6 +162,11 @@ export function d(fn: () => string) { return fetch(fn()); }
     assert len(found) == 4
     for node in found:
         assert node.extra["route"] == "<unresolved>" and node.extra["route_dynamic"] is True
+        call = fl.ClientCall(
+            repo="r", file=None, line=1, http_method="GET", route=node.extra["route"],
+            origin="js", route_dynamic=True,
+        )
+        assert fl.unmatchable_reason(call) == "non_literal_url"
 
 
 def test_absolute_urls_are_flagged(tmp_path):
@@ -450,6 +462,257 @@ export const a = (cb) => axios.get('/x', cb);
     assert servers(nodes) == [] and len(clients(nodes)) == 1
 
 
+# ---------------------------------------------------------------------------
+# The join
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("CRG_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    return Registry()
+
+
+def make_repo(tmp_path, registry, name, files, *, java=()):
+    """Write *files*, index them with the real parser into a registered repo."""
+    root = (tmp_path / name).resolve()
+    for rel, text in files.items():
+        write(root, rel, text)
+    directory = root / ".code-review-graph"
+    directory.mkdir(parents=True, exist_ok=True)
+    parser = CodeParser(root)
+    with GraphStore(directory / "graph.db") as store:
+        for rel in files:
+            nodes, edges = parser.parse_file(root / rel)
+            store.store_file_nodes_edges(str(root / rel), nodes, edges)
+        for rel, extra_nodes in java:
+            store.store_file_nodes_edges(str(root / rel), extra_nodes, [])
+    registry.register(str(root), alias=name)
+    return root
+
+
+def rows(result):
+    return {(r["http_method"], r["route"], r["client_line"]): r for r in result["results"]}
+
+
+CLIENT_FILES = {
+    "src/api.ts": """
+import axios from 'axios';
+const api = axios.create({ baseURL: '/v3' });
+export const getTag = (id: string) => api.get(`/tags/${id}`);
+export const missing = () => api.get('/nothing');
+export const dupe = () => axios.get('/dup');
+export const dynamic = (u: string) => axios.get(u);
+export const proxied = () => axios.get('/api/proxy/v9/thing');
+export const post = () => fetch('/v3/tags', { method: 'POST' });
+""",
+}
+
+TAG_API = {
+    "src/main/Tags.ts": "",
+    "app/v3/tags/[id]/route.ts": "export async function GET() { return new Response('x'); }\n",
+    "app/v3/tags/route.ts": "export async function POST() { return new Response('x'); }\n",
+    "app/dup/route.ts": "export async function GET() { return new Response('x'); }\n",
+}
+
+
+@pytest.fixture
+def world(tmp_path, registry):
+    make_repo(tmp_path, registry, "tag-api", {k: v for k, v in TAG_API.items() if v})
+    make_repo(tmp_path, registry, "other-api", {
+        "server.js": "const express = require('express');\nconst app = express();\napp.get('/api/proxy/other', (q, r) => r.end());\napp.get('/dup', (q, r) => r.end());\n",
+    })
+    make_repo(tmp_path, registry, "gateway", {
+        "app/api/proxy/[...path]/route.ts": "export async function GET() { return new Response('x'); }\n",
+    })
+    make_repo(tmp_path, registry, "web", CLIENT_FILES)
+    return tmp_path
+
+
+def test_join_matched_ambiguous_no_route_match_and_unmatchable(world):
+    result = cross_repo_requests_func(repos=["web"])
+    by_line = {r["client_line"]: r for r in result["results"]}
+    assert result["status"] == "ok"
+    tag = by_line[4]
+    assert tag["status"] == "matched" and tag["origin"] == "js" and tag["client_kind"] == "axios"
+    assert tag["candidates"] == [{
+        "repo": "tag-api", "file": "app/v3/tags/[id]/route.ts", "line": 1,
+        "http_method": "GET", "route": "/v3/tags/{id}",
+    }]
+    assert "confidence" not in tag
+    assert by_line[5]["status"] == "no_route_match"
+    dupe = by_line[6]
+    assert dupe["status"] == "ambiguous" and dupe["candidates_total"] == 2
+    assert {c["repo"] for c in dupe["candidates"]} == {"tag-api", "other-api"}
+    assert by_line[7]["status"] == "unmatchable" and by_line[7]["reason"] == "non_literal_url"
+    assert by_line[9]["status"] == "matched" and by_line[9]["candidates"][0]["route"] == "/v3/tags"
+
+
+def test_catch_all_route_matches_only_by_prefix_with_low_confidence(world):
+    row = {r["client_line"]: r for r in cross_repo_requests_func(repos=["web"])["results"]}[8]
+    assert row["status"] == "matched" and row["reason"] == "catch_all_route"
+    assert row["confidence"] == "low" and "catch_all_route" in row["confidence_notes"]
+    cand = row["candidates"][0]
+    assert cand["repo"] == "gateway" and cand["catch_all"] is True
+
+
+def test_catch_all_never_matches_other_methods_or_unrelated_routes(world):
+    # The gateway proxies GET only, so a POST under the prefix does not match it.
+    idx = fl.ServerIndex([fl.ServerEndpoint(
+        repo="g", file="r.ts", line=1, http_method="GET", route="/api/proxy/{...path}",
+        origin="g", catch_all=True,
+    )])
+    call = lambda m, r: fl.ClientCall(repo="c", file=None, line=1, http_method=m, route=r, origin="js")  # noqa: E731
+    assert fl.link_js_call(call("GET", "/api/proxy/a/b"), idx).status == fl.MATCHED
+    assert fl.link_js_call(call("POST", "/api/proxy/a"), idx).status == fl.NO_ROUTE_MATCH
+    assert fl.link_js_call(call("GET", "/api/proxy"), idx).status == fl.NO_ROUTE_MATCH
+    assert fl.link_js_call(call("GET", "/api/other/a"), idx).status == fl.NO_ROUTE_MATCH
+    assert fl.link_js_call(call("GET", "/api/proxyx/a"), idx).status == fl.NO_ROUTE_MATCH
+    optional = fl.ServerIndex([fl.ServerEndpoint(
+        repo="g", file="r.ts", line=1, http_method="GET", route="/docs/{...slug}",
+        origin="g", catch_all=True, optional_catch_all=True,
+    )])
+    assert fl.link_js_call(call("GET", "/docs"), optional).status == fl.MATCHED
+    root_wild = fl.ServerIndex([fl.ServerEndpoint(
+        repo="g", file="r.ts", line=1, http_method="GET", route="/{...all}",
+        origin="g", catch_all=True,
+    )])
+    assert fl.link_js_call(call("GET", "/anything"), root_wild).status == fl.NO_ROUTE_MATCH
+
+
+def test_exact_route_beats_a_catch_all(tmp_path, registry):
+    make_repo(tmp_path, registry, "gw", {"app/api/[...p]/route.ts": "export async function GET() {}\n"})
+    make_repo(tmp_path, registry, "svc", {"app/api/health/route.ts": "export async function GET() {}\n"})
+    make_repo(tmp_path, registry, "web", {"a.ts": "import axios from 'axios';\nexport const h = () => axios.get('/api/health');\n"})
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert row["status"] == "matched" and row["candidates"][0]["repo"] == "svc"
+    assert "confidence" not in row
+
+
+def test_a_route_the_caller_serves_itself_is_its_own_target(tmp_path, registry):
+    make_repo(tmp_path, registry, "solo", {
+        "app/x/route.ts": "export async function GET() {}\n",
+        "a.ts": "import axios from 'axios';\nexport const h = () => axios.get('/x');\n",
+    })
+    (row,) = cross_repo_requests_func(repos=["solo"])["results"]
+    assert row["status"] == "matched"
+    assert row["candidates"][0]["repo"] == "solo"
+
+
+def test_own_route_beats_the_same_route_in_a_sibling_repo(tmp_path, registry):
+    """A relative URL goes to the origin that served the page, not to a sibling frontend."""
+    route = "export async function GET() {}\n"
+    make_repo(tmp_path, registry, "sibling", {"app/api/config/client/route.ts": route})
+    make_repo(tmp_path, registry, "web", {
+        "app/api/config/client/route.ts": route,
+        "a.ts": "export const c = () => fetch('/api/config/client');\n",
+    })
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert row["status"] == "matched"
+    assert [c["repo"] for c in row["candidates"]] == ["web"]
+
+
+def test_own_catch_all_beats_a_sibling_catch_all(tmp_path, registry):
+    route = "export async function GET() {}\n"
+    make_repo(tmp_path, registry, "sibling", {"app/api/proxy/[...path]/route.ts": route})
+    make_repo(tmp_path, registry, "web", {
+        "app/api/proxy/[...path]/route.ts": route,
+        "a.ts": "export const c = () => fetch('/api/proxy/agent/dsp');\n",
+    })
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert [c["repo"] for c in row["candidates"]] == ["web"]
+    assert row["reason"] == "catch_all_route" and row["confidence"] == "low"
+
+
+def test_a_call_the_caller_does_not_serve_still_reaches_other_repos(tmp_path, registry):
+    make_repo(tmp_path, registry, "svc", {"app/api/health/route.ts": "export async function GET() {}\n"})
+    make_repo(tmp_path, registry, "web", {
+        "app/api/other/route.ts": "export async function GET() {}\n",
+        "a.ts": "export const c = () => fetch('/api/health');\n",
+    })
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert row["status"] == "matched" and row["candidates"][0]["repo"] == "svc"
+
+
+def test_origin_filter_and_summary(world):
+    only_js = cross_repo_requests_func(repos=["web"], origin="js")
+    assert only_js["total"] == 6 and "JS/TS" in only_js["summary"]
+    assert cross_repo_requests_func(repos=["web"], origin="feign")["total"] == 0
+    assert cross_repo_requests_func(repos=["web"], service="x")["total"] == 0
+    with pytest.raises(ValueError):
+        cross_repo_requests_func(origin="rust")
+
+
+def test_feign_rows_are_unchanged_by_js_rows(tmp_path, registry):
+    def endpoint(root, name, role_extra, line, java_class):
+        return NodeInfo(
+            kind="Endpoint", name=name, file_path=str(root / f"{java_class}.java"),
+            line_start=line, line_end=line, language="java", parent_name=java_class,
+            extra=role_extra,
+        )
+
+    api = (tmp_path / "orders-service").resolve()
+    make_repo(tmp_path, registry, "edge", {"app/orders/route.ts": "export async function GET() {}\n"})
+    make_repo(tmp_path, registry, "orders-service", {"README.txt": "x"}, java=[
+        ("Controller.java", [endpoint(api, "h@GetMapping[0:0] GET /orders", {"http_method": "GET", "route": "/orders"}, 10, "Controller")]),
+    ])
+    web = (tmp_path / "web").resolve()
+    make_repo(tmp_path, registry, "web", {"a.ts": "import axios from 'axios';\nexport const o = () => axios.get('/orders');\n"}, java=[
+        ("Client.java", [endpoint(web, "c@GetMapping[0:0] GET /orders", {
+            "role": "client", "client": "feign", "http_method": "GET", "route": "/orders",
+            "service": "orders-service", "config_keys": [], "route_dynamic": False, "url_literal": False,
+        }, 3, "Client")]),
+    ])
+    result = cross_repo_requests_func(repos=["web"])
+    feign = [r for r in result["results"] if r["origin"] == "feign"]
+    js = [r for r in result["results"] if r["origin"] == "js"]
+    assert len(feign) == 1 and len(js) == 1
+    assert feign[0] == {
+        "client_repo": "web", "client_file": "Client.java", "client_line": 3,
+        "http_method": "GET", "route": "/orders", "service": "orders-service",
+        "status": "matched", "origin": "feign", "target_resolution": "exact",
+        "candidates": [{
+            "repo": "orders-service", "file": "Controller.java", "line": 10,
+            "http_method": "GET", "route": "/orders",
+        }],
+        "candidates_total": 1,
+    }
+    # The JS call sees both the Spring controller and the route file.
+    assert js[0]["status"] == "ambiguous"
+    only_feign = cross_repo_requests_func(repos=["web"], origin="feign")
+    assert only_feign["summary"].startswith("1 Feign call(s)")
+    assert only_feign["results"] == feign
+
+
+def test_link_js_call_exact_method_semantics():
+    idx = fl.ServerIndex([
+        fl.ServerEndpoint("s", "a.ts", 1, "GET", "/items/{id}", origin="s"),
+        fl.ServerEndpoint("s", "b.ts", 2, "ANY", "/ping", origin="s"),
+    ])
+    mk = lambda m, r: fl.ClientCall(repo="c", file=None, line=1, http_method=m, route=r, origin="js")  # noqa: E731
+    assert fl.link_js_call(mk("GET", "/items/{param}?x=1"), idx).status == fl.MATCHED
+    assert fl.link_js_call(mk("POST", "/items/{param}"), idx).status == fl.NO_ROUTE_MATCH
+    assert fl.link_js_call(mk("DELETE", "/ping"), idx).status == fl.MATCHED
+    assert fl.link_js_call(mk("GET", "/items/7"), idx).status == fl.NO_ROUTE_MATCH  # no value guessing
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"route_dynamic": True}, "non_literal_url"),
+        ({"absolute_url": True}, "absolute_url"),
+        ({"method_dynamic": True}, "method_dynamic"),
+        ({"route": "<unresolved>/x"}, "placeholder_in_route"),
+        ({}, None),
+    ],
+)
+def test_js_unmatchable_reasons(kwargs, reason):
+    fields = {"repo": "c", "file": None, "line": 1, "http_method": "GET", "route": "/x", "origin": "js"}
+    fields.update(kwargs)
+    assert fl.unmatchable_reason(fl.ClientCall(**fields)) == reason
+
+
 def test_mock_and_story_directories_are_skipped(tmp_path):
     for rel in ("server/mocks/a.js", ".storybook/mocks/b.ts", "stories/c.ts"):
         nodes, _ = parse(tmp_path, rel, """
@@ -471,3 +734,16 @@ export async function load(id: string) {
 }
 """)
     assert sigs(clients(nodes)) == [("GET", "/v3/tags/{param}"), ("POST", "/v3/tags")]
+
+
+def test_link_js_call_several_handlers_in_one_repo_is_a_match():
+    two = [
+        fl.ServerEndpoint("s", "A.java", 49, "GET", "/v3/admin/tags", origin="/r/s"),
+        fl.ServerEndpoint("s", "A.java", 64, "GET", "/v3/admin/tags", origin="/r/s"),
+    ]
+    mk = lambda r: fl.ClientCall(repo="c", file=None, line=1, http_method="GET", route=r, origin="js")  # noqa: E731
+    result = fl.link_js_call(mk("/v3/admin/tags"), fl.ServerIndex(two))
+    assert (result.status, result.reason, result.confidence) == (fl.MATCHED, "several_handlers_in_repo", "high")
+    assert [c.line for c in result.candidates] == [49, 64]
+    other = two + [fl.ServerEndpoint("t", "B.java", 5, "GET", "/v3/admin/tags", origin="/r/t")]
+    assert fl.link_js_call(mk("/v3/admin/tags"), fl.ServerIndex(other)).status == fl.AMBIGUOUS

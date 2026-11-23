@@ -4,6 +4,16 @@
 
 ### Added
 
+- `cross_repo_requests_tool` now joins JavaScript and TypeScript calls to the
+  server endpoints they reach. A call names no service, so it is matched by
+  HTTP method and route, first against the caller's own repository (a relative
+  URL goes to the origin that served the page) and then against every other
+  registered repository. One location, or several in one repository, is
+  `matched` (`reason` `several_handlers_in_repo`); several repositories are
+  `ambiguous` with the candidate repositories. Each row has an `origin`
+  (`feign` or `js`); the new `origin` argument narrows to one. A catch-all
+  route such as a Next.js `[...path]` proxy matches only by exact method and
+  literal prefix, with `confidence: "low"`. A variable URL is never guessed.
 - JavaScript and TypeScript servers now take part too: the parser records served
   routes (the Next.js app and pages routers, and Express, Koa, Fastify and Hono
   style `app.get('/x', handler)`) as server `Endpoint` nodes with `HANDLES`

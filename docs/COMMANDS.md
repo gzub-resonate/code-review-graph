@@ -913,10 +913,11 @@ route: str | None            # Only calls whose route equals this or lies below 
 status: str | None           # matched | ambiguous | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
+origin: str | None           # feign | js; default: both
 ```
 
-Joins each outbound Spring Feign call to the server endpoint it reaches in
-another registered repository. It is computed on every call from the graphs
+Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
+call, to the server endpoint it reaches in another registered repository. It is computed on every call from the graphs
 that already exist, opened read-only; nothing is stored, so no rebuild is
 needed beyond a graph that already indexes Feign clients. Each row has the
 calling repo, file and line, the HTTP method, route and service name, a
@@ -943,6 +944,33 @@ How a call is classified:
   trailing slash and treating every `{name}` as one wildcard segment. Case is
   kept. A `{name}` in the call does not match a fixed segment on the server.
   One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
+
+Every row has an `origin`: `feign` for a Spring client method, `js` for a
+JavaScript or TypeScript call. Feign rows are classified exactly as above.
+
+JavaScript and TypeScript calls (`origin: "js"`) have no service name, so they
+are matched by HTTP method and normalised route. A relative URL goes to the
+origin that served the page, so the server endpoints of the caller's own
+repository are searched first (its Next.js `app/api` routes, an Express server
+beside the client); only when they have no match does the search widen to every
+other registered repository. A row has a `client_kind`
+(`axios`, `fetch`, `jquery` or `ember-ajax`). One matching
+location, or several in one repository (`reason: "several_handlers_in_repo"`,
+for example handlers of one path that differ by `params=`), is `matched`;
+several repositories are `ambiguous` with the candidate repositories; none is
+`no_route_match`. A call
+is `unmatchable` with one of these reasons: `non_literal_url` (a variable or
+computed URL, or a template or concatenation that starts with an unknown
+piece), `absolute_url` (a full `https://...` URL or an absolute `baseURL`),
+`method_dynamic` (the method is not a literal) or `placeholder_in_route`.
+A match carries `confidence: "low"` and `confidence_notes` when it rests on a
+guess: `receiver_inferred` (an instance imported from another file, recognised by its
+name), `base_url_not_literal`, or `catch_all_route`. A server route that takes
+the rest of the path (a Next.js `[...path]` route, an Express `*`) matches only
+a call with the same HTTP method and a literal prefix that is a whole leading
+path, with at least one more segment (none for `[[...path]]`), and only when no
+exact route fits; a catch-all at the root matches nothing. Its candidate has
+`catch_all: true`.
 
 What the parser records for JavaScript and TypeScript (all of it is a plain
 `Endpoint` node: client ones have `role: "client"` and a `REQUESTS` edge from

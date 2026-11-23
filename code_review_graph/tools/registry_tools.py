@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import feign_links as fl
+from .. import js_api_extract
 from ..errors import GraphStoreError
 from ..graph import GraphNode, GraphStore, _sanitize_name
 from ..incremental import get_db_path
@@ -349,7 +350,25 @@ def _load_endpoints(
             continue
         file = _relative_file(repo_path, node.file_path)
         if extra.get("role") == "client":
-            if extra.get("client") != "feign":
+            client_tag = extra.get("client")
+            if client_tag == js_api_extract.CLIENT_TAG:
+                notes: list[str] = []
+                if extra.get("receiver_inferred"):
+                    notes.append("receiver_inferred")
+                if extra.get("base_url_dynamic"):
+                    notes.append("base_url_not_literal")
+                kind = extra.get("client_kind")
+                clients.append(fl.ClientCall(
+                    repo=_repo_label(entry), file=file, line=node.line_start,
+                    http_method=method, route=route, origin="js",
+                    client_kind=kind if isinstance(kind, str) else None,
+                    route_dynamic=bool(extra.get("route_dynamic")),
+                    method_dynamic=bool(extra.get("method_dynamic")),
+                    absolute_url=bool(extra.get("absolute_url")),
+                    notes=tuple(notes),
+                ))
+                continue
+            if client_tag != "feign":
                 continue
             service = extra.get("service")
             clients.append(fl.ClientCall(
@@ -365,6 +384,8 @@ def _load_endpoints(
             servers.append(fl.ServerEndpoint(
                 repo=_repo_label(entry), file=file, line=node.line_start,
                 http_method=method, route=route, origin=str(repo_path),
+                catch_all=bool(extra.get("catch_all")),
+                optional_catch_all=bool(extra.get("optional_catch_all")),
             ))
     return clients, servers, None
 
@@ -376,13 +397,16 @@ def _route_in_scope(call_route: str, wanted: str) -> bool:
 
 
 def _candidate_row(server: fl.ServerEndpoint) -> dict[str, Any]:
-    return {
+    row: dict[str, Any] = {
         "repo": _sanitize_name(server.repo),
         "file": _sanitize_name(server.file) if server.file else None,
         "line": server.line,
         "http_method": _sanitize_name(server.http_method),
         "route": _sanitize_name(server.route),
     }
+    if server.catch_all:
+        row["catch_all"] = True
+    return row
 
 
 def cross_repo_requests_func(
@@ -392,13 +416,17 @@ def cross_repo_requests_func(
     status: str | None = None,
     limit: int = 20,
     max_results: int = 50,
+    origin: str | None = None,
 ) -> dict[str, Any]:
-    """Join outbound Spring Feign calls to the server endpoints they reach.
+    """Join outbound Spring Feign and JavaScript/TypeScript calls to server endpoints.
 
     [REGISTRY] Reads each registered repo's graph database read-only, finds
     the Feign client calls in the selected (client) repos, and for each one
     looks for the matching controller endpoint in the repo its service name
-    points at. Nothing is stored; the join is recomputed on every call.
+    points at. JavaScript and TypeScript calls (axios, fetch, jQuery and Ember
+    ajax) have no service name: they are matched by method and
+    route against the server endpoints of every other registered repo.
+    Nothing is stored; the join is recomputed on every call.
 
     Args:
         repos: Optional aliases or folder names of the CLIENT repos whose
@@ -406,7 +434,8 @@ def cross_repo_requests_func(
             reporting as ``cross_repo_search_func``). Omitted or empty lists
             calls from every registered repo. Target repos are always looked
             up across the whole registry.
-        service: Only calls whose Feign service name equals this (exact).
+        service: Only calls whose Feign service name equals this (exact); this
+            leaves out JavaScript/TypeScript calls, which have none.
         route: Only calls whose route equals this or lies below it, compared
             after normalisation.
         status: Only rows with this status: ``matched``, ``ambiguous``,
@@ -415,6 +444,7 @@ def cross_repo_requests_func(
         max_results: Maximum rows returned overall (default 50, capped at
             100). ``counts`` and ``total`` cover every call that passed the
             filters, not just the rows shown.
+        origin: Only ``feign`` or only ``js`` calls. Default: both.
 
     Returns:
         ``results`` rows, ``counts`` by status, ``total``, ``truncated``,
@@ -427,6 +457,8 @@ def cross_repo_requests_func(
     _validate_positive_int(max_results, "max_results")
     if status is not None and status not in fl.STATUSES:
         raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
+    if origin is not None and origin not in ("feign", "js"):
+        raise ValueError("origin must be one of: feign, js")
 
     try:
         all_repos = Registry().list_repos()
@@ -511,8 +543,35 @@ def cross_repo_requests_func(
                 return None
             return srv
 
+        # A JavaScript call names no service, so every other registered repo
+        # is a candidate; its index is built once per calling repo.  The
+        # caller's own endpoints are indexed apart because they are searched
+        # first (a relative URL goes to the origin that served the page).
+        js_index: dict[int, fl.ServerIndex] = {}
+        own_index: dict[int, fl.ServerIndex] = {}
+
+        def own_index_for(client_index: int) -> fl.ServerIndex:
+            if client_index not in own_index:
+                own_index[client_index] = fl.ServerIndex(
+                    load(client_index)[1],
+                )
+            return own_index[client_index]
+
+        def js_index_for(client_index: int) -> fl.ServerIndex:
+            if client_index not in js_index:
+                pool: list[fl.ServerEndpoint] = []
+                for other in range(len(all_repos)):
+                    if other == client_index:
+                        continue
+                    found = servers_of(other)
+                    if found:
+                        pool.extend(found)
+                js_index[client_index] = fl.ServerIndex(pool)
+            return js_index[client_index]
+
         wanted_route = fl.normalize_route(route) if route else None
         counts: dict[str, int] = {}
+        origin_counts: dict[str, int] = {}
         rows_by_repo: list[list[dict[str, Any]]] = []
         searched: list[str] = []
         total = 0
@@ -531,10 +590,15 @@ def cross_repo_requests_func(
                 clients,
                 key=lambda c: (c.file or "", c.line or 0, c.route, c.http_method),
             ):
-                key = (call.file, call.line, call.http_method, call.route, call.service)
+                key = (
+                    call.file, call.line, call.http_method, call.route, call.service,
+                    call.origin,
+                )
                 if key in seen:
                     continue
                 seen.add(key)
+                if origin is not None and call.origin != origin:
+                    continue
                 if service is not None and call.service != service:
                     continue
                 if wanted_route is not None and not _route_in_scope(call.route, wanted_route):
@@ -543,7 +607,11 @@ def cross_repo_requests_func(
                 reason = fl.unmatchable_reason(call)
                 resolution: Optional[fl.TargetResolution] = None
                 result = fl.LinkResult(fl.UNMATCHABLE, reason)
-                if reason is None:
+                if reason is None and call.origin == "js":
+                    result = fl.link_js_call(
+                        call, js_index_for(index), own_index_for(index),
+                    )
+                elif reason is None:
                     assert call.service is not None
                     resolution = fl.resolve_service(call.service, resolver.lookup, folded)
                     if not resolution.indexes:
@@ -564,6 +632,7 @@ def cross_repo_requests_func(
                     continue
 
                 counts[result.status] = counts.get(result.status, 0) + 1
+                origin_counts[call.origin] = origin_counts.get(call.origin, 0) + 1
                 total += 1
                 row: dict[str, Any] = {
                     "client_repo": _sanitize_name(call.repo),
@@ -573,7 +642,17 @@ def cross_repo_requests_func(
                     "route": _sanitize_name(call.route),
                     "service": _sanitize_name(call.service) if call.service else None,
                     "status": result.status,
+                    "origin": call.origin,
                 }
+                if call.origin == "js":
+                    if call.client_kind:
+                        row["client_kind"] = _sanitize_name(call.client_kind)
+                    row_notes = list(call.notes)
+                    if result.confidence == "low":
+                        row_notes.append("catch_all_route")
+                    if row_notes and result.status in (fl.MATCHED, fl.AMBIGUOUS):
+                        row["confidence"] = "low"
+                        row["confidence_notes"] = row_notes
                 if result.reason:
                     row["reason"] = result.reason
                 if resolution is not None and resolution.how:
@@ -604,7 +683,12 @@ def cross_repo_requests_func(
         response: dict[str, Any] = {
             "status": "ok",
             "summary": (
-                f"{total} Feign call(s) in {len(searched)} repo(s)"
+                (
+                    f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
+                    f"{origin_counts.get('js', 0)} JS/TS) in {len(searched)} repo(s)"
+                    if origin_counts.get("js")
+                    else f"{total} Feign call(s) in {len(searched)} repo(s)"
+                )
                 + (f": {ordered}" if ordered else "")
                 + _shown_of(len(results), total)
                 + notes
