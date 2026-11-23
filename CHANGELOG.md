@@ -35,6 +35,10 @@
 
 ### Fixed
 
+- When class names, file-name parts or keywords tie on count, a community is
+  now named after the alphabetically first one, not the one that came first
+  among its members, so presenting the same files in another order no longer
+  renames it.
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could
