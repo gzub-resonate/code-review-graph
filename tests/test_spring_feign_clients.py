@@ -199,9 +199,9 @@ def test_feign_constant_paths_are_marked_dynamic(tmp_path: Path) -> None:
 
     assert by_method["folded"].extra["route"] == "/api/folded"
     assert by_method["folded"].extra["route_dynamic"] is False
-    assert by_method["partial"].extra["route"] == "/items"
+    assert by_method["partial"].extra["route"] == "/<unresolved>/items"
     assert by_method["partial"].extra["route_dynamic"] is True
-    assert by_method["constant"].extra["route"] == "/"
+    assert by_method["constant"].extra["route"] == "/<unresolved>"
     assert by_method["constant"].extra["route_dynamic"] is True
 
 
@@ -422,3 +422,130 @@ class InvoiceController {
         names = {n.name for n in detect_entry_points(store)}
     assert "list" in names
     assert not {"getInvoice", "createInvoice"} & names
+
+
+def _routes(nodes) -> dict:
+    return {n.extra["client_method"]: n.extra for n in _client_endpoints(nodes)}
+
+
+def test_unresolved_constants_render_as_a_visible_marker_with_literal_parts(
+    tmp_path: Path,
+) -> None:
+    source = """
+    @FeignClient(name = "billing-service", path = Consts.BASE)
+    interface BillingClient {
+        @GetMapping(Consts.P + "/a")
+        Object inClientPath();
+
+        @GetMapping("/x" + Consts.P)
+        Object trailing();
+
+        @GetMapping(Other.Holder.PATH)
+        Object otherClass();
+
+        @GetMapping(buildPath("/y"))
+        Object call();
+
+        @GetMapping
+        Object bare();
+    }
+    """
+    _, nodes, _ = _parse(tmp_path, source)
+    routes = _routes(nodes)
+
+    assert routes["inClientPath"]["route"] == "/<unresolved>/<unresolved>/a"
+    assert routes["inClientPath"]["route_literal_parts"] == ["/a"]
+    assert routes["trailing"]["route"] == "/<unresolved>/x<unresolved>"
+    assert routes["trailing"]["route_literal_parts"] == ["/x"]
+    assert routes["otherClass"]["route"] == "/<unresolved>/<unresolved>"
+    assert routes["otherClass"]["route_literal_parts"] == []
+    assert routes["call"]["route"] == "/<unresolved>/<unresolved>"
+    assert routes["bare"]["route"] == "/<unresolved>"
+    for extra in routes.values():
+        assert extra["route_dynamic"] is True
+        assert "{" not in extra["route"]
+
+
+def test_unresolved_constant_in_method_path_only(tmp_path: Path) -> None:
+    source = """
+    @FeignClient(name = "billing-service", path = "/api")
+    interface BillingClient {
+        @GetMapping(Consts.P + "/a")
+        Object prefixed();
+
+        @GetMapping("/ok")
+        Object literal();
+    }
+    """
+    _, nodes, _ = _parse(tmp_path, source)
+    routes = _routes(nodes)
+
+    assert routes["prefixed"]["route"] == "/api/<unresolved>/a"
+    assert routes["prefixed"]["route_literal_parts"] == ["/api", "/a"]
+    assert routes["literal"]["route"] == "/api/ok"
+    assert routes["literal"]["route_dynamic"] is False
+    assert "route_literal_parts" not in routes["literal"]
+
+
+def test_unresolved_constant_in_legacy_interface_prefix(tmp_path: Path) -> None:
+    source = """
+    @FeignClient(name = "billing-service")
+    @RequestMapping(Consts.PREFIX)
+    interface BillingClient {
+        @GetMapping("/items")
+        Object items();
+    }
+    """
+    _, nodes, _ = _parse(tmp_path, source)
+    extra = _routes(nodes)["items"]
+
+    assert extra["route"] == "/<unresolved>/items"
+    assert extra["route_dynamic"] is True
+    assert extra["route_literal_parts"] == ["/items"]
+
+
+def test_placeholders_stay_verbatim_and_are_not_dynamic(tmp_path: Path) -> None:
+    source = """
+    @FeignClient(name = "billing-service", path = "${billing.path:/api}")
+    interface BillingClient {
+        @GetMapping("/items/${billing.suffix}")
+        Object items();
+    }
+    """
+    _, nodes, _ = _parse(tmp_path, source)
+    extra = _routes(nodes)["items"]
+
+    assert extra["route"] == "/${billing.path:/api}/items/${billing.suffix}"
+    assert extra["route_dynamic"] is False
+    assert "route_literal_parts" not in extra
+    assert "<unresolved>" not in extra["route"]
+
+
+def test_feign_method_with_uri_argument_is_flagged(tmp_path: Path) -> None:
+    source = """
+    import java.net.URI;
+
+    @FeignClient(name = "billing-service")
+    interface BillingClient {
+        @GetMapping
+        Object simple(URI target);
+
+        @GetMapping("/q")
+        Object qualified(java.net.URI target, @RequestParam("a") String a);
+
+        @GetMapping("/plain/{id}")
+        Object ordinary(@PathVariable("id") String id);
+
+        @GetMapping("/other")
+        Object notUri(UriBuilder builder, String uri);
+    }
+    """
+    _, nodes, _ = _parse(tmp_path, source)
+    routes = _routes(nodes)
+
+    assert routes["simple"]["url_from_argument"] is True
+    assert routes["simple"]["route"] == "/"
+    assert routes["qualified"]["url_from_argument"] is True
+    assert routes["qualified"]["route"] == "/q"
+    assert "url_from_argument" not in routes["ordinary"]
+    assert "url_from_argument" not in routes["notUri"]

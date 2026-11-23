@@ -81,10 +81,18 @@ Spring Cloud OpenFeign `@FeignClient` interface emit client Endpoints instead: `
 `"client"`, `client` is `"feign"`, and `http_method` and `route` come from the mapping
 annotations with the `@FeignClient` `path` prefix applied. Other extras are `client_method`,
 `service` (the client `name`, or `service_unresolved` when it is a placeholder), `context_id`,
-`route_dynamic` (the path is not a plain string literal), `url_literal`, and `config_keys`
-(`${...}` placeholders, recorded without values). A `REQUESTS` edge links the interface method to its
-client Endpoint, never a `HANDLES` edge. Dead-code reports skip the interface. Flow detection does not treat a method as an entry
-point on the strength of its mapping annotation (a method nothing calls can still be one). Laravel
+`route_dynamic` (a path piece could not be resolved, or the mapping is an absolute URL),
+`url_literal`, and `config_keys` (`${...}` placeholders, recorded without values). A piece
+of a Feign route that is not a string literal (a constant, a method call) is rendered as the marker
+`<unresolved>`, and `route_literal_parts` lists the literal fragments in order, so a route is
+never shown as fully literal when something was dropped. The marker is not `{...}`, so it cannot
+be read as a path variable, and it has no `?`, so a query-string strip leaves it whole.
+`${...}` placeholders stay verbatim in `route` and do not count as unresolved. A method with a
+`java.net.URI` argument gets `url_from_argument`: Feign sends the request to that argument, so
+`route` is not the target. A `REQUESTS` edge links the interface method to its
+client Endpoint, never a `HANDLES` edge. Dead-code reports skip the interface. Flow detection does
+not treat a method as an entry point on the strength of its mapping annotation (a method nothing
+calls can still be one). Laravel
 closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
 set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 

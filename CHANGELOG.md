@@ -4,6 +4,12 @@
 
 ### Added
 
+- A Feign route built from a constant or a method call is shown with an
+  `<unresolved>` marker, and `route_literal_parts` lists the literal pieces, so
+  a route is never shown as fully literal when something was dropped. A method
+  with a `java.net.URI` argument is flagged `url_from_argument`, because Feign
+  sends the request to that argument and `route` is not the target. Run
+  `code-review-graph build` once to update an existing graph.
 - Spring Cloud OpenFeign clients are indexed as outbound calls. Each method of
   a `@FeignClient` interface becomes a client `Endpoint` (with the
   `@FeignClient` `path` prefix applied) linked to the method by a `REQUESTS`
