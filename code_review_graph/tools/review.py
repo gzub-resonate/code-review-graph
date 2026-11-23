@@ -21,7 +21,7 @@ from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..errors import ChangeDiscoveryError
 from ..flows import get_affected_flows as _get_affected_flows
-from ..graph import GraphNode, GraphStore, edge_to_dict, node_to_dict
+from ..graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 _MAX_REVIEW_NODES = 100
 _MAX_REVIEW_EDGES = 150
 _MAX_REVIEW_FILES = 200
+#: Names listed per file, and files listed, in the ``pull_request`` section of a pull request
+#: review; the totals beside them always count everything.
+_PR_NAMES_PER_FILE = 25
+_PR_FILES_SHOWN = 50
 _MAX_REVIEW_SOURCE_LINES = 800
 _MAX_LINES_PER_FILE = 500
 _MAX_CHANGED_FUNCTIONS = 100
@@ -1017,6 +1021,42 @@ def get_affected_flows_func(
 # ---------------------------------------------------------------------------
 
 
+def _pull_request_section(info: dict[str, Any], detail_level: str) -> dict[str, Any]:
+    """The ``pull_request`` part of a pull request review.
+
+    ``minimal`` carries the two commits and the totals only. Otherwise the added and removed
+    symbol names are listed per file (at most ``_PR_NAMES_PER_FILE`` names for each of
+    ``_PR_FILES_SHOWN`` files), and ``symbols_truncated`` says when a list was cut. The totals
+    count every symbol either way. Names are sanitised like any node name sent to a client.
+    """
+    added, removed = info["added_symbols"], info["removed_symbols"]
+    section: dict[str, Any] = {
+        "head": info["head"], "base": info["base"],
+        "added_symbols_total": sum(len(names) for names in added.values()),
+        "removed_symbols_total": sum(len(names) for names in removed.values()),
+    }
+    if detail_level == "minimal":
+        return section
+    cut_files: list[str] = []
+
+    def shown(by_file: dict[str, list[str]]) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for path, names in list(by_file.items())[:_PR_FILES_SHOWN]:
+            kept = names[:_PR_NAMES_PER_FILE]
+            out[_sanitize_name(path)] = [_sanitize_name(name) for name in kept]
+            if len(names) > len(kept):
+                cut_files.append(_sanitize_name(path))
+        return out
+
+    section["added_symbols"] = shown(added)
+    section["removed_symbols"] = shown(removed)
+    files_cut = len(added) > _PR_FILES_SHOWN or len(removed) > _PR_FILES_SHOWN
+    section["symbols_truncated"] = bool(cut_files) or files_cut
+    if cut_files:
+        section["files_with_more_symbols"] = sorted(set(cut_files))
+    return section
+
+
 def detect_changes_func(
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
@@ -1113,9 +1153,9 @@ def detect_changes_func(
                         seen_qns.add(qn)
                         pr_nodes.append(node)
                 if report.added:
-                    pr_info["added_symbols"][report.path] = report.added[:25]
+                    pr_info["added_symbols"][report.path] = list(report.added)
                 if report.removed:
-                    pr_info["removed_symbols"][report.path] = report.removed[:25]
+                    pr_info["removed_symbols"][report.path] = list(report.removed)
                 if not report.parsed:
                     notes.append(f"{report.path}: {report.note}")
             include_source = False
@@ -1341,7 +1381,7 @@ def detect_changes_func(
                 **page.fields(),
             }
         if pr_info is not None:
-            result["pull_request"] = pr_info
+            result["pull_request"] = _pull_request_section(pr_info, detail_level)
         if notes:
             # Said once, first: the review covers different files than the
             # base the caller asked for would have.

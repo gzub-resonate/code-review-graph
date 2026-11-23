@@ -52,3 +52,60 @@ def test_a_missing_head_is_an_error(pull_request):
 def test_the_default_call_is_unchanged(pull_request):
     result = detect(pull_request)
     assert "pull_request" not in result
+
+
+def test_minimal_mode_carries_totals_but_no_symbol_names(pull_request):
+    result = detect(pull_request, head="pr", base="main", detail_level="minimal")
+    section = result["pull_request"]
+    assert section["added_symbols_total"] > 0
+    assert section["removed_symbols_total"] > 0
+    assert "added_symbols" not in section
+    assert "removed_symbols" not in section
+    assert set(section) == {"head", "base", "added_symbols_total", "removed_symbols_total"}
+
+
+def test_standard_mode_totals_match_the_lists_when_nothing_is_cut(pull_request):
+    section = detect(pull_request, head="pr", base="main")["pull_request"]
+    listed = sum(len(names) for names in section["added_symbols"].values())
+    assert section["added_symbols_total"] == listed
+    assert section["symbols_truncated"] is False
+    assert "files_with_more_symbols" not in section
+
+
+def _info(added, removed=None):
+    return {"head": "h" * 12, "base": "b" * 12, "added_symbols": added,
+            "removed_symbols": removed or {}}
+
+
+def test_a_long_symbol_list_is_cut_and_says_so_while_the_total_counts_everything():
+    from code_review_graph.tools import review
+
+    names = [f"fn{i}" for i in range(review._PR_NAMES_PER_FILE + 7)]
+    section = review._pull_request_section(_info({"big.py": names, "small.py": ["a"]}), "standard")
+    assert len(section["added_symbols"]["big.py"]) == review._PR_NAMES_PER_FILE
+    assert section["added_symbols"]["small.py"] == ["a"]
+    assert section["added_symbols_total"] == len(names) + 1
+    assert section["symbols_truncated"] is True
+    assert section["files_with_more_symbols"] == ["big.py"]
+
+
+def test_more_files_than_the_cap_are_cut_and_counted():
+    from code_review_graph.tools import review
+
+    many = {f"f{i}.py": ["x"] for i in range(review._PR_FILES_SHOWN + 5)}
+    section = review._pull_request_section(_info(many), "standard")
+    assert len(section["added_symbols"]) == review._PR_FILES_SHOWN
+    assert section["added_symbols_total"] == len(many)
+    assert section["symbols_truncated"] is True
+
+
+def test_symbol_and_file_names_are_sanitised_like_any_node_name():
+    from code_review_graph.tools import review
+
+    section = review._pull_request_section(
+        _info({"a\x00b.py": ["evil\x1b[31m" + "x" * 400]}), "standard",
+    )
+    (path, names), = section["added_symbols"].items()
+    assert "\x00" not in path
+    assert "\x1b" not in names[0]
+    assert len(names[0]) <= 256
