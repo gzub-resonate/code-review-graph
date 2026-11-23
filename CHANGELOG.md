@@ -4,13 +4,6 @@
 
 ### Added
 
-- The Scala parser records what a cross-file resolver needs: the package clauses a
-  type sits in, its kind (class, trait, object, enum, case class), its parents as
-  written, private and override members, and for each call how it is written, its
-  receiver and the receiver's declared type. Scala imports become one
-  `IMPORTS_FROM` edge per imported name, so a rename, a wildcard and a `given`
-  import are kept instead of dropped. Run `code-review-graph build` once to
-  refresh an existing Scala graph.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
@@ -25,6 +18,18 @@
   finished, and which git and editor hooks are installed and the version of
   the copy they run. It changes nothing, exits 1 when a check
   fails, and takes `--json`.
+- Scala calls now link across files. `callers_of`, `get_impact_radius_tool` and
+  `path_to` follow `Foo.bar(...)` into an object in another file, `new Foo(...)`
+  and `Foo(...)` for a companion `apply` or a case class, calls on a value
+  declared as `Foo`, bare calls to members the enclosing class inherits or an
+  import brings in, and test calls into the code under test. Scala imports
+  (plain, selectors, renames, wildcards on an object, imports relative to
+  chained `package` clauses) now point at the file that declares the name; an
+  import of something outside the repository stays external, a renamed import
+  is no longer dropped, and a call that several declarations could mean is
+  marked ambiguous instead of guessed. Library names such as `assert`, `load` or
+  `drop` are never linked by name alone. Run `code-review-graph build` once to
+  refresh an existing Scala graph.
 
 ### Changed
 
