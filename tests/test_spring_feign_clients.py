@@ -10,7 +10,7 @@ from pathlib import Path
 
 from code_review_graph.constants import QUERY_PATTERNS, SPRING_FEIGN_EDGE_KIND
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import CodeParser
+from code_review_graph.parser import CodeParser, EdgeInfo
 from code_review_graph.tools.query import query_graph
 
 CLIENT_SOURCE = """
@@ -395,3 +395,30 @@ def test_feign_client_interface_is_not_reported_as_dead_code(tmp_path: Path) -> 
         store.store_file_nodes_edges(str(path), nodes, edges, "hash")
         dead = {d["name"] for d in find_dead_code(store, kind="Class")}
     assert "BillingClient" not in dead
+
+
+def test_feign_client_methods_are_not_flow_entry_points_by_decorator(tmp_path: Path) -> None:
+    from code_review_graph.flows import detect_entry_points
+
+    source = CLIENT_SOURCE + """
+class InvoiceController {
+    @GetMapping("/invoices")
+    public String list() { return helper(); }
+    String helper() { return ""; }
+}
+"""
+    path, nodes, edges = _parse(tmp_path, source)
+    with GraphStore(tmp_path / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges, "hash")
+        # Make every method "called" so only the decorator rule can qualify it.
+        for node in nodes:
+            if node.kind == "Function":
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS", source=f"{path.as_posix()}::caller",
+                    target=f"{path.as_posix()}::{node.parent_name}.{node.name}",
+                    file_path=str(path), line=1,
+                ))
+        store.commit()
+        names = {n.name for n in detect_entry_points(store)}
+    assert "list" in names
+    assert not {"getInvoice", "createInvoice"} & names
