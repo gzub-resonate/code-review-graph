@@ -593,6 +593,7 @@ base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Graph nodes per list (max 100) and edges (max 150)
 max_files: int = 25              # Files listed and given snippets (max 200)
+cursor: str | None               # `context.next_cursor` of the previous reply
 ```
 `changed_files` is ordered by risk score (highest first, per file in
 `context.file_risk`), and both `max_files` and the shared 800-line snippet
@@ -607,6 +608,9 @@ the files whose regions did not all fit. Each list reports its untruncated
 Changed files the graph has no nodes for are listed in `unmatched_files`, and
 when none of the changed files is in the graph, `risk` is `"unknown"`.
 Responses may include estimated `context_savings` metadata.
+Only the risk-ranked `changed_files` are paged (see Paging): each page brings its
+files with their `file_risk` and snippets. `impacted_files`, the `graph` lists and
+`review_guidance` describe the whole change, so they are on the first page only.
 
 #### `traverse_graph_tool`
 ```
@@ -809,6 +813,7 @@ repo_root: str | None
 detail_level: str = "standard"
 max_results: int = 25        # Changed functions, test gaps, changed files (max 100)
 max_flows: int = 20          # Affected flows embedded (max 200)
+cursor: str | None           # `next_cursor` of the previous reply
 ```
 Main tool for code review. Maps changed files to affected functions, YAML and JSON
 paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and
@@ -817,6 +822,9 @@ and review priorities.
 Embedded flows carry per-flow metadata only; use `get_affected_flows_tool` for
 step detail. `changed_functions_total`, `test_gaps_total` and `affected_flows_total`
 report the untruncated counts. Responses may include estimated `context_savings` metadata.
+Only `changed_functions` is paged (see Paging); a later page holds just those rows,
+`risk_score` and the totals. The other lists are on the first page and stay bounded by
+`max_results` and `max_flows`, so the first page can be `truncated` without a `next_cursor`.
 
 When the diff only deletes lines, the code around the gap did not change, so it
 is not listed as changed. The old version of the file is read instead: a
@@ -922,7 +930,8 @@ context window (see #849). The contract is the same everywhere:
 
 ### Paging
 
-`list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` do not stop at
+`list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool`,
+`get_review_context_tool` and `detect_changes_tool` do not stop at
 their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
 back as `cursor` returns the next page, so the ceiling bounds one reply, not what
 you can read. This follows the cursor pagination the MCP specification defines for
@@ -938,6 +947,12 @@ snake_case like the other keys here.
   A cursor from a different query or tool, or from before the graph was rebuilt or
   updated, is refused with an error that says to start over without a cursor.
   Cursors are not signed and hold no state on the server.
+- A review is computed from a git diff on every call, so the cursors of
+  `get_review_context_tool` and `detect_changes_tool` are also bound to the base,
+  the exact ordered changed-file list, the depth and the detail level, and to the
+  rows they page over. A different diff, base or file list refuses the cursor.
+  `detail_level="minimal"` has no pages. In `get_review_context_tool` the cursor
+  and `offset` are in `context`, next to `truncated`.
 - Ties in a ranking are ordered by a fixed key (flow and community id, a hub's
   qualified name), so a page never repeats or skips a row.
 

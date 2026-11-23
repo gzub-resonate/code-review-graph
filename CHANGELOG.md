@@ -4,6 +4,12 @@
 
 ### Added
 
+- `get_review_context_tool` and `detect_changes_tool` take a `cursor` too. When
+  a review has more changed files (review context) or changed functions
+  (detect changes) than one reply holds, the reply carries `next_cursor`; pass
+  it back to read the next page. A cursor is refused if the base, the changed
+  files, the depth or the graph differ from when it was made. The other lists
+  of a review stay on the first page. See `docs/COMMANDS.md`.
 - `list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` no longer
   stop at their ceiling. When more rows exist the reply carries `next_cursor`;
   pass it back as `cursor` to read the next page. A page after the first adds
