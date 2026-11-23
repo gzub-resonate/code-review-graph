@@ -300,6 +300,7 @@ class FileReport:
     added: list[str]
     removed: list[str]
     seeds: list[str]
+    changed_qns: list[str] = None  # type: ignore[assignment]
     parsed: bool = True
     note: Optional[str] = None
     reached: int = 0
@@ -310,6 +311,8 @@ class FileReport:
     def __post_init__(self) -> None:
         if self.untested is None:
             self.untested = []
+        if self.changed_qns is None:
+            self.changed_qns = []
 
 
 def reach_from(
@@ -463,6 +466,7 @@ def analyse(
             ):
                 report.changed.append(sym.name)
                 report.seeds.extend(m.qualified_name for m in matches)
+                report.changed_qns.extend(m.qualified_name for m in matches)
         for key, nodes_ in by_key.items():
             if key not in head_keys:
                 report.removed.append(key[1])
@@ -492,25 +496,27 @@ def analyse(
         files: set[str] = set()
         production = tests = 0
         for qn in own:
-            node = store.get_node(qn)
-            if node is None:
+            reached_node = store.get_node(qn)
+            if reached_node is None:
                 continue
-            if node.file_path not in changed_abs:
-                files.add(node.file_path)
+            if reached_node.file_path not in changed_abs:
+                files.add(reached_node.file_path)
             if qn in seeds:
                 continue
-            if node.is_test or node.kind == "Test":
+            if reached_node.is_test or reached_node.kind == "Test":
                 tests += 1
             else:
                 production += 1
         report.reached, report.reached_tests = production, tests
         report.same_repo_files = len(files)
         for qn in report.seeds:
-            node = store.get_node(qn)
-            if node is None or node.kind not in _CHANGEABLE_KINDS or node.kind == "Test":
+            seed_node = store.get_node(qn)
+            if seed_node is None or seed_node.kind not in _CHANGEABLE_KINDS:
+                continue
+            if seed_node.kind == "Test":
                 continue
             if not any(e.kind == "TESTED_BY" for e in store.get_edges_by_source(qn)):
-                report.untested.append(node.name)
+                report.untested.append(seed_node.name)
 
     _clients_h, servers_head = extract_endpoints(head_endpoint_nodes, root)
     _clients_b, servers_base = extract_endpoints(base_endpoint_nodes, root)

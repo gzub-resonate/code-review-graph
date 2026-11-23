@@ -1109,6 +1109,8 @@ async def detect_changes_tool(
     detail_level: str = "standard",
     max_results: int = 25,
     max_flows: int = 20,
+    pr: Optional[int] = None,
+    head: Optional[str] = None,
 ) -> dict:
     """Detect changes and produce risk-scored, priority-ordered review guidance.
 
@@ -1132,6 +1134,10 @@ async def detect_changes_tool(
         max_flows: Maximum affected flows to embed. Embedded flows carry
             per-flow metadata only — use get_affected_flows_tool for step
             detail. Default: 20.
+        pr: Pull request number. Reads the PR's changed files from refs/pull/<pr>/head,
+            parses them in memory and scores them against the graph, so new files are
+            covered. base then names the branch the PR merges into. Default: none.
+        head: A ref or commit to read the changed files from instead of pr.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1140,7 +1146,7 @@ async def detect_changes_tool(
             base=base, changed_files=changed_files,
             include_source=include_source, max_depth=max_depth,
             repo_root=root, detail_level=detail_level,
-            max_results=max_results, max_flows=max_flows,
+            max_results=max_results, max_flows=max_flows, pr=pr, head=head,
         ),
         root,
         timeout_hint=_DETECT_CHANGES_TIMEOUT_HINT,
