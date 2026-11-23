@@ -107,7 +107,7 @@ _STATUS_NAMES = {"A": "added", "M": "modified", "D": "deleted", "R": "renamed", 
 
 def _git(
     repo_root: str, *args: str, binary: bool = False, stdin: Optional[bytes] = None,
-    limit: int = MAX_GIT_OUTPUT, real: bool = False,
+    limit: int = MAX_GIT_OUTPUT, real: bool = False, config: Optional[dict[str, str]] = None,
 ) -> Any:
     """Run one read-only Git command in *repo_root*; raise ``PullRequestError`` on failure.
 
@@ -120,6 +120,16 @@ def _git(
     """
     scratch = None if real else _SCRATCH_DIR.get()
     env = {**os.environ, "GIT_DIR": scratch} if scratch else None
+    if config:
+        # Settings go through Git's environment, not argv, so a value such as a remote URL
+        # with credentials in it never shows in the process list.
+        env = dict(env if env is not None else os.environ)
+        index = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+        for key, value in config.items():
+            env[f"GIT_CONFIG_KEY_{index}"] = key
+            env[f"GIT_CONFIG_VALUE_{index}"] = value
+            index += 1
+        env["GIT_CONFIG_COUNT"] = str(index)
     try:
         with tempfile.TemporaryFile() as errors:
             proc = subprocess.Popen(  # nosec B603 B607 - fixed argv, no shell
@@ -197,6 +207,8 @@ _SESSION: contextvars.ContextVar[Optional["ScratchSession"]] = contextvars.Conte
     "crg_pr_scratch_session", default=None,
 )
 SCRATCH_PREFIX = "crg-pr-"
+#: ``ext::`` and similar remote-helper URLs run a command; never fetch from one.
+_REMOTE_HELPER_RE = re.compile(r"^[A-Za-z0-9+.-]+::")
 #: A scratch directory older than this is left over from a call that never finished.
 SCRATCH_MAX_AGE = 3600.0
 #: Refs an earlier version wrote into the checkout itself; removed when found.
@@ -304,7 +316,12 @@ def _scratch_fetch(repo_root: str, refspec: str, what: str) -> None:
         raise PullRequestError(
             f"{what} is not in this checkout and there is no origin to fetch it from"
         )
-    _git(repo_root, "fetch", "--no-tags", "--quiet", url, refspec)
+    if url.startswith("-") or "\n" in url or "\0" in url or _REMOTE_HELPER_RE.match(url):
+        raise PullRequestError(
+            f"{what} cannot be fetched: the checkout's origin is not a usable URL"
+        )
+    _git(repo_root, "fetch", "--no-tags", "--quiet", "origin", refspec,
+         config={"remote.origin.url": url})
 
 
 def ensure_commit(repo_root: str, ref: str, what: str) -> str:

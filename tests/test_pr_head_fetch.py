@@ -232,3 +232,29 @@ def test_control_characters_in_a_logged_ref_are_escaped(shape, caplog):
     with caplog.at_level(logging.WARNING, logger="code_review_graph.tools.pr_tools"):
         tool(shape, head="main", base="x\nFAKE LOG LINE")
     assert "\nFAKE LOG LINE" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "url", ["--upload-pack=touch /tmp/x", "ext::sh -c id", "-oProxyCommand=id"],
+)
+def test_an_unsafe_origin_url_is_never_handed_to_git(shape, url):
+    git(shape.server, "config", "remote.origin.url", url)
+    result = tool(shape, head=shape.shas["c1"], base="main")
+    assert result["status"] == "error"
+    assert "not a usable URL" in result["error"]
+
+
+def test_the_origin_url_is_not_on_the_command_line(shape, monkeypatch):
+    seen: list[list[str]] = []
+    real_popen = subprocess.Popen
+
+    def spy(argv, *args, **kwargs):
+        seen.append(list(argv))
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(pbr.subprocess, "Popen", spy)
+    assert tool(shape, head=shape.shas["c1"], base="main")["status"] == "ok"
+    origin = git(shape.server, "config", "remote.origin.url")
+    fetches = [argv for argv in seen if "fetch" in argv]
+    assert fetches
+    assert all(origin not in argv for argv in fetches)
