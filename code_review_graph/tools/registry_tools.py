@@ -363,6 +363,8 @@ def _load_endpoints(
             client_tag = extra.get("client")
             if client_tag == js_api_extract.CLIENT_TAG:
                 notes: list[str] = []
+                if extra.get("inferred"):
+                    notes.append("ember_data_convention")
                 if extra.get("receiver_inferred"):
                     notes.append("receiver_inferred")
                 if extra.get("base_url_dynamic"):
@@ -470,8 +472,8 @@ def cross_repo_requests_func(
     [REGISTRY] Reads each registered repo's graph database read-only, finds
     the Feign client calls in the selected (client) repos, and for each one
     looks for the matching controller endpoint in the repo its service name
-    points at. JavaScript and TypeScript calls (axios, fetch, jQuery and Ember
-    ajax) have no service name: they are matched by method and
+    points at. JavaScript and TypeScript calls (axios, fetch, jQuery, Ember
+    ajax and Ember Data) have no service name: they are matched by method and
     route against the server endpoints of every other registered repo.
     Nothing is stored; the join is recomputed on every call.
 

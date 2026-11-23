@@ -109,17 +109,27 @@ Known gaps in Feign support:
 
 JavaScript and TypeScript use the same node shape, written by `js_api_extract.py`. A client
 `Endpoint` has `role: "client"`, `client: "js_http"`, `origin: "js"`, `client_kind` (`axios`,
-`fetch`, `jquery`, `ember-ajax`), `http_method`, `route` and `route_dynamic`;
+`fetch`, `jquery`, `ember-ajax`, `ember-data`), `http_method`, `route` and `route_dynamic`;
 a call that cannot be joined also has `method_dynamic` or `absolute_url`, and `base_url`,
-`base_url_dynamic`, `instance` or `receiver_inferred` say how sure the route is.
+`base_url_dynamic`, `instance`, `receiver_inferred` or `inferred` say how sure the route is.
 A URL that is not statically known is `<unresolved>` with `route_dynamic: true`. A server
 `Endpoint` has `framework` (`nextjs-app`, `nextjs-pages`, `express`), `origin: "js"` and, for a
-rest-of-path route, `catch_all` (and `optional_catch_all`). `{param}` is the placeholder for a `${expr}`
+rest-of-path route, `catch_all` (and `optional_catch_all`). Ember Data `REQUESTS` edges carry
+`confidence: 0.6`, `confidence_tier: "INFERRED"`. `{param}` is the placeholder for a `${expr}`
 piece of a call, `{...name}` marks a catch-all piece of a served route. An inline handler is a
 Function node with `extra.inline_handler`, named `handler@L<line>C<column>`; its route's `HANDLES`
 edge starts there.
 - `requests_of` and `requesters_of` take a method or an endpoint qualified name. A class name
   returns nothing, as it does for `endpoints_for` and `handlers_of`.
+
+### Ember roles
+`ember_kind` in a File or Class node's `extra` names the role of an Ember module: `service`,
+`route`, `controller`, `component`, `model`, `adapter`, `serializer`, `helper`, `modifier`,
+`mixin`, `transform` or `template`. The module path decides first (`app/services/x.js`,
+`addon/...`, pods such as `app/posts/route.js`, a dummy app under `tests/dummy/app`); the base
+class (`Service.extend`, `extends Component`, imported from an Ember module) decides only where
+the path says nothing. Files under a test directory never get a role. `.hbs` files are language
+`handlebars`.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`

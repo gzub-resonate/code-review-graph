@@ -965,7 +965,7 @@ origin that served the page, so the server endpoints of the caller's own
 repository are searched first (its Next.js `app/api` routes, an Express server
 beside the client); only when they have no match does the search widen to every
 other registered repository. A row has a `client_kind`
-(`axios`, `fetch`, `jquery` or `ember-ajax`). One matching
+(`axios`, `fetch`, `jquery`, `ember-ajax` or `ember-data`). One matching
 location, or several in one repository (`reason: "several_handlers_in_repo"`,
 for example handlers of one path that differ by `params=`), is `matched`;
 several repositories are `ambiguous` with the candidate repositories; none is
@@ -975,7 +975,8 @@ computed URL, or a template or concatenation that starts with an unknown
 piece), `absolute_url` (a full `https://...` URL or an absolute `baseURL`),
 `method_dynamic` (the method is not a literal) or `placeholder_in_route`.
 A match carries `confidence: "low"` and `confidence_notes` when it rests on a
-guess: `receiver_inferred` (an instance imported from another file, recognised by its
+guess: `ember_data_convention` (the route was derived from a model name),
+`receiver_inferred` (an instance imported from another file, recognised by its
 name), `base_url_not_literal`, or `catch_all_route`. A server route that takes
 the rest of the path (a Next.js `[...path]` route, an Express `*`) matches only
 a call with the same HTTP method and a literal prefix that is a whole leading
@@ -1017,6 +1018,24 @@ the enclosing function, server ones a `HANDLES` edge from the handler):
   path parameter. A call whose URL cannot be read is recorded as unmatchable
   only for a certain HTTP client (axios, `$.ajax`, Ember ajax, `fetch`), never
   for an imported instance. Test files are skipped.
+- Ember Data: a model under `app/models` (or `addon/models`, or a pods
+  `model.js`) becomes `GET /<ns>/<types>`, `GET /<ns>/<types>/{id}`,
+  `POST /<ns>/<types>`, `PUT /<ns>/<types>/{id}` and `DELETE /<ns>/<types>/{id}`,
+  from the literal `namespace` of `adapters/application` and the model's own
+  adapter (which may also set a literal `pathForType`). The edges are
+  `INFERRED` at 0.6. A `RESTAdapter` camelizes the plural (`blogPosts`) and
+  updates with `PUT`; a `JSONAPIAdapter` dasherizes (`blog-posts`) and
+  updates with `PATCH`. A `host` is recorded but not used; `urlFor*` hooks are
+  ignored; a non-literal `namespace` or `pathForType` makes the model
+  unmatchable. Plurals follow the regular rules (`y` to `ies`, `s`/`x`/`z`/`ch`/`sh`
+  to `es`, otherwise `s`) with a short irregular list (`person`, `child`, `man`,
+  `woman`, `mouse`, `foot`, `tooth`, `goose`, `ox`) and uncountables such as
+  `sheep` and `series`; any other irregular noun is wrong. The adapter files are
+  read from disk when the model is parsed, so an adapter edit shows after the
+  model is parsed again. An Ember Data model that extends `Fragment` from
+  `ember-data-model-fragments` is skipped, because a fragment lives inside its
+  owner record and is never requested; a model that only uses `fragment(...)`
+  attributes still is a resource.
 - Servers: Next.js app router `route.ts|js` exports (`GET`, `POST`, `PUT`,
   `PATCH`, `DELETE`, `HEAD`, `OPTIONS`; the path comes from the directory,
   `[id]` becomes `{id}`, `(group)` and `@slot` directories are dropped,
