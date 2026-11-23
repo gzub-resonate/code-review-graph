@@ -272,6 +272,11 @@ def _run_python_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _flows_dirty(store: GraphStore) -> bool:
+    from .flows import flows_dirty
+    return flows_dirty(store)
+
+
 def _run_rescript_resolver(store: GraphStore) -> Optional[dict]:
     """Run the ReScript cross-module resolver, swallowing any failure so
     build never fails because of it. Returns stats or None on error.
@@ -5023,7 +5028,7 @@ def _create_watch_handler(
                         files_updated > 0
                         # A project file change parses nothing but can rebind
                         # C# calls in unchanged files; the binder marks flows.
-                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                        or (changed_files and _flows_dirty(store))
                     ):
                         postprocess_result = on_files_updated(store)
                         _raise_watch_postprocess_warnings(postprocess_result)

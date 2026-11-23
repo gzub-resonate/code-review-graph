@@ -19,6 +19,7 @@ from ..build_state import (
     read_build_state,
 )
 from ..constants import normalize_file_path
+from ..flows import flows_dirty
 from ..incremental import (
     VERIFIED_FILE_COUNT_KEY,
     _prepare_db_path,
@@ -285,7 +286,7 @@ def _run_postprocess(
         and build_result.get("files_updated") == 0
         and not build_result.get("stale_files_removed")
         # A C# rebind with no source change still owes the flows a rebuild.
-        and store.get_metadata("csharp_flows_dirty") != "1"
+        and not flows_dirty(store)
     )
 
     # Resolve bare and C++ scoped call targets before derived graph steps.
@@ -643,7 +644,7 @@ def build_or_update_graph(
                 }
             failed = [str(item.get("file", "?")) for item in result["errors"]]
             if result["files_updated"] == 0 and not failed and not (
-                postprocess == "full" and store.get_metadata("csharp_flows_dirty") == "1"
+                postprocess == "full" and flows_dirty(store)
             ):
                 summary = (
                     "No changes detected. Graph is up to date."
