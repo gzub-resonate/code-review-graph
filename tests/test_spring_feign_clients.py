@@ -305,3 +305,83 @@ def test_same_named_feign_interfaces_in_one_file_keep_distinct_endpoints(
     assert len(endpoints) == 2
     assert len({n.name for n in endpoints}) == 2
     assert len({e.target for e in edges if e.kind == SPRING_FEIGN_EDGE_KIND}) == 2
+
+
+def test_service_call_through_injected_feign_client_reaches_client_endpoint(
+    tmp_path: Path,
+) -> None:
+    from code_review_graph.incremental import full_build
+    from code_review_graph.postprocessing import run_post_processing
+
+    package = tmp_path / "src" / "main" / "java" / "com" / "example" / "orders"
+    package.mkdir(parents=True)
+    (package / "BillingClient.java").write_text(CLIENT_SOURCE, encoding="utf-8")
+    (package / "InvoiceService.java").write_text(
+        """
+package com.example.orders;
+
+import org.springframework.stereotype.Service;
+
+@Service
+public class InvoiceService {
+    private final BillingClient billingClient;
+
+    public InvoiceService(BillingClient billingClient) {
+        this.billingClient = billingClient;
+    }
+
+    public Invoice find(String id) {
+        return billingClient.getInvoice(id);
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    (tmp_path / ".git").mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        full_build(tmp_path, store)
+        run_post_processing(store)
+
+    caller = f"{(package / 'InvoiceService.java').as_posix()}::InvoiceService.find"
+    callees = query_graph("callees_of", caller, repo_root=str(tmp_path))
+    method_qns = [r["qualified_name"] for r in callees["results"]]
+    method_qn = f"{(package / 'BillingClient.java').as_posix()}::BillingClient.getInvoice"
+    assert method_qn in method_qns
+
+    requested = query_graph("requests_of", method_qn, repo_root=str(tmp_path))
+    assert [r["kind"] for r in requested["results"]] == ["Endpoint"]
+    assert requested["edges"][0]["kind"] == SPRING_FEIGN_EDGE_KIND
+
+
+def test_request_queries_take_a_method_or_endpoint_not_a_class(tmp_path: Path) -> None:
+    path, nodes, edges = _parse(tmp_path, CLIENT_SOURCE)
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges, "hash")
+
+    class_qn = f"{path.as_posix()}::BillingClient"
+    for pattern in ("requests_of", "requesters_of"):
+        result = query_graph(pattern, class_qn, repo_root=str(tmp_path))
+        assert result["results"] == []
+
+
+def test_inherited_mappings_are_not_resolved_at_parse_time(tmp_path: Path) -> None:
+    source = """
+    interface BillingApi {
+        @GetMapping("/invoices")
+        Object list();
+    }
+
+    @FeignClient(name = "billing-service")
+    interface BillingClient extends BillingApi {}
+    """
+    _, nodes, edges = _parse(tmp_path, source)
+
+    assert _client_endpoints(nodes) == []
+    # The parent has no @FeignClient, so it is indexed like a controller.
+    handled = [e for e in edges if e.kind == "HANDLES"]
+    assert [e.source.rsplit("::", 1)[-1] for e in handled] == ["BillingApi.list"]
+    assert not [e for e in edges if e.kind == SPRING_FEIGN_EDGE_KIND]

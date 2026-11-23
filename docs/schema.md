@@ -76,7 +76,14 @@ Columns as for Class.
 ### Endpoint
 A synthesised routed entry point, emitted for Spring request mappings, WebFlux functional
 routes, and static Laravel routes in `routes/*.php`. Metadata includes `http_method`, `route`,
-and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Laravel
+and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Methods of a
+Spring Cloud OpenFeign `@FeignClient` interface emit client Endpoints instead: `role` is
+`"client"`, `client` is `"feign"`, and `http_method` and `route` come from the mapping
+annotations with the `@FeignClient` `path` prefix applied. Other extras are `client_method`,
+`service` (the client `name`, or `service_unresolved` when it is a placeholder), `context_id`,
+`route_dynamic` (the path is not a plain string literal), `url_literal`, and `config_keys`
+(`${...}` placeholders, recorded without values). A `REQUESTS` edge links the interface method to its
+client Endpoint, never a `HANDLES` edge. Laravel
 closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
 set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 
@@ -181,6 +188,7 @@ names the class the call went through. Both are `INFERRED`.
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
 | DEPENDS_ON_CONFIG | `@ConfigurationProperties` class -> `ConfigProperty` | Spring enrichment |
 | HANDLES | handler -> `Endpoint`; listener -> event | Spring and Laravel enrichment |
+| REQUESTS | `@FeignClient` interface method -> client `Endpoint` | Spring Cloud OpenFeign enrichment; read with `requests_of` / `requesters_of` |
 | TRIGGERS | `Scheduler` -> `@Scheduled` method | Spring enrichment |
 | PUBLISHES | method -> Spring application event | Spring enrichment |
 
