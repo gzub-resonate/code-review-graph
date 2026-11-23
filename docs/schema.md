@@ -83,7 +83,7 @@ annotations with the `@FeignClient` `path` prefix applied. Other extras are `cli
 `service` (the client `name`, or `service_unresolved` when it is a placeholder), `context_id`,
 `route_dynamic` (the path is not a plain string literal), `url_literal`, and `config_keys`
 (`${...}` placeholders, recorded without values). A `REQUESTS` edge links the interface method to its
-client Endpoint, never a `HANDLES` edge. Laravel
+client Endpoint, never a `HANDLES` edge. Dead-code reports skip the interface. Laravel
 closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
 set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 

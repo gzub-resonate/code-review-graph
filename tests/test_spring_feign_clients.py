@@ -385,3 +385,13 @@ def test_inherited_mappings_are_not_resolved_at_parse_time(tmp_path: Path) -> No
     handled = [e for e in edges if e.kind == "HANDLES"]
     assert [e.source.rsplit("::", 1)[-1] for e in handled] == ["BillingApi.list"]
     assert not [e for e in edges if e.kind == SPRING_FEIGN_EDGE_KIND]
+
+
+def test_feign_client_interface_is_not_reported_as_dead_code(tmp_path: Path) -> None:
+    from code_review_graph.refactor import find_dead_code
+
+    path, nodes, edges = _parse(tmp_path, CLIENT_SOURCE)
+    with GraphStore(tmp_path / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges, "hash")
+        dead = {d["name"] for d in find_dead_code(store, kind="Class")}
+    assert "BillingClient" not in dead
