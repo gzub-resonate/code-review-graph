@@ -273,6 +273,11 @@
 
 ### Fixed
 
+- `detect_changes_tool` with `pr` or `head` no longer sends every added symbol name when
+  `detail_level="minimal"`: the `pull_request` section then carries the two commits and the
+  added and removed totals only. In the standard level the name lists are cut at 25 per file and
+  50 files, `symbols_truncated` says when that happened, and the totals count every symbol. Names
+  are sanitised like any node name.
 - `pr_blast_radius_tool` and `detect_changes_tool` accept a `head` commit or a `base` branch the
   checkout has not fetched. A full commit SHA, or a branch name, is fetched from `origin` when the
   checkout lacks it. An unresolvable ref now fails with an error naming the ref (`head` or
