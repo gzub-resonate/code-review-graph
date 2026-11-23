@@ -11,6 +11,7 @@ from ..analysis import (
     find_surprising_connections,
     generate_suggested_questions,
 )
+from ..paging import graph_stamp, make_scope, paginate, shown_range
 from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
 
 # The ranking helpers already score every candidate before slicing, so asking
@@ -41,6 +42,7 @@ def get_hub_nodes_func(
     repo_root: str | None = None,
     top_n: int = 10,
     detail_level: str = "standard",
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -53,30 +55,37 @@ def get_hub_nodes_func(
         top_n: Number of top hubs to return (default 10, capped at 100).
         detail_level: "standard" (default) returns full node data;
             "minimal" returns only name, kind, and total_degree.
+        cursor: ``next_cursor`` from the previous reply, to read the next
+            page of the ranking. Omit it for the first page. A cursor is
+            opaque and only valid for the same graph.
 
     Returns:
         Ranked hubs. ``total`` reports the untruncated candidate count and
-        ``truncated`` marks that ``top_n`` or the ceiling cut the list.
+        ``truncated`` marks that ``top_n`` or the ceiling cut the list; then
+        ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     _validate_positive_int(top_n, "top_n")
 
     store, _root = _get_store(repo_root or None)
     try:
-        hubs, total, truncated = _bounded(
-            find_hub_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_HUB_NODES,
+        page = paginate(
+            find_hub_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_HUB_NODES, cursor,
+            scope=make_scope("get_hub_nodes_tool"), stamp=graph_stamp(store),
         )
+        hubs, total = page.items, page.total
         if detail_level == "minimal":
             hubs = _project(hubs, _MINIMAL_HUB_FIELDS)
         return {
             "status": "ok",
             "summary": (
                 f"{total} hub node(s) ranked by degree"
-                + _shown_of(len(hubs), total)
+                + shown_range(page)
             ),
             "hub_nodes": hubs,
             "count": len(hubs),
             "total": total,
-            "truncated": truncated,
+            "truncated": page.truncated,
+            **page.fields(),
             "next_tool_suggestions": [
                 "get_impact_radius_tool -- check blast radius of a hub",
                 "query_graph_tool callers_of -- see what calls a hub",

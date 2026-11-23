@@ -4,6 +4,13 @@
 
 ### Added
 
+- `list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` no longer
+  stop at their ceiling. When more rows exist the reply carries `next_cursor`;
+  pass it back as `cursor` to read the next page. A page after the first adds
+  `offset`. A cursor is refused, with a message to start over, if the query or
+  the graph changed since it was made. Equal-ranked flows, communities and hubs
+  now come in a fixed order, so pages never repeat or skip a row. See
+  `docs/COMMANDS.md`.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

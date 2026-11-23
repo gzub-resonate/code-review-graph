@@ -10,6 +10,7 @@ from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
+from ..paging import graph_stamp, make_scope, paginate, shown_range
 from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
 
 # ---------------------------------------------------------------------------
@@ -56,6 +57,7 @@ def list_communities_func(
     detail_level: str = "standard",
     max_results: int = 50,
     max_members: int = 10,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """List detected code communities in the codebase.
 
@@ -76,21 +78,29 @@ def list_communities_func(
         max_members: Maximum member names listed per community in standard
                      mode (default 10, capped at 100). Each community's
                      ``size`` still reports its true member count.
+        cursor: ``next_cursor`` from the previous reply, to read the next page
+                of the same list. Omit it for the first page. A cursor is opaque
+                and only valid for the same arguments on the same graph.
 
     Returns:
         Communities with size and cohesion scores, plus ``total`` and
-        ``truncated``.
+        ``truncated``. When more communities remain, ``next_cursor`` is the
+        ``cursor`` that returns the next page.
     """
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
     store, root = _get_store(repo_root)
     try:
-        communities, total, truncated = _bounded(
+        page = paginate(
             get_communities(store, sort_by=sort_by, min_size=min_size),
-            max_results,
-            _MAX_COMMUNITIES,
+            max_results, _MAX_COMMUNITIES, cursor,
+            scope=make_scope(
+                "list_communities_tool", sort_by=sort_by, min_size=min_size,
+            ),
+            stamp=graph_stamp(store),
         )
+        communities, total = page.items, page.total
         if detail_level == "minimal":
             communities = [
                 {"name": c["name"], "size": c["size"], "cohesion": c["cohesion"]}
@@ -102,11 +112,12 @@ def list_communities_func(
             "status": "ok",
             "summary": (
                 f"Found {total} communities"
-                + _shown_of(len(communities), total)
+                + shown_range(page)
             ),
             "communities": communities,
             "total": total,
-            "truncated": truncated,
+            "truncated": page.truncated,
+            **page.fields(),
         }
         result["_hints"] = generate_hints(
             "list_communities_tool", result, get_session()
