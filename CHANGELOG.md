@@ -4,6 +4,13 @@
 
 ### Added
 
+- A Step Functions Task state that runs a Lambda function or an ECS task is now
+  linked to the Terraform resource (`aws_lambda_function`,
+  `aws_ecs_task_definition`) that defines it, when the repository has one, so
+  `references_to` on the resource lists the state machines that run it. Names are
+  matched by convention (case, `-` and `_` ignored, one resource only) and the
+  link is marked `INFERRED`; the edge to the external target stays. See
+  `docs/schema.md`.
 - AWS Step Functions state machines are indexed. A file named `*.asl.json` or
   `*.asl` is read as a state machine instead of as generic JSON, so it no longer
   adds a `JsonPath` node for every key (on two real repositories, 61
