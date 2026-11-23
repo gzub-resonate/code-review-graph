@@ -1151,6 +1151,7 @@ async def refactor_tool(
     repo_root: Optional[str] = None,
     max_results: int = 50,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Graph-powered refactoring operations.
 
@@ -1178,6 +1179,14 @@ async def refactor_tool(
             Default: 50.
         detail_level: "standard" for full records, "minimal" for
             identifying fields only. Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next
+            page of the same mode and arguments. Omit it for the first page.
+            Paging only reads: a later rename page applies nothing and issues
+            no new refactor_id; apply with the id from the first page.
+
+    Returns:
+        Mode-specific results with ``total`` and ``truncated``. When the list
+        was cut, ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1185,7 +1194,7 @@ async def refactor_tool(
         lambda: refactor_func(
             mode=mode, old_name=old_name, new_name=new_name,
             kind=kind, file_pattern=file_pattern, repo_root=root,
-            max_results=max_results, detail_level=detail_level,
+            max_results=max_results, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )

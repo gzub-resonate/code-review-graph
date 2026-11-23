@@ -11,6 +11,10 @@
   the graph changed since it was made. Equal-ranked flows, communities and hubs
   now come in a fixed order, so pages never repeat or skip a row. See
   `docs/COMMANDS.md`.
+- `refactor_tool` pages its long lists the same way: the edits of a rename
+  preview, the dead-code symbols and the suggestions. Pass `next_cursor` back as
+  `cursor` to read the rest. Reading further pages never applies a rename and
+  never issues a new `refactor_id`; apply with the id the first page returned.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
