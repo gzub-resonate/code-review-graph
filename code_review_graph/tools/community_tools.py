@@ -10,8 +10,8 @@ from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
-from ..paging import graph_stamp, make_scope, paginate, shown_range
-from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
+from ..paging import Page, graph_stamp, make_scope, paginate, shown_range
+from ._common import _bounded, _get_store, _page_together, _validate_positive_int
 
 # ---------------------------------------------------------------------------
 # Tool 13: list_communities  [EXPLORE]
@@ -48,6 +48,30 @@ def _cap_members(
             capped[f"{key}_total"] = total
             capped["members_truncated"] = True
     return capped
+
+
+def _page_members(
+    community: dict[str, Any], max_members: int, cursor: str | None, store: Any, *, scope: str,
+) -> tuple[dict[str, Any], Page]:
+    """Like ``_cap_members``, but reads the page a cursor points at.
+
+    ``members`` and ``member_details`` share one offset. The first page is what
+    ``_cap_members`` returns. ``members_truncated`` is set while members remain after
+    the page; a later page also carries ``<key>_total``, the full length of its list.
+    """
+    keys = [k for k in ("members", "member_details") if isinstance(community.get(k), list)]
+    shown, page = _page_together(
+        {k: community[k] for k in keys}, max_members, _MAX_MEMBERS, cursor,
+        scope=scope, stamp=graph_stamp(store),
+    )
+    paged = dict(community)
+    for key in keys:
+        paged[key] = shown[key]
+        if page.offset or len(community[key]) > len(shown[key]) + page.offset:
+            paged[f"{key}_total"] = len(community[key])
+    if page.truncated:
+        paged["members_truncated"] = True
+    return paged, page
 
 
 def list_communities_func(
@@ -140,6 +164,7 @@ def get_community_func(
     include_members: bool = False,
     repo_root: str | None = None,
     max_members: int = 25,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Get details of a single code community.
 
@@ -157,9 +182,16 @@ def get_community_func(
                      true member count and ``members_truncated`` marks the
                      cut. Without this bound a single 3000-member community
                      serialized to >130k tokens.
+        cursor: ``next_cursor`` from the previous reply, to read the next
+                members of the same community. Omit it for the first page.
+                A cursor is opaque and only valid for the same community on
+                the same graph. ``members`` and ``member_details`` advance
+                together.
 
     Returns:
-        Community details, or not_found status.
+        Community details, or not_found status. When members remain,
+        ``next_cursor`` is the ``cursor`` that returns the next ones; a page
+        after the first adds ``offset`` and ``members_total``.
     """
     _validate_positive_int(max_members, "max_members")
 
@@ -194,7 +226,13 @@ def get_community_func(
                 members = [node_to_dict(n) for n in member_nodes]
                 community["member_details"] = members
 
-        community = _cap_members(community, max_members)
+        community, page = _page_members(
+            community, max_members, cursor, store,
+            scope=make_scope(
+                "get_community_tool", community_id=community.get("id"),
+                include_members=include_members,
+            ),
+        )
 
         result = {
             "status": "ok",
@@ -204,6 +242,7 @@ def get_community_func(
                 f"cohesion {community['cohesion']:.4f}"
             ),
             "community": community,
+            **page.fields(),
         }
         result["_hints"] = generate_hints(
             "get_community_tool", result, get_session()
@@ -268,6 +307,7 @@ def get_architecture_overview_func(
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
@@ -289,10 +329,18 @@ def get_architecture_overview_func(
         max_members: (standard only) Maximum member names per community
                      (default 10, capped at 25). Standard mode returned
                      >600k tokens on this repo without these bounds.
+        cursor: ``next_cursor`` from the previous reply, to read the next
+                cross-community rows and warnings. Omit it for the first
+                page. A cursor is opaque and only valid for the same
+                ``detail_level`` on the same graph. The two lists advance
+                together; the community list and each community's member
+                names are not paged (read a community's members with
+                ``get_community_tool``).
 
     Returns:
         Architecture overview with communities, cross-community edges,
-        warnings, and a ``truncated`` flag.
+        warnings, and a ``truncated`` flag. When rows remain,
+        ``next_cursor`` is the ``cursor`` that returns the next ones.
     """
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
@@ -309,19 +357,22 @@ def get_architecture_overview_func(
                 _cap_members(c, max_members)
                 for c in overview.get("communities", [])
             ]
-        cross, cross_total, truncated = _bounded(
-            overview["cross_community_edges"], max_results, _MAX_CROSS_EDGES,
-        )
-        overview["cross_community_edges"] = cross
+        cross_total = len(overview["cross_community_edges"])
+        warn_total = len(overview["warnings"])
         # One warning per highly-coupled community pair grows quadratically
-        # with the community count, so it needs the same bound.
-        warnings, warn_total, warn_cut = _bounded(
-            overview["warnings"], max_results, _MAX_CROSS_EDGES,
+        # with the community count, so it needs the same bound. Both lists
+        # advance together under one cursor.
+        shown, page = _page_together(
+            {"cross": overview["cross_community_edges"], "warnings": overview["warnings"]},
+            max_results, _MAX_CROSS_EDGES, cursor,
+            scope=make_scope("get_architecture_overview_tool", detail_level=detail_level),
+            stamp=graph_stamp(store),
         )
-        overview["warnings"] = warnings
-        truncated = truncated or warn_cut
+        cross = shown["cross"]
+        overview["cross_community_edges"] = cross
+        overview["warnings"] = shown["warnings"]
+        truncated = page.truncated
         n_communities = len(overview["communities"])
-        n_cross = len(cross)
         n_warnings = warn_total
         cross_label = (
             "community pairs"
@@ -333,12 +384,13 @@ def get_architecture_overview_func(
             "summary": (
                 f"Architecture: {n_communities} communities, "
                 f"{cross_total} {cross_label}"
-                + _shown_of(n_cross, cross_total) + ", "
+                + shown_range(Page(cross, cross_total, page.offset, None)) + ", "
                 f"{n_warnings} warning(s)"
             ),
             **overview,
             "cross_community_edges_total": cross_total,
             "truncated": truncated,
+            **page.fields(),
         }
         result["_hints"] = generate_hints(
             "get_architecture_overview_tool", result, get_session()

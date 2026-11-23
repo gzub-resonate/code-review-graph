@@ -9,7 +9,7 @@ from ..flows import get_flow_by_id, get_flows
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
 from ..paging import graph_stamp, make_scope, paginate, shown_range
-from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
+from ._common import _get_store, _validate_positive_int
 
 # ---------------------------------------------------------------------------
 # Tool 10: list_flows  [EXPLORE]
@@ -127,6 +127,7 @@ def get_flow(
     repo_root: str | None = None,
     max_steps: int = 50,
     max_source_lines: int = 400,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Get details of a single execution flow.
 
@@ -145,10 +146,17 @@ def get_flow(
         max_source_lines: Total source lines emitted across all steps when
             ``include_source`` is set (default 400, capped at 2000). Without
             this, one deep flow inlines every function body it touches.
+            The budget is spent per reply, so each page gets a fresh one.
+        cursor: ``next_cursor`` from the previous reply, to read the next
+            steps of the same flow. Omit it for the first page. A cursor is
+            opaque and only valid for the same flow on the same graph.
 
     Returns:
         Flow details with steps, or not_found status. ``flow["truncated"]``
-        marks that ``max_steps`` or the source budget cut the response.
+        marks that ``max_steps`` or the source budget cut the response. When
+        steps remain, ``next_cursor`` is the ``cursor`` that returns the next
+        ones; a page after the first adds ``offset``. ``flow["path"]`` lists
+        every step's node id on each page, so it is not paged.
     """
     _validate_positive_int(max_steps, "max_steps")
     _validate_positive_int(max_source_lines, "max_source_lines")
@@ -175,12 +183,14 @@ def get_flow(
                 "summary": "No flow found matching the given criteria.",
             }
 
-        steps, total_steps, truncated = _bounded(
-            flow.get("steps") or [], max_steps, _MAX_FLOW_STEPS,
+        page = paginate(
+            flow.get("steps") or [], max_steps, _MAX_FLOW_STEPS, cursor,
+            scope=make_scope("get_flow_tool", flow_id=flow["id"]), stamp=graph_stamp(store),
         )
+        steps, total_steps = page.items, page.total
         flow["steps"] = steps
         flow["total_steps"] = total_steps
-        flow["truncated"] = truncated
+        flow["truncated"] = page.truncated
 
         # Optionally include source snippets for each step, spending a shared
         # line budget so a deep flow cannot inline the whole call chain.
@@ -227,9 +237,10 @@ def get_flow(
                 f"Flow '{flow['name']}': {flow['node_count']} nodes, "
                 f"depth {flow['depth']}, "
                 f"criticality {flow['criticality']:.4f}"
-                + _shown_of(len(steps), total_steps)
+                + shown_range(page)
             ),
             "flow": flow,
+            **page.fields(),
         }
         result["_hints"] = generate_hints(
             "get_flow_tool", result, get_session()

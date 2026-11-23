@@ -1222,7 +1222,8 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
             node_to_community[qn] = comm_id
 
     # Count cross-community edges
-    all_edges = store.get_all_edges()
+    # Edge id order made explicit: a cross-community list read in pages keeps its order.
+    all_edges = sorted(store.get_all_edges(), key=lambda e: e.id)
     cross_edges: list[dict[str, Any]] = []
     cross_counts: Counter[tuple[int, int]] = Counter()
 

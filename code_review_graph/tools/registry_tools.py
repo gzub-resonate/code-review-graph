@@ -8,8 +8,9 @@ from typing import Any
 
 from ..graph import GraphStore, _sanitize_name
 from ..incremental import get_db_path
+from ..paging import CursorError, make_scope, paginate, shown_range
 from ..search import hybrid_search
-from ._common import _bounded, _shown_of, _validate_positive_int
+from ._common import _bounded, _validate_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,11 @@ _MAX_CROSS_REPO_RESULTS = 100
 # Names are also sanitised on the way out, like every other name in a
 # response, which caps each entry at 256 characters.
 _MAX_ECHOED_NAMES = 20
+
+_NO_RESULTS_FOR_CURSOR = (
+    "the registry no longer holds a repository this cursor can continue; "
+    "call again without a cursor to start over"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +135,7 @@ def cross_repo_search_func(
     limit: int = 20,
     max_results: int = 50,
     repos: list[str] | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Search across registered repositories.
 
@@ -155,10 +162,17 @@ def cross_repo_search_func(
             dropped, since a silently skipped repo is indistinguishable from
             one that simply had no matches; names matching several entries
             select all of them and are listed in ``ambiguous``.
+        cursor: ``next_cursor`` from the previous reply, to read the next
+            merged results. Omit it for the first page. A cursor is opaque
+            and only valid for the same ``query``, ``kind``, ``limit`` and
+            ``repos``, and only while the merged results are unchanged: the
+            cursor holds a digest of them, because the repos are searched
+            afresh on every call.
 
     Returns:
         Combined search results from the searched repos, plus ``total``
-        and ``truncated``. When ``repos`` was given, also ``unknown`` and
+        and ``truncated``. When more results remain, ``next_cursor`` is the
+        ``cursor`` that returns the next ones. When ``repos`` was given, also ``unknown`` and
         ``ambiguous`` with their ``*_total`` counts, both bounded like every
         other list in a response.
     """
@@ -171,6 +185,8 @@ def cross_repo_search_func(
         registry = Registry()
         all_repos = registry.list_repos()
         if not all_repos:
+            if cursor:
+                raise CursorError(_NO_RESULTS_FOR_CURSOR)
             return {
                 "status": "ok",
                 "summary": (
@@ -195,6 +211,8 @@ def cross_repo_search_func(
                 ambiguous
             )
             if not selected:
+                if cursor:
+                    raise CursorError(_NO_RESULTS_FOR_CURSOR)
                 # The count, never the names: the summary is the field agents
                 # read first, and interpolating a caller-supplied list here
                 # was the second copy of an unbounded echo.
@@ -250,11 +268,18 @@ def cross_repo_search_func(
         # Scores from different search paths are not comparable across repos.
         # Merge by each repo's local rank and use registry order as a stable tie-breaker.
         ranked_results.sort(key=lambda item: (item[0], item[1]))
-        all_results, total, truncated = _bounded(
-            [result for _, _, result in ranked_results],
-            max_results,
-            _MAX_CROSS_REPO_RESULTS,
+        merged = [result for _, _, result in ranked_results]
+        # The rows come from several graph databases and are searched afresh on every
+        # call, so the stamp is a digest of the rows themselves.
+        page = paginate(
+            merged, max_results, _MAX_CROSS_REPO_RESULTS, cursor,
+            scope=make_scope(
+                "cross_repo_search_tool", query=query, kind=kind, limit=limit,
+                repos=sorted(set(repos)) if repos else None,
+            ),
+            stamp=make_scope("cross_repo_search_rows", rows=merged),
         )
+        all_results, total, truncated = page.items, page.total, page.truncated
 
         # A dropped or duplicated name reaches the summary too. The
         # all-unknown branch already said so there, and CLAUDE.md trains
@@ -270,13 +295,14 @@ def cross_repo_search_func(
             "summary": (
                 f"Found {total} result(s) across "
                 f"{len(searched_repos)} repo(s) for '{query}'"
-                + _shown_of(len(all_results), total)
+                + shown_range(page)
                 + notes
             ),
             "results": all_results,
             "total": total,
             "truncated": truncated,
             "repos_searched": searched_repos,
+            **page.fields(),
         }
         if repos:
             response["unknown"] = unknown_shown

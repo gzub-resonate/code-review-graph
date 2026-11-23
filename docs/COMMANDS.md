@@ -699,8 +699,9 @@ flow_id: int | None          # Database ID from list_flows_tool
 flow_name: str | None        # Name to search (partial match); ignored when flow_id is given
 include_source: bool = False # Source snippet per step
 repo_root: str | None
-max_steps: int = 50          # Capped at 200; flow.total_steps reports the full count
-max_source_lines: int = 400  # Shared across all steps; capped at 2000
+max_steps: int = 50          # Steps per page (max 200); flow.total_steps reports the full count
+max_source_lines: int = 400  # Per reply, shared across its steps; capped at 2000
+cursor: str | None           # next_cursor of the previous reply (see Paging)
 ```
 
 #### `get_affected_flows_tool`
@@ -735,7 +736,8 @@ community_name: str | None   # Name to search (partial match); ignored when comm
 community_id: int | None     # Database ID
 include_members: bool = False
 repo_root: str | None
-max_members: int = 25        # Member entries returned (max 25)
+max_members: int = 25        # Member entries per page (max 25)
+cursor: str | None           # next_cursor of the previous reply (see Paging)
 ```
 
 #### `get_architecture_overview_tool`
@@ -744,6 +746,7 @@ repo_root: str | None
 detail_level: str = "minimal"    # "minimal" (default) or "standard"
 max_results: int = 100           # Cross-community rows and warnings (max 200)
 max_members: int = 10            # Member names per community in standard mode (max 25)
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 `cross_community_edges_total` reports the untruncated row count.
 Minimal responses may include estimated `context_savings` metadata.
@@ -760,16 +763,18 @@ cursor: str | None               # next_cursor of the previous reply (see Result
 
 #### `get_bridge_nodes_tool`
 ```
-top_n: int = 10                  # Capped at 100
+top_n: int = 10                  # Bridges per page (max 100)
 repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns name, kind, betweenness
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 
 #### `get_knowledge_gaps_tool`
 ```
 repo_root: str | None
-max_per_category: int = 15       # Entries per gap category (max 50)
+max_per_category: int = 15       # Entries per gap category per page (max 50)
 detail_level: str = "standard"   # "minimal" drops file paths
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 `summary` maps each category to its untruncated count. The categories are
 `isolated_nodes`, `thin_communities`, `untested_hotspots`,
@@ -787,9 +792,10 @@ before this release need `code-review-graph build` to tell these imports apart.
 
 #### `get_surprising_connections_tool`
 ```
-top_n: int = 15                  # Capped at 100
+top_n: int = 15                  # Surprises per page (max 100)
 repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns source, target, kind, score
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 
 #### `get_suggested_questions_tool`
@@ -894,6 +900,7 @@ kind: str | None
 limit: int = 20              # Results per repo
 max_results: int = 50        # Merged results across searched repos (max 100)
 repos: list[str] | None      # Aliases or folder names; default: every registered repo
+cursor: str | None           # next_cursor of the previous reply (see Paging)
 ```
 
 `repos` limits the search to named registry entries. Matching is exact and
@@ -922,8 +929,10 @@ context window (see #849). The contract is the same everywhere:
 
 ### Paging
 
-`list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` do not stop at
-their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
+`list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool`,
+`get_bridge_nodes_tool`, `get_surprising_connections_tool`, `get_knowledge_gaps_tool`,
+`get_community_tool`, `get_architecture_overview_tool`, `get_flow_tool` and
+`cross_repo_search_tool` do not stop at their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
 back as `cursor` returns the next page, so the ceiling bounds one reply, not what
 you can read. This follows the cursor pagination the MCP specification defines for
 its list operations (`cursor` in, `nextCursor` out), with the result key spelled in
@@ -938,8 +947,26 @@ snake_case like the other keys here.
   A cursor from a different query or tool, or from before the graph was rebuilt or
   updated, is refused with an error that says to start over without a cursor.
   Cursors are not signed and hold no state on the server.
-- Ties in a ranking are ordered by a fixed key (flow and community id, a hub's
-  qualified name), so a page never repeats or skips a row.
+- Ties in a ranking are ordered by a fixed key (flow and community id, a node's
+  qualified name, an edge's endpoints and id), so a page never repeats or skips a row.
+- Where a reply holds several lists, one cursor moves them together by position:
+  `get_knowledge_gaps_tool` shows the same row positions of every category (a category
+  with no rows left is empty), `get_architecture_overview_tool` pages the
+  cross-community rows and the warnings, and `get_community_tool` pages `members` and
+  `member_details`. In `get_architecture_overview_tool` the community list and each
+  community's member names stay bounded as before; read a community's members with
+  `get_community_tool`. A page after the first of these three adds `offset`; in
+  `get_community_tool` and `get_flow_tool` the cursor and `offset` sit at the top of
+  the reply, beside `flow` or `community`, and `members_truncated` means members remain.
+- `get_flow_tool` pages `flow.steps`; `flow.path` (the node ids of every step) is
+  returned whole on every page. The `max_source_lines` budget is spent per reply, so
+  each page gets a fresh one.
+- `get_knowledge_gaps_tool` now counts every isolated node and untested hotspot in
+  `summary`; they used to be cut at 50 and 20 before counting.
+- `cross_repo_search_tool` searches the repos afresh on every call, so its cursor
+  also holds a digest of the merged results and is refused once they change.
+- `get_bridge_nodes_tool` samples a fixed set of nodes on graphs over 5000 nodes, so
+  its ranking is the same on every call.
 
 ## MCP Prompts (5 workflow templates)
 
