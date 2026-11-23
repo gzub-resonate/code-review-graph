@@ -27,9 +27,8 @@
 ### Changed
 
 - Feign client methods are no longer listed as served routes by `endpoints_for`
-  or `handlers_of`, and `@FeignClient` interfaces are no longer reported as
-  dead code or treated as flow entry points. Run `code-review-graph build`
-  once to re-index existing Feign interfaces.
+  or `handlers_of`. Run `code-review-graph build` once to re-index existing
+  Feign interfaces.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers

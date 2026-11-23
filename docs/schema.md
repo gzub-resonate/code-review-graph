@@ -87,6 +87,18 @@ client Endpoint, never a `HANDLES` edge. Laravel
 closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
 set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 
+Known gaps in Feign support:
+
+- Mappings inherited from a parent interface are not resolved at parse time. A marker interface
+  such as `interface X extends Base {}` gets no client endpoints. A parent interface without
+  `@FeignClient` that declares mapped methods is indexed like a controller, so those methods
+  still get server-style `Endpoint` nodes and `HANDLES` edges.
+- Query strings stay verbatim in `route` (`/items?active=true`); stripping is left to whoever
+  matches routes.
+- Feign's native `@RequestLine` contract and Kotlin clients are not supported.
+- `requests_of` and `requesters_of` take a method or an endpoint qualified name. A class name
+  returns nothing, as it does for `endpoints_for` and `handlers_of`.
+
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
 edge.
