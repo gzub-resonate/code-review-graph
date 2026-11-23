@@ -130,6 +130,19 @@ _MAX_BARE_TARGET_CANDIDATES = 20
 #: the answer can be split by how certain that edge's target attribution is.
 _CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
 
+#: Patterns that can ask who points at something outside the repository.
+_EXTERNAL_TARGET_PATTERNS = frozenset({"callers_of", "references_to", "importers_of"})
+
+
+def _is_external_target(pattern: str, target: str) -> bool:
+    """Whether *target* names a unit outside the graph, such as ``external:aws-lambda:x``.
+
+    Parsers record a call to code that is not in the repository as an edge to
+    ``external:<kind>:<name>``. No node has that name, so it is read from the
+    edges that end there instead of being searched for as a symbol.
+    """
+    return pattern in _EXTERNAL_TARGET_PATTERNS and target.startswith("external:")
+
 
 def _attach_call_site(
     result: dict[str, Any], edge: GraphEdge,
@@ -1147,7 +1160,8 @@ def query_graph(
         node = None
         same_name_tests = 0
         raw_config_target = pattern == "consumers_of" and "::" not in target
-        if pattern != "file_summary" and not raw_config_target:
+        external_target = _is_external_target(pattern, target)
+        if pattern != "file_summary" and not raw_config_target and not external_target:
             node = store.get_node(target)
             if not node:
                 # Only the path part is a path: the symbol in ``a.xsl::match=/``
@@ -1267,7 +1281,7 @@ def query_graph(
                         ),
                     }
 
-        if not node and pattern not in ("consumers_of", "file_summary"):
+        if not node and pattern not in ("consumers_of", "file_summary") and not external_target:
             # This branch, not the empty-result path below, is where an
             # unresolved target actually lands for most patterns, so the
             # not-indexed marker has to be attached here too.
@@ -1451,7 +1465,8 @@ def query_graph(
             # Use resolve() to canonicalize the path, matching how
             # _resolve_module_to_file stores edge targets.
             abs_target = (
-                str((root / target).resolve()) if node is None
+                target if external_target
+                else str((root / target).resolve()) if node is None
                 else node.file_path
             )
             seen_importers: set[str] = set()
@@ -1469,7 +1484,9 @@ def query_graph(
             # rather than one per file in the package is what keeps the graph
             # linear in imports; expanding the directory here is the other
             # half of that trade. See IMPORT_SCOPE_KEY in constants.py.
-            for directory, scopes in import_scope_ancestors(abs_target):
+            for directory, scopes in (
+                () if external_target else import_scope_ancestors(abs_target)
+            ):
                 for e in store.iter_edges_by_target(directory):
                     if e.kind != "IMPORTS_FROM":
                         continue
