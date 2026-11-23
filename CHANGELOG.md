@@ -21,6 +21,13 @@
   it back to read the next page. A cursor is refused if the base, the changed
   files, the depth or the graph differ from when it was made. The other lists
   of a review stay on the first page. See `docs/COMMANDS.md`.
+- `get_impact_radius_tool`, `query_graph_tool`, `semantic_search_nodes_tool`,
+  `find_large_functions_tool` and `traverse_graph_tool` take a `cursor` too, so
+  the rows their caps hid can be read: a reply with more rows carries
+  `next_cursor`. Impact pages its impacted nodes (compact: files), search pages
+  its ranked window, and a traversal continues the same walk. A cursor is
+  refused if the query or graph changed, or the search ranking did. Equal-sized
+  large functions now come in a fixed order. See `docs/COMMANDS.md`.
 - `list_flows_tool`, `list_communities_tool` and `get_hub_nodes_tool` no longer
   stop at their ceiling. When more rows exist the reply carries `next_cursor`;
   pass it back as `cursor` to read the next page. A page after the first adds
