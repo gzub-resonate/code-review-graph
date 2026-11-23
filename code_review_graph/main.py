@@ -1656,11 +1656,12 @@ async def cross_repo_requests_tool(
     confidence (reason ``variable_matches_literal``) when its variable stands
     against a fixed server segment.
 
-    JavaScript and TypeScript calls (axios, fetch, jQuery and Ember
-    ajax) have no service name and are matched by method and route against the
+    JavaScript and TypeScript calls (axios, fetch, jQuery, Ember ajax and Ember
+    Data) have no service name and are matched by method and route against the
     endpoints of every other registered repo; each row has an ``origin`` of
     ``feign`` or ``js``. A match through a catch-all route such as a Next.js
-    ``[...path]`` proxy has ``confidence`` ``low``.
+    ``[...path]`` proxy, or through a naming convention, has ``confidence``
+    ``low``.
 
     Args:
         repos: Optional aliases or folder names of the client repos to list

@@ -145,11 +145,11 @@ class ClientCall:
     url_from_argument: bool = False
     #: ``"feign"`` (a Spring client method) or ``"js"`` (a JavaScript/TypeScript call).
     origin: str = "feign"
-    #: For ``origin == "js"``: ``axios``, ``fetch``, ``jquery`` or ``ember-ajax``.
+    #: For ``origin == "js"``: ``axios``, ``fetch``, ``jquery``, ``ember-ajax`` or ``ember-data``.
     client_kind: Optional[str] = None
     method_dynamic: bool = False
     absolute_url: bool = False
-    #: Why the call is only a likely match (for example ``receiver_inferred``).
+    #: Why the call is only a likely match (for example ``ember_data_convention``).
     notes: tuple[str, ...] = ()
 
 

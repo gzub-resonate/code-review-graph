@@ -1,12 +1,14 @@
 """Parse-time HTTP routes and API calls in JavaScript and TypeScript modules.
 
-Two things are read out of one parsed file and recorded as ``Endpoint``
+Three things are read out of one parsed file and recorded as ``Endpoint``
 nodes, in the same shape the Spring Feign and controller code uses:
 
 * **Client calls** with a statically known route: ``axios`` (the default
   export and instances made with ``axios.create``), ``fetch``, ``$.ajax`` and
   friends, and Ember ``ajax``.  Each is a client ``Endpoint`` (``role`` is
   ``"client"``) with a ``REQUESTS`` edge from the enclosing function.
+* **Ember Data** models: the routes the store derives from the adapter's
+  ``namespace`` and the model's name (see :func:`ember_model_routes`).
 * **Server routes**: the Next.js app router (``route.ts``) and pages router
   (``pages/api``), and Express, Koa, Fastify or Hono style
   ``app.get('/x', handler)``.  Each is a server ``Endpoint`` with a
@@ -26,6 +28,9 @@ Known limits, also in ``docs/COMMANDS.md``:
 * Test files are skipped.
 * ``app.use('/prefix', router)`` mounting is not followed; a router's routes
   are recorded relative to the router.
+* Plural names for Ember Data follow ember-inflector for regular nouns plus a
+  short irregular list (:data:`_IRREGULAR_PLURALS`); an unusual noun can be
+  wrong, which is why those edges are ``INFERRED`` at 0.6.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
+
+from . import ember_extract
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .parser import EdgeInfo, NodeInfo
@@ -50,6 +57,8 @@ MAX_WALK_NODES = 400_000
 #: Most endpoints one file may produce.
 MAX_ENDPOINTS = 2_000
 
+#: Confidence of an Ember Data route (the plural form is a convention).
+EMBER_DATA_CONFIDENCE = 0.6
 
 #: Rendered in place of a route piece that cannot be resolved.
 UNRESOLVED = "<unresolved>"
@@ -945,6 +954,276 @@ def _handler_name(node: Any) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Ember Data
+# ---------------------------------------------------------------------------
+
+#: Words ember-inflector would not pluralise by the plain rules.
+_IRREGULAR_PLURALS = {
+    "person": "people", "man": "men", "woman": "women", "child": "children",
+    "mouse": "mice", "foot": "feet", "tooth": "teeth", "goose": "geese", "ox": "oxen",
+}
+_UNCOUNTABLE = frozenset({
+    "equipment", "information", "rice", "money", "species", "series", "fish", "sheep",
+    "jeans", "police", "news", "data", "metadata",
+})
+_VOWELS = "aeiou"
+
+
+def pluralize_word(word: str) -> str:
+    """Plural of one lower-case word: regular rules plus a short irregular list.
+
+    ``y`` after a consonant becomes ``ies`` (``category`` -> ``categories``),
+    ``s``, ``x``, ``z``, ``ch`` and ``sh`` take ``es`` (``status`` ->
+    ``statuses``), everything else takes ``s``.  Uncountable and irregular
+    nouns come from small tables; anything else irregular (``leaf``,
+    ``criterion``) is plain ``+s`` and so wrong.
+    """
+    if not word:
+        return word
+    lower = word.lower()
+    if lower in _UNCOUNTABLE:
+        return word
+    if lower in _IRREGULAR_PLURALS:
+        return _IRREGULAR_PLURALS[lower]
+    if lower.endswith("y") and len(lower) > 1 and lower[-2] not in _VOWELS:
+        return word[:-1] + "ies"
+    if lower.endswith(("s", "x", "z", "ch", "sh")):
+        return word + "es"
+    return word + "s"
+
+
+def camelize(name: str) -> str:
+    """``blog-post`` -> ``blogPost`` (a ``/`` namespace separator is kept)."""
+    def one(piece: str) -> str:
+        words = [w for w in re.split(r"[-_ ]+", piece) if w]
+        if not words:
+            return piece
+        rest = "".join(w[:1].upper() + w[1:] for w in words[1:])
+        return words[0][:1].lower() + words[0][1:] + rest
+    return "/".join(one(p) for p in name.split("/"))
+
+
+def pluralize_model(model_name: str, dasherized: bool) -> str:
+    """Path segment ``pathForType`` returns for a model name.
+
+    ``RESTAdapter`` camelizes then pluralizes (``blogPosts``);
+    ``JSONAPIAdapter`` pluralizes then dasherizes (``blog-posts``).  Only the
+    last word of the name is pluralised.
+    """
+    base = ember_extract.dasherize(model_name.split("/")[-1])
+    words = base.split("-")
+    words[-1] = pluralize_word(words[-1])
+    plural = "-".join(words)
+    prefix = "/".join(model_name.split("/")[:-1])
+    if not dasherized:
+        plural = camelize(plural)
+    return f"{prefix}/{plural}" if prefix else plural
+
+
+_NAMESPACE_RE = re.compile(r"""\bnamespace\s*[:=]\s*(?:(['"])([^'"]*)\1|(\S))""")
+_PATH_FOR_TYPE_RE = re.compile(r"\bpathForType\b")
+_PATH_FOR_TYPE_LITERAL_RE = re.compile(
+    r"""pathForType[^{=]{0,200}(?:\{|=>)\s*(?:\{\s*)?(?:return\s+)?(['"])([^'"]+)\1"""
+)
+_ADAPTER_KIND_RE = re.compile(r"\b(RESTAdapter|JSONAPIAdapter)\b")
+_HOST_RE = re.compile(r"""\bhost\s*[:=]\s*(['"])([^'"]*)\1""")
+
+
+@dataclass
+class AdapterInfo:
+    """What a model's adapter chain says about its URLs."""
+
+    kind: str = "rest"
+    namespace: Optional[str] = None
+    namespace_dynamic: bool = False
+    path_for_type: Optional[str] = None
+    path_for_type_dynamic: bool = False
+    host: Optional[str] = None
+    found: bool = False
+    explicit_base: bool = False
+
+
+_MAX_ADAPTER_BYTES = 200_000
+
+
+def _strip_comments(text: str) -> str:
+    """Drop ``/* */`` blocks and whole-line ``//`` comments in one linear pass.
+
+    An unterminated ``/*`` removes the rest of the text.  Quotes are not
+    tracked, which is the same approximation the earlier regexes made.  Each
+    blank run at the start of a line is measured once.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    line_start = True
+    while i < n:
+        if line_start:
+            j = i
+            while j < n and text[j] in " \t\r":
+                j += 1
+            if text.startswith("//", j):
+                nl = text.find("\n", j)
+                if nl == -1:
+                    break
+                i = nl
+                continue
+            out.append(text[i:j])
+            i = j
+            line_start = False
+            if i >= n:
+                break
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end == -1:
+                break
+            i = end + 2
+            continue
+        ch = text[i]
+        out.append(ch)
+        line_start = ch == "\n"
+        i += 1
+    return "".join(out)
+
+
+def _read_adapter(path: Path) -> Optional[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if len(text) > _MAX_ADAPTER_BYTES:
+        return None
+    return _strip_comments(text)
+
+
+def _apply_adapter(text: str, info: AdapterInfo) -> None:
+    info.found = True
+    kind = _ADAPTER_KIND_RE.search(text)
+    if kind:
+        info.kind = "jsonapi" if kind.group(1) == "JSONAPIAdapter" else "rest"
+        info.explicit_base = True
+    ns = _NAMESPACE_RE.search(text)
+    if ns:
+        if ns.group(1) is not None:
+            info.namespace = ns.group(2)
+            info.namespace_dynamic = False
+        else:
+            info.namespace = None
+            info.namespace_dynamic = True
+    if _PATH_FOR_TYPE_RE.search(text):
+        literal = _PATH_FOR_TYPE_LITERAL_RE.search(text)
+        if literal:
+            info.path_for_type = literal.group(2)
+            info.path_for_type_dynamic = False
+        else:
+            info.path_for_type = None
+            info.path_for_type_dynamic = True
+    host = _HOST_RE.search(text)
+    if host:
+        info.host = host.group(2)
+
+
+def _model_name(path: Path) -> Optional[tuple[str, Path, bool]]:
+    """``(model name, app directory, pods layout)`` of an Ember model file."""
+    parts = list(path.parts)
+    for index, part in enumerate(parts[:-1]):
+        if part not in ("app", "addon"):
+            continue
+        rest = parts[index + 1:]
+        app_dir = Path(*parts[: index + 1])
+        if rest[0] == "models" and len(rest) >= 2:
+            name = "/".join(rest[1:])
+            return name.rsplit(".", 1)[0], app_dir, False
+        stem = rest[-1].rsplit(".", 1)[0]
+        if len(rest) >= 2 and stem == "model":
+            return "/".join(rest[:-1]), app_dir, True
+    return None
+
+
+_FRAGMENT_MODEL_RE = re.compile(
+    r"""from\s+['"]ember-data-model-fragments/fragment['"]"""
+    r"""|\bextends\s+(?:\w+\.)?Fragment\b"""
+    r"""|\b(?:\w+\.)?Fragment\.extend\b"""
+)
+
+
+def is_fragment_model(source: bytes) -> bool:
+    """Whether an Ember model file defines an ``ember-data-model-fragments`` fragment.
+
+    A fragment is embedded in the record that owns it and has no adapter or
+    URL of its own, so the store never requests it.  A normal model that merely
+    *uses* fragments (``fragment(...)`` or ``fragmentArray(...)`` attributes
+    from ``ember-data-model-fragments/attributes``) is not one.
+    """
+    if b"Fragment" not in source and b"ember-data-model-fragments/fragment" not in source:
+        return False
+    text = _strip_comments(source.decode("utf-8", errors="replace"))
+    return bool(_FRAGMENT_MODEL_RE.search(text))
+
+
+def ember_model_info(path: Path) -> Optional[tuple[str, AdapterInfo]]:
+    """Model name and adapter facts of an Ember model file, else ``None``.
+
+    The adapter chain is read from disk: ``adapters/application`` first, then
+    the model's own adapter, which overrides what it sets.  It lives in other
+    files, so an adapter-only edit shows on the next parse of the model.
+    """
+    if ember_extract.role_from_path(path.as_posix()) != "model":
+        return None
+    found = _model_name(path)
+    if found is None:
+        return None
+    name, app_dir, pods = found
+    if name.endswith(".d"):
+        return None
+    candidates: list[Path] = []
+    for ext in ("js", "ts"):
+        candidates.append(app_dir / "adapters" / f"application.{ext}")
+    own: list[Path] = []
+    for ext in ("js", "ts"):
+        if pods:
+            own.append(app_dir / name / f"adapter.{ext}")
+        else:
+            own.append(app_dir / "adapters" / f"{name}.{ext}")
+    info = AdapterInfo()
+    for candidate in candidates + own:
+        text = _read_adapter(candidate) if candidate.is_file() else None
+        if text is not None:
+            _apply_adapter(text, info)
+    if not info.found:
+        return None
+    return name, info
+
+
+def ember_model_routes(name: str, info: AdapterInfo) -> list[tuple[str, str, bool]]:
+    """``(method, route, dynamic)`` the store would use for a model.
+
+    ``findAll`` is ``GET /ns/types``; ``findRecord`` is ``GET /ns/types/{id}``;
+    ``createRecord`` is ``POST /ns/types``; ``updateRecord`` is ``PUT`` for
+    ``RESTAdapter`` and ``PATCH`` for ``JSONAPIAdapter``; ``deleteRecord`` is
+    ``DELETE /ns/types/{id}``.  ``host``, ``urlForFindRecord`` and the other
+    ``urlFor*`` hooks are ignored.
+    """
+    if info.namespace_dynamic or info.path_for_type_dynamic:
+        return [("GET", UNRESOLVED, True)]
+    if info.namespace is None and not info.explicit_base:
+        return []
+    jsonapi = info.kind == "jsonapi"
+    segment = info.path_for_type or pluralize_model(name, dasherized=jsonapi)
+    prefix = "/" + (info.namespace or "").strip("/")
+    prefix = prefix.rstrip("/")
+    collection = f"{prefix}/{segment}".replace("//", "/")
+    update = "PATCH" if jsonapi else "PUT"
+    return [
+        ("GET", collection, False),
+        ("GET", f"{collection}/{{id}}", False),
+        ("POST", collection, False),
+        (update, f"{collection}/{{id}}", False),
+        ("DELETE", f"{collection}/{{id}}", False),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -980,8 +1259,8 @@ def extract(
     """Append HTTP endpoint nodes and edges for one JS/TS file; return how many.
 
     *file_path* is the identity path used for nodes; *rel_path* is the
-    repo-relative path that decides the Next.js layout; *path* is the
-    on-disk path of the file.
+    repo-relative path that decides Next.js and Ember layouts; *path* is the
+    on-disk path (Ember adapters are read beside it).
     """
     if is_test or any(part in _SKIP_DIRS for part in rel_path.split("/")[:-1]):
         return 0
@@ -993,6 +1272,41 @@ def extract(
         if node is None:
             return file_path, None
         return _qualified(node.name, file_path, node.parent_name), node.name
+
+    # -- Ember Data ---------------------------------------------------
+    model = None if is_fragment_model(source) else ember_model_info(path)
+    if model is not None:
+        model_name, adapter = model
+        for index, (method, route, dynamic) in enumerate(ember_model_routes(model_name, adapter)):
+            name = f"{model_name}@ember-data[{index}] {method} {route}"
+            meta: dict[str, Any] = {
+                "annotation": "ember-data",
+                "client_method": model_name,
+                "http_method": method,
+                "route": route,
+                "role": "client",
+                "client": CLIENT_TAG,
+                "client_kind": "ember-data",
+                "origin": "js",
+                "route_dynamic": dynamic,
+                "inferred": True,
+                "adapter_kind": adapter.kind,
+            }
+            if adapter.host:
+                meta["host"] = adapter.host
+            nodes.append(node_cls(
+                kind="Endpoint", name=name, file_path=file_path, line_start=1,
+                line_end=max(1, source.count(b"\n") + 1), language=language, extra=meta,
+            ))
+            edges.append(edge_cls(
+                kind=REQUESTS_EDGE, source=file_path,
+                target=_qualified(name, file_path, None), file_path=file_path, line=1,
+                extra={
+                    **meta, "resolution": "ember_data_adapter",
+                    "confidence": EMBER_DATA_CONFIDENCE, "confidence_tier": "INFERRED",
+                },
+            ))
+            emitted += 1
 
     # -- Next.js route files (no call needed) ---------------------------
     server_hits: list[ServerHit] = []

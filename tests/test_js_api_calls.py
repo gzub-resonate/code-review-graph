@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from code_review_graph import feign_links as fl
+from code_review_graph import js_api_extract as jx
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import CodeParser, NodeInfo
 from code_review_graph.registry import Registry
@@ -861,3 +862,186 @@ def test_link_js_call_several_handlers_in_one_repo_is_a_match():
     assert [c.line for c in result.candidates] == [49, 64]
     other = two + [fl.ServerEndpoint("t", "B.java", 5, "GET", "/v3/admin/tags", origin="/r/t")]
     assert fl.link_js_call(mk("/v3/admin/tags"), fl.ServerIndex(other)).status == fl.AMBIGUOUS
+
+
+_APP_ADAPTER = """
+import DS from 'ember-data';
+export default DS.RESTAdapter.extend({
+  namespace: 'v1',
+  host: 'https://other.example'
+});
+"""
+
+
+def _model(name: str) -> str:
+    return "import DS from 'ember-data';\nexport default DS.Model.extend({ name: DS.attr('string') });\n"
+
+
+def test_ember_models_map_to_rest_adapter_routes(tmp_path):
+    write(tmp_path, "app/adapters/application.js", _APP_ADAPTER)
+    nodes, edges = parse(tmp_path, "app/models/blog-post.js", _model("blog-post"))
+    assert sigs(clients(nodes)) == [
+        ("DELETE", "/v1/blogPosts/{id}"), ("GET", "/v1/blogPosts"),
+        ("GET", "/v1/blogPosts/{id}"), ("POST", "/v1/blogPosts"), ("PUT", "/v1/blogPosts/{id}"),
+    ]
+    requests = edges_of(edges, "REQUESTS")
+    assert len(requests) == 5
+    assert {e.source for e in requests} == {nodes[0].name}
+    assert all(e.extra["confidence"] == 0.6 and e.extra["confidence_tier"] == "INFERRED" for e in requests)
+    assert all(n.extra["inferred"] and n.extra["client_kind"] == "ember-data" for n in clients(nodes))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import Fragment from 'ember-data-model-fragments/fragment';\n"
+        "import { attr } from '@ember-data/model';\n"
+        "export default Fragment.extend({ name: attr('string') });\n",
+        "import MF from 'ember-data-model-fragments';\n"
+        "export default MF.Fragment.extend({ name: DS.attr('string') });\n",
+        "import Fragment from 'ember-data-model-fragments/fragment';\n"
+        "export default class Threshold extends Fragment { }\n",
+    ],
+)
+def test_ember_fragment_models_are_not_http_resources(tmp_path, source):
+    """A fragment lives inside its owner record and is never fetched on its own."""
+    write(tmp_path, "app/adapters/application.js", _APP_ADAPTER)
+    nodes, edges = parse(tmp_path, "app/models/threshold-filter.js", source)
+    assert clients(nodes) == [] and edges_of(edges, "REQUESTS") == []
+
+
+def test_a_model_that_only_uses_fragments_is_still_a_resource(tmp_path):
+    write(tmp_path, "app/adapters/application.js", _APP_ADAPTER)
+    source = (
+        "import DS from 'ember-data';\n"
+        "import { fragmentArray } from 'ember-data-model-fragments/attributes';\n"
+        "// import Fragment from 'ember-data-model-fragments/fragment';\n"
+        "export default DS.Model.extend({ bars: fragmentArray('story-bar-chart') });\n"
+    )
+    nodes, _ = parse(tmp_path, "app/models/story.js", source)
+    assert len(clients(nodes)) == 5
+
+
+def test_ember_irregular_and_regular_plurals(tmp_path):
+    write(tmp_path, "app/adapters/application.js", _APP_ADAPTER)
+    cases = {
+        "person": "people", "category": "categories", "status": "statuses",
+        "box": "boxes", "child": "children", "key": "keys", "audience": "audiences",
+        "sheep": "sheep", "user-person": "userPeople",
+    }
+    for model, plural in cases.items():
+        nodes, _ = parse(tmp_path, f"app/models/{model}.js", _model(model))
+        routes = {n.extra["route"] for n in clients(nodes) if n.extra["http_method"] == "POST"}
+        assert routes == {f"/v1/{plural}"}, model
+
+
+def test_ember_json_api_adapter_dasherizes_and_patches(tmp_path):
+    write(tmp_path, "app/adapters/application.js", """
+import JSONAPIAdapter from '@ember-data/adapter/json-api';
+export default class ApplicationAdapter extends JSONAPIAdapter { namespace = 'api/v2'; }
+""")
+    nodes, _ = parse(tmp_path, "app/models/blog-post.js", _model("blog-post"))
+    assert ("PATCH", "/api/v2/blog-posts/{id}") in sigs(clients(nodes))
+    assert ("PUT", "/api/v2/blog-posts/{id}") not in sigs(clients(nodes))
+
+
+def test_ember_model_adapter_overrides_namespace_and_path(tmp_path):
+    write(tmp_path, "app/adapters/application.js", _APP_ADAPTER)
+    write(tmp_path, "app/adapters/report.js", """
+import ApplicationAdapter from './application';
+export default ApplicationAdapter.extend({
+  namespace: 'v9',
+  pathForType() { return 'custom-reports'; }
+});
+""")
+    nodes, _ = parse(tmp_path, "app/models/report.js", _model("report"))
+    assert ("GET", "/v9/custom-reports/{id}") in sigs(clients(nodes))
+
+
+def test_ember_non_literal_namespace_is_unmatchable(tmp_path):
+    write(tmp_path, "app/adapters/application.js", """
+import DS from 'ember-data';
+import config from '../config/environment';
+export default DS.RESTAdapter.extend({ namespace: config.ns });
+""")
+    nodes, _ = parse(tmp_path, "app/models/thing.js", _model("thing"))
+    (node,) = clients(nodes)
+    assert node.extra["route_dynamic"] is True
+
+
+def test_ember_model_without_adapter_emits_nothing(tmp_path):
+    nodes, _ = parse(tmp_path, "app/models/thing.js", _model("thing"))
+    assert clients(nodes) == []
+
+
+def test_ember_namespace_in_a_comment_is_ignored(tmp_path):
+    write(tmp_path, "app/adapters/application.js", """
+import DS from 'ember-data';
+// namespace: 'old'
+export default DS.RESTAdapter.extend({ namespace: 'v1' });
+""")
+    nodes, _ = parse(tmp_path, "app/models/thing.js", _model("thing"))
+    assert ("GET", "/v1/things") in sigs(clients(nodes))
+
+
+@pytest.mark.parametrize(
+    ("word", "plural"),
+    [("post", "posts"), ("city", "cities"), ("day", "days"), ("bus", "buses"),
+     ("church", "churches"), ("person", "people"), ("series", "series"), ("man", "men")],
+)
+def test_pluralize_word(word, plural):
+    assert jx.pluralize_word(word) == plural
+
+
+def test_ember_data_rows_are_low_confidence_matches(tmp_path, registry):
+    make_repo(tmp_path, registry, "audience-api", {
+        "server.js": "const express = require('express');\nconst app = express();\n"
+                     "app.get('/v1/audiences/:id', (q, r) => r.end());\n",
+    })
+    make_repo(tmp_path, registry, "ui", {
+        "app/adapters/application.js": _APP_ADAPTER,
+        "app/models/audience.js": _model("audience"),
+    })
+    result = cross_repo_requests_func(repos=["ui"], status="matched")
+    (row,) = result["results"]
+    assert row["client_kind"] == "ember-data" and row["http_method"] == "GET"
+    assert row["route"] == "/v1/audiences/{id}"
+    assert row["confidence"] == "low" and row["confidence_notes"] == ["ember_data_convention"]
+    assert result["counts"] == {"matched": 1}
+
+
+def test_strip_comments_is_linear_on_unterminated_blocks():
+    import time
+
+    from code_review_graph.js_api_extract import _strip_comments
+
+    hostile = "/* " * 60_000
+    start = time.perf_counter()
+    assert _strip_comments(hostile) == ""
+    assert time.perf_counter() - start < 2.0
+    blanks = "\n" * 150_000
+    start = time.perf_counter()
+    _strip_comments(blanks)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_strip_comments_keeps_code_and_drops_comments():
+    from code_review_graph.js_api_extract import _strip_comments
+
+    text = "a /* x */ b\n  // whole line\nnamespace: 'v1' // tail\n"
+    out = _strip_comments(text)
+    assert "x" not in out.replace("namespace", "")
+    assert "whole line" not in out
+    assert "namespace: 'v1'" in out
+
+
+def test_strip_comments_is_linear_on_long_blank_runs():
+    import time
+
+    from code_review_graph.js_api_extract import _strip_comments
+
+    for blank in (" ", "\r", "\t"):
+        text = blank * 190_000 + "x"
+        start = time.perf_counter()
+        _strip_comments(text)
+        assert time.perf_counter() - start < 2.0

@@ -403,8 +403,8 @@ def cross_repo_requests_func(
     [REGISTRY] Reads each registered repo's graph database read-only, finds
     the Feign client calls in the selected (client) repos, and for each one
     looks for the matching controller endpoint in the repo its service name
-    points at. JavaScript and TypeScript calls (axios, fetch, jQuery and Ember
-    ajax) have no service name: they are matched by method and
+    points at. JavaScript and TypeScript calls (axios, fetch, jQuery, Ember
+    ajax and Ember Data) have no service name: they are matched by method and
     route against the server endpoints of every other registered repo.
     Each repo's endpoints are read from the index its build stored (see
     ``endpoint_index.py``), or worked out from its graph when it has none that is

@@ -97,6 +97,8 @@ def extract_endpoints(nodes: list[GraphNode], repo_path: Path) -> Endpoints:
             client_tag = extra.get("client")
             if client_tag == js_api_extract.CLIENT_TAG:
                 notes: list[str] = []
+                if extra.get("inferred"):
+                    notes.append("ember_data_convention")
                 if extra.get("receiver_inferred"):
                     notes.append("receiver_inferred")
                 if extra.get("base_url_dynamic"):

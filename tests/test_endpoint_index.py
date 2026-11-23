@@ -270,3 +270,23 @@ def test_building_twice_gives_the_same_index(repos):
         build_endpoint_index(store, api)
     second, _ = stored(api)
     assert json.loads(first)["servers"] == json.loads(second)["servers"]
+
+
+def test_a_call_inferred_from_an_ember_data_model_keeps_its_note(tmp_path):
+    """The note says the route comes from the adapter convention, not from a literal URL."""
+    from code_review_graph.graph import GraphNode
+    from code_review_graph.js_api_extract import CLIENT_TAG
+
+    node = GraphNode(
+        id=1, kind="Endpoint", name="GET /api/projects", qualified_name="e::1",
+        file_path=str(tmp_path / "app/models/project.js"), line_start=3, line_end=3,
+        language="javascript", parent_name=None, params=None, return_type=None,
+        is_test=False, file_hash=None,
+        extra={
+            "role": "client", "client": CLIENT_TAG, "client_kind": "ember-data",
+            "route": "/api/projects", "http_method": "GET", "inferred": True,
+        },
+    )
+    clients, _servers = extract_endpoints([node], tmp_path)
+    assert [c.notes for c in clients] == [("ember_data_convention",)]
+    assert endpoint_index._client(endpoint_index._row(clients[0], ("repo",))) == clients[0]
