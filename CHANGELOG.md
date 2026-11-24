@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `pr_blast_radius_tool` and `detect_changes_tool` with `pr` or `head` now report the configuration
+  a pull request changes. A YAML, JSON or Spring `.properties` file of the pull request is parsed in
+  memory and compared with the base, path by path; each path the pull request adds, changes (its
+  value hash differs, so a comment or a reformatting is not a change) or removes is listed. A Spring
+  `application.yml` is indexed as `ConfigProperty` nodes, which `changed_yaml_paths` skipped, so an
+  8-line timeout change to it used to show `changed_yaml_path_count: 0`. `pr_blast_radius_tool`
+  adds `config_changes` (file, `change`, kind, path, line, value type; never the value), and
+  `detect_changes_tool` puts the same paths in `changed_yaml_paths` and `changed_json_paths` with a
+  `change` field. Lists are capped per file (200), in all (1000) and by files compared (50); the
+  result says when they are cut.
+- `pr_blast_radius_tool` no longer counts every endpoint of a changed file as affected. `endpoints`
+  and `external_callers` now cover a route the pull request adds or removes, an endpoint whose
+  handler it adds or changes (or whose own lines it edits) and one a changed symbol reaches. The
+  other endpoints of the same files come back in `same_file_endpoints` and their callers are not
+  counted.
+- A pull request that is already merged (its head commit is an ancestor of the base) is no longer a
+  bare "No files differ" or "No changed files detected". Both tools say "Pull request already merged
+  into <base>; the graph already includes it" and set `already_merged`. It is read from Git's merge
+  base, not from GitHub.
+
 ### Added
 
 - Terraform and Terragrunt flows. A root module (a directory with `terragrunt.hcl`, or `.tf` files that
@@ -328,6 +350,16 @@
 
 ### Fixed
 
+- `query_graph_tool` `handlers_of` on a FastAPI handler (for example `token_endpoint`) returned 0
+  with "a real absence", because `handlers_of` takes an endpoint and HANDLES edges run from the
+  handler to it. Given a handler, it now returns the endpoints that handler serves and says so in
+  `confidence`. An empty `handlers_of` or `endpoints_for` for a decorated or handler-like function
+  no longer says "a real absence": it says the route may not be statically visible and names what
+  was checked.
+- Python route detection takes `@router.websocket(...)` (method `WEBSOCKET`), the decorator-free
+  `add_api_route`, `add_api_websocket_route` and `add_url_rule` registrations (including Flask
+  `View.as_view(...)`) and `include_router(router=...)`. A decorator on an imported object that does
+  not read as a router (`@cache.get(...)` with `from app.cache import cache`) is no longer a route.
 - A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
   declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
   unresolved unless the base class was imported, so `callers_of` and impact radius missed every

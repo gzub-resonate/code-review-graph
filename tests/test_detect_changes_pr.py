@@ -205,3 +205,36 @@ def test_a_review_that_fits_one_page_has_no_cursor(pull_request):
     result = detect(pull_request, head="pr", base="main")
     assert "next_cursor" not in result
     assert result["pull_request"]["symbols_truncated"] is False
+
+
+from .test_pr_blast_radius import config_pull_request  # noqa: E402,F401
+
+
+def test_config_paths_of_the_pull_request_are_reported(config_pull_request):
+    result = detect(config_pull_request, head="pr", base="main")
+    assert result["status"] == "ok"
+    changes = {
+        (row["name"], row["change"]) for row in result["changed_yaml_paths"]
+    }
+    assert ("spring.app.client.connectTimeout", "changed") in changes
+    assert ("spring.app.client.readTimeout", "added") in changes
+    assert ("spring.app.oldKey", "removed") in changes
+    assert ("$.a.c", "changed") in changes
+    assert result["changed_yaml_paths_total"] == len(result["changed_yaml_paths"])
+    assert ("$.retries", "changed") in {
+        (row["name"], row["change"]) for row in result["changed_json_paths"]
+    }
+    assert "Config paths:" in result["summary"]
+
+
+def test_minimal_mode_counts_config_paths(config_pull_request):
+    result = detect(config_pull_request, head="pr", base="main", detail_level="minimal")
+    assert result["changed_yaml_path_count"] >= 4
+    assert result["changed_json_path_count"] >= 3
+
+
+def test_a_merged_pull_request_is_not_a_bare_no_changes(config_pull_request):
+    result = detect(config_pull_request, head="topic", base="main")
+    assert result["status"] == "ok"
+    assert "already merged into main" in result["summary"]
+    assert result["already_merged"] is True

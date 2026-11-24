@@ -1635,7 +1635,11 @@ def analyze_changes(
         if n.kind in ("Function", "Test", "Class")
         and not n.extra.get("verilog_kind")
     ]
-    changed_yaml_paths = [n for n in changed_nodes if n.kind == "YamlPath"]
+    # A Spring config file (``application.yml``, ``.properties``) is indexed as
+    # ``ConfigProperty`` nodes, not ``YamlPath``; they are reported as YAML paths too.
+    changed_yaml_paths = [
+        n for n in changed_nodes if n.kind in ("YamlPath", "ConfigProperty")
+    ]
     changed_json_paths = [n for n in changed_nodes if n.kind == "JsonPath"]
 
     # Cap to prevent O(N*M) query explosion on large PRs.

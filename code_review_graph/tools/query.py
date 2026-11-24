@@ -1213,6 +1213,7 @@ def query_graph(
         results: list[dict[str, Any]] = []
         edges_out: list[dict[str, Any]] = []
         total_results = 0
+        handler_as_target = False
         # Results matched by a name or an unpinned call, not a traced edge.
         inferred_results = 0
         # (dedupe key, row, edge) for the call-site patterns, collected before
@@ -1827,6 +1828,16 @@ def query_graph(
                     add_result(node_to_dict(handler), edge)
                 else:
                     edges_out.append(edge_to_dict(edge))
+            if total_results == 0 and node is not None and node.kind != "Endpoint":
+                # The target is a handler, not an endpoint: answer with the
+                # endpoints it serves, as a reader who named it expects.
+                for edge in store.get_edges_by_source(qn):
+                    if edge.kind != "HANDLES":
+                        continue
+                    endpoint = store.get_node(edge.target_qualified)
+                    if endpoint and endpoint.kind == "Endpoint":
+                        add_result(node_to_dict(endpoint), edge)
+                        handler_as_target = True
 
         elif pattern == "endpoints_for":
             for edge in store.get_edges_by_source(qn):
@@ -1931,6 +1942,12 @@ def query_graph(
         confidence: str | None = None
         if total_results == 0:
             confidence = empty_query_confidence(store, root, pattern, target, node)
+        elif handler_as_target:
+            confidence = (
+                f"'{_sanitize_name(node.name if node else target)}' is a handler, not an "
+                "endpoint: handlers_of takes an endpoint, so these rows are the endpoints "
+                "it serves (what endpoints_for returns)"
+            )
         elif resolution == RESOLUTION_ALL:
             confidence = guessed_calls_confidence(resolution_split)
 
