@@ -109,7 +109,7 @@ class TestReducers:
 
     def test_the_allowlist_is_exactly_these_keys(self):
         assert TERRAGRUNT_INPUT_KEYS == {
-            "step_function_file_path", "replacement_vars", "lambda_replacement_vars",
+            "step_function_file_path", "name", "replacement_vars", "lambda_replacement_vars",
             "step_function_replacement_vars", "sns_topic_replacement_vars",
             "handler", "function_name", "git_repo_sub_dir",
         }
@@ -133,7 +133,8 @@ class TestParser:
             {"key": "ValidateFunctionArn", "service": "lambda", "kind": "function",
              "name": "validateOrder"},
         ]
-        assert set(info) == {"state_machine_file", "replacement_vars"}
+        assert set(info) == {"state_machine_file", "state_machine_name", "replacement_vars"}
+        assert info["state_machine_name"] == "orders"
 
     def test_no_raw_value_account_id_or_secret_reaches_a_node_or_an_edge(self, tmp_path):
         root = tmp_path.resolve()

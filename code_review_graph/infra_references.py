@@ -376,9 +376,13 @@ REPLACEMENT_VAR_MAPS: tuple[str, ...] = (UNTYPED_REPLACEMENT_VARS, *TYPED_REPLAC
 #: Keys of a Lambda unit that are read: the handler, the deployed name and the source directory.
 LAMBDA_INPUT_KEYS: tuple[str, ...] = ("handler", "function_name", "git_repo_sub_dir")
 
+#: The deployed state machine name of a Step Functions unit (read only next to
+#: ``step_function_file_path``).
+STATE_MACHINE_NAME_KEY = "name"
+
 #: The only keys of a Terragrunt ``inputs`` object that are ever visited.
 TERRAGRUNT_INPUT_KEYS: frozenset[str] = frozenset(
-    {"step_function_file_path", *REPLACEMENT_VAR_MAPS, *LAMBDA_INPUT_KEYS}
+    {"step_function_file_path", STATE_MACHINE_NAME_KEY, *REPLACEMENT_VAR_MAPS, *LAMBDA_INPUT_KEYS}
 )
 
 #: A unit is looked at only when it, or a file it includes, defines one of these.

@@ -1549,9 +1549,27 @@ def detect_changes_func(
             result["summary"] = "\n".join(
                 [*(f"Note: {note}" for note in notes), result["summary"]]
             )
+        no_symbols_note = None
+        if (
+            pr_info is None and not later_page and changed_files
+            and not analysis.get("changed_functions")
+            and not analysis.get("changed_yaml_paths")
+            and not analysis.get("changed_json_paths")
+            and not analysis.get("removed_symbols_total")
+        ):
+            no_symbols_note = (
+                f"No changed symbols were found in {len(changed_files)} file(s): the files "
+                f"were given without a diff against {base}, so risk "
+                f"{float(result.get('risk_score') or 0.0):.2f} reflects changed symbols only; "
+                "see get_impact_radius_tool for the blast radius of the whole file"
+            )
+            result["changed_symbols_found"] = False
+            result["summary"] = f"{result['summary']}\n  - {no_symbols_note}"
         result["_hints"] = generate_hints(
             "detect_changes_tool", result, get_session()
         )
+        if no_symbols_note is not None:
+            result["_hints"].setdefault("warnings", []).insert(0, no_symbols_note)
         attach_context_savings(
             result,
             original_tokens=original_tokens,

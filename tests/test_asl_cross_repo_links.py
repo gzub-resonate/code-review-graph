@@ -156,3 +156,48 @@ class TestStepFunctionLinks:
         cross_repo_requests_func(origin="stepfunction")
         with GraphStore(db, read_only=True) as store:
             assert store._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == before
+
+
+class TestDeployedStateMachineName:
+    """A machine called by its deployed name, which is the Terragrunt unit's ``name`` input."""
+
+    PARENT = {
+        "flash/modeling/statemachine/flash_modeling.asl.json": (
+            '{"StartAt": "Train Cmd Prep", "States": {"Train Cmd Prep": {"Type": "Task", '
+            '"End": true, "Resource": "arn:aws:states:::states:startExecution.sync:2", '
+            '"Parameters": {"StateMachineArn": "${TrainCmdPrepArn}"}}}}\n'
+        ),
+        "terraform/flash/modeling/dev/terragrunt.hcl": (
+            'inputs = {\n  name = "flash-study-modeling"\n'
+            '  step_function_file_path = "flash/modeling/statemachine/flash_modeling.asl.json"\n'
+            "  replacement_vars = {\n"
+            '    TrainCmdPrepArn = "arn:aws:states:us-east-1:111111111111:'
+            'stateMachine:flash-1-train-cmd-prep"\n  }\n}\n'
+        ),
+    }
+    CHILD = {
+        "flash/1-train-cmd-prep/statemachine/train_cmd_prep.asl.json": (
+            '{"StartAt": "Only", "States": {"Only": {"Type": "Succeed"}}}\n'
+        ),
+        "terraform/flash/1-train-cmd-prep/dev/terragrunt.hcl": (
+            'inputs = {\n  name = "flash-1-train-cmd-prep"\n'
+            '  step_function_file_path = '
+            '"flash/1-train-cmd-prep/statemachine/train_cmd_prep.asl.json"\n}\n'
+        ),
+    }
+
+    def test_the_unit_name_input_defines_the_machine(self, tmp_path, registry):
+        make_repo(tmp_path, registry, "steps", {**self.PARENT, **self.CHILD})
+        reply = cross_repo_requests_func(origin="stepfunction")
+        rows = by_target(reply)
+        row = rows["states/flash-1-train-cmd-prep"]
+        assert row["status"] == "matched" and row["target_repo"] == "steps"
+        assert row["machine"] == "flash_modeling" and row["state"] == "Train Cmd Prep"
+
+    def test_without_the_deploying_unit_it_stays_not_found(self, tmp_path, registry):
+        child = {k: v for k, v in self.CHILD.items() if not k.startswith("terraform/")}
+        make_repo(tmp_path, registry, "steps", {**self.PARENT, **child})
+        row = by_target(cross_repo_requests_func(origin="stepfunction"))[
+            "states/flash-1-train-cmd-prep"
+        ]
+        assert row["status"] == "not_found"
