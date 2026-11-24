@@ -560,8 +560,10 @@ _RESOLVER_BOUND_KEYS = (
     "bare_call_target",
     "bare_tested_by_source",
     "cpp_scoped_target",
+    "ember_resolved",
     INHERITED_ENDPOINT_KEY,
     "rescript_open_module",
+    "scala_resolved",
     "scoped_resolved",
     "spring_resolved",
     "temporal_resolved",
@@ -1662,8 +1664,15 @@ class GraphStore:
                     f"FROM edges WHERE kind = ? AND {column} = ? AND {other} != ?",
                     (kind, base, base),
                 ).fetchall():
-                    if row["id"] not in handled:
-                        settle(row, column, _load_collision_extra(row["extra"]), base)
+                    if row["id"] in handled:
+                        continue
+                    collision_extra = _load_collision_extra(row["extra"])
+                    if "scala_resolved" in collision_extra:
+                        # ``scala_resolver`` bound this call from declarations
+                        # and scopes: a ``new Foo`` reaches the class, never its
+                        # companion object.
+                        continue
+                    settle(row, column, collision_extra, base)
 
         if not updates:
             return 0
@@ -4095,7 +4104,12 @@ class GraphStore:
                 ambiguity_supported: list[str] = []
             else:
                 inherited_through = None
-                imported_files = import_targets.get(context_file, set())
+                # Scala imports name types, not call targets: a call is only
+                # bound by ``scala_resolver``, which reads scopes and receivers.
+                imported_files = (
+                    set() if caller_language == "scala"
+                    else import_targets.get(context_file, set())
+                )
                 # A module receiver names its file outright; when that module
                 # only re-exports the name, the parser stamps the defining
                 # file, which the call site never imports itself.
@@ -5147,6 +5161,7 @@ class GraphStore:
         kind: str | None = None,
         file_path_pattern: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[GraphNode]:
         """Find nodes within a line-count range, ordered largest first.
 
@@ -5156,17 +5171,19 @@ class GraphStore:
             kind: Filter by node kind (Function, Class, File, etc.).
             file_path_pattern: SQL LIKE pattern to filter by file path.
             limit: Maximum results to return.
+            offset: Rows to skip, for paging.
 
         Returns:
-            List of GraphNode objects, ordered by line count descending.
+            List of GraphNode objects, ordered by line count descending, equal
+            sizes by id, so a page boundary never splits or repeats a tie.
         """
         where, params = self._nodes_by_size_filter(
             min_lines, max_lines, kind, file_path_pattern,
         )
-        params.append(limit)
+        params.extend((limit, offset))
         rows = self._conn.execute(
             f"SELECT * FROM nodes WHERE {where} "  # nosec B608
-            "ORDER BY (line_end - line_start + 1) DESC LIMIT ?",
+            "ORDER BY (line_end - line_start + 1) DESC, id LIMIT ? OFFSET ?",
             params,
         ).fetchall()
         return [self._row_to_node(r) for r in rows]

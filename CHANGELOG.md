@@ -4,6 +4,42 @@
 
 ### Added
 
+- `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The
+  files are read from Git and parsed in memory as `pr_blast_radius_tool` does, matched to the base
+  graph, and scored by the same analysis as a working-tree diff (risk score, flows, test gaps,
+  priorities, churn). A `pull_request` section lists the symbols the pull request adds and removes.
+- `pr_blast_radius_tool` gives the blast radius of a pull request from its changed files, so files the
+  pull request adds are included although the graph, built from the default branch, has never seen
+  them. It reads the files from Git (`pr=<number>` fetches `refs/pull/<n>/head` into a temporary repository that is removed after the call),
+  parses them in memory and compares them with the base graph, then reports per file the symbols
+  changed, added and removed and what reaches them, the routes added or removed, the endpoints
+  affected with the client calls in other registered repos that reach them, migrations the pull
+  request adds, and changed members no test names. Nothing is written to the graph. A stacked pull
+  request names its parent as `base`.
+- `cross_repo_requests_tool` no longer reads and joins every repo's `Endpoint`
+  nodes on each call. A build or update now stores each repo's client calls and
+  server endpoints, FastAPI and Flask router prefixes already joined, in the
+  graph's `metadata` table (no schema change). The tool reads that and falls
+  back to the graph for a repo with no current index, with the same answer; the
+  reply's `endpoint_index` says how many repos were read each way. On a
+  synthetic repo of 4,410 endpoints the load took 16.5 ms instead of 110.4 ms.
+- `cross_repo_requests_tool` reads past its row ceilings the same way: a reply
+  with more calls than fit carries `next_cursor`, and `cursor` returns the next
+  page, taking up to `limit` more rows from each calling repo. The cursor is
+  refused if the filters or the calls changed since it was made.
+- `get_review_context_tool` and `detect_changes_tool` take a `cursor` too. When
+  a review has more changed files (review context) or changed functions
+  (detect changes) than one reply holds, the reply carries `next_cursor`; pass
+  it back to read the next page. A cursor is refused if the base, the changed
+  files, the depth or the graph differ from when it was made. The other lists
+  of a review stay on the first page. See `docs/COMMANDS.md`.
+- `get_impact_radius_tool`, `query_graph_tool`, `semantic_search_nodes_tool`,
+  `find_large_functions_tool` and `traverse_graph_tool` take a `cursor` too, so
+  the rows their caps hid can be read: a reply with more rows carries
+  `next_cursor`. Impact pages its impacted nodes (compact: files), search pages
+  its ranked window, and a traversal continues the same walk. A cursor is
+  refused if the query or graph changed, or the search ranking did. Equal-sized
+  large functions now come in a fixed order. See `docs/COMMANDS.md`.
 - `get_bridge_nodes_tool`, `get_surprising_connections_tool`,
   `get_knowledge_gaps_tool`, `get_community_tool`, `get_architecture_overview_tool`,
   `get_flow_tool` and `cross_repo_search_tool` no longer stop at their ceiling either.
@@ -20,6 +56,166 @@
   the graph changed since it was made. Equal-ranked flows, communities and hubs
   now come in a fixed order, so pages never repeat or skip a row. See
   `docs/COMMANDS.md`.
+- Ember Data models now take part in the cross-repo join. The parser derives
+  the routes a model uses from its adapter's `namespace` (and `pathForType`
+  when it is a literal), as `INFERRED` client `Endpoint` nodes at 0.6, so a
+  match through one carries `confidence: "low"` and the note
+  `ember_data_convention`. Models that extend `ember-data-model-fragments`
+  `Fragment` are never requested and are skipped. Rebuild a graph to index
+  existing Ember models; see `docs/COMMANDS.md`.
+- FastAPI and Flask routes are indexed as server endpoints, with
+  `APIRouter(prefix=...)`, `Blueprint(url_prefix=...)`, `include_router` and
+  `register_blueprint` prefixes joined across files, so a JavaScript caller or
+  another service can match them. Non-literal prefixes and paths are never
+  guessed. Rebuild a graph to index existing Python; see `docs/COMMANDS.md`.
+- `cross_repo_requests_tool` matches a JavaScript or TypeScript call whose variable
+  segment stands against a fixed server segment (`/agents/{name}/threads` against
+  `/agents/planner/threads`). It is the last rule tried, so only calls that were
+  `no_route_match` can change. It needs the same segment count, an equal method and
+  at least two segments the call spells out, and is skipped when more than 10 server
+  routes fit. The row has the reason `variable_matches_literal` and
+  `confidence: "low"`.
+- `cross_repo_requests_tool` reports a call whose route matches a server route
+  except for letter case (for example `/v1/attributeGroups` against
+  `/v1/attributegroups`) as `case_mismatch` instead of `no_route_match`. The row
+  names those endpoints as `candidates`, has `confidence: "low"` and the reason
+  `route_differs_by_case`. It is a lead to check, not a match; matching stays
+  case-sensitive and only calls that were `no_route_match` can change. Filter
+  with `status="case_mismatch"`.
+- `cross_repo_requests_tool` now joins JavaScript and TypeScript calls to the
+  server endpoints they reach. A call names no service, so it is matched by
+  HTTP method and route, first against the caller's own repository (a relative
+  URL goes to the origin that served the page) and then against every other
+  registered repository. One location, or several in one repository, is
+  `matched` (`reason` `several_handlers_in_repo`); several repositories are
+  `ambiguous` with the candidate repositories. Each row has an `origin`
+  (`feign` or `js`); the new `origin` argument narrows to one. A catch-all
+  route such as a Next.js `[...path]` proxy matches only by exact method and
+  literal prefix, with `confidence: "low"`. A variable URL is never guessed.
+- JavaScript and TypeScript servers now take part too: the parser records served
+  routes (the Next.js app and pages routers, and Express, Koa, Fastify and Hono
+  style `app.get('/x', handler)`) as server `Endpoint` nodes with `HANDLES`
+  edges. A rest-of-path route such as a Next.js `[...path]` is marked
+  `catch_all`. A handler written inline gets its own function node, so each
+  route has its own handler. Rebuild a graph to index existing JavaScript; see
+  `docs/COMMANDS.md`.
+- JavaScript and TypeScript frontends now record the HTTP calls they make with
+  a statically known route (`axios` and `axios.create` instances, `fetch`,
+  `$.ajax`, Ember `ajax`) as client `Endpoint` nodes with `REQUESTS` edges from
+  the enclosing function. A variable URL is never guessed, and a query string
+  glued to the path (`/feeds${query}`) is dropped when the name only ever holds
+  a query string. Rebuild a graph to index existing JavaScript; see
+  `docs/COMMANDS.md`.
+- New `cross_repo_requests_tool` answers "which endpoint does this Feign call
+  reach?" across your registered repositories. For each outbound Spring Feign
+  call it names the controller endpoint in the repository the service name
+  points at, matched by HTTP method and route, and says `matched`,
+  `ambiguous` (several endpoints fit), `no_route_match` or `no_target_repo`
+  (no registered repository carries that service name). A call whose target
+  cannot be known from the code, such as a placeholder service name, a fixed
+  `url` or a `URI` argument, is `unmatchable` and says why instead of being
+  guessed. Narrow it with `repos` (the calling repositories), `service`,
+  `route` and `status`. Service names resolve through registry aliases, folder
+  names and `repo-aliases.toml`, then through a case-insensitive match that
+  ignores `-` versus `_`. It reads each graph read-only and stores nothing, so
+  there is nothing to rebuild; see `docs/COMMANDS.md`.
+- Spring Cloud OpenFeign client methods are shown as calls the service makes
+  to other services, not as routes it serves. The route includes the interface
+  path prefix, and a route built from a constant is shown as unresolved.
+  `query_graph_tool` has two new patterns, `requests_of` and `requesters_of`,
+  to follow these calls.
+- A Feign route built from a constant or a method call is shown with an
+  `<unresolved>` marker, and `route_literal_parts` lists the literal pieces, so
+  a route is never shown as fully literal when something was dropped. A method
+  with a `java.net.URI` argument is flagged `url_from_argument`, because Feign
+  sends the request to that argument and `route` is not the target. Run
+  `code-review-graph build` once to update an existing graph.
+- Spring Cloud OpenFeign clients are indexed as outbound calls. Each method of
+  a `@FeignClient` interface becomes a client `Endpoint` (with the
+  `@FeignClient` `path` prefix applied) linked to the method by a `REQUESTS`
+  edge, and the new `requests_of` and `requesters_of` patterns of
+  `query_graph_tool` follow those edges.
+- An optional `repo-aliases.toml` next to `registry.json` (in `$CRG_HOME`) gives
+  a registered repository extra names, for example
+  `cross_repo_search_tool(repos=["old-service-name"])`. A registry alias or
+  folder name always wins over the file, a bad entry is skipped with a
+  warning, and `register` never changes the file. See `docs/REPO_ALIASES.md`.
+- `query_graph_tool` can answer "who points at this?" for code outside the
+  repository. A target written `external:<kind>:<name>` (the form parsers use
+  for a GitHub Action, a Docker image, a Terragrunt module or a Lambda) now works
+  with `callers_of`, `references_to` and `importers_of`; it used to return
+  `not_found` because no node has that name. See `docs/COMMANDS.md`.
+- `refactor_tool` pages its long lists the same way: the edits of a rename
+  preview, the dead-code symbols and the suggestions. Pass `next_cursor` back as
+  `cursor` to read the rest. Reading further pages never applies a rename and
+  never issues a new `refactor_id`; apply with the id the first page returned.
+- Ember.js modules are given a role, `ember_kind` (`service`, `route`, `controller`,
+  `component`, `model`, `adapter`, `serializer`, `helper`, `modifier`, `mixin`,
+  `transform` or `template`), from their path and base class, and `.hbs` templates
+  are indexed as the `handlebars` language. Service injections, Ember Data names
+  and the components a template invokes are recorded by name for a later step to
+  bind. No template text or literal value is stored. Run `code-review-graph build`
+  once to refresh an existing graph.
+- Ember.js projects are understood by their naming convention. A service
+  injected with `@service`, `service()` or `Ember.inject.service()` now points
+  at the service file (the lookup name is the explicit name or the dasherized
+  property name), and `this.foo.bar()` or `this.get('foo').bar()` goes to that
+  service's `bar`, so `callers_of` on a service method finds its callers. Ember
+  Data names resolve too: `store.findRecord('post')` and `belongsTo('post')`
+  point at the model. `.hbs` templates are indexed: each component, helper or
+  modifier a template invokes points at its file, and a component's class
+  points at its template. Imports written as `<app>/services/x` resolve to the
+  file under `app/` or `addon/`. Each route in `router.js` becomes an
+  `Endpoint` handled by the route, controller and template modules its name
+  implies. Service, route, component and other modules carry an `ember_kind`.
+  An injection or template name that matches no file, or several, stays
+  unresolved and says why (`ember_reason`). No template text or literal value
+  is stored. See `docs/EMBER.md`.
+- GitHub Actions workflows, Dockerfiles and Terragrunt files now record the
+  workflows, actions, images and modules they use, so you can ask which files
+  use a given one. Dockerfile build stages are also indexed, with the stages
+  they copy from. Credentials in URLs and query strings other than the ref are
+  never stored, and neither are other values from these files. Run
+  `code-review-graph build` once to add these to an existing graph. See
+  [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md).
+- Terragrunt references written as expressions now point at the file or module
+  they name: `find_in_parent_folders()`, `get_parent_terragrunt_dir("root")`,
+  `get_repo_root()`, same-file `locals` and exposed `include` locals are worked
+  out from the files, so most `include`, `terraform.source` and `dependency`
+  references that were `dynamic` now have a target. `dependencies { paths }`
+  entries are recorded too. A reference that cannot be resolved (`get_env`,
+  `run_cmd`, `sops_*`, `var.*`) stays `dynamic` and says why in
+  `dynamic_reason`. Nothing is run, no environment variable is read, and no
+  file outside the repository is opened. Registry and git `module` sources in
+  `.tf` files are now stored as `external:terraform-module:` targets without
+  credentials. Run `code-review-graph build` once to update an existing graph.
+- A Step Functions Task state that runs a Lambda function or an ECS task is now
+  linked to the Terraform resource (`aws_lambda_function`,
+  `aws_ecs_task_definition`) that defines it, when the repository has one, so
+  `references_to` on the resource lists the state machines that run it. Names are
+  matched by convention (case, `-` and `_` ignored, one resource only) and the
+  link is marked `INFERRED`; the edge to the external target stays. See
+  `docs/schema.md`.
+- AWS Step Functions state machines are indexed. A file named `*.asl.json` or
+  `*.asl` is read as a state machine instead of as generic JSON, so it no longer
+  adds a `JsonPath` node for every key (on two real repositories, 61
+  definitions went from about 20,900 nodes to about 1,500). Each machine is a
+  `Class` node and each state a `Function` node, with its type, whether it
+  starts the machine or ends it, and, for a Task, the kind of service it calls.
+  Parallel branches and Map processors are included, and a state keeps a
+  unique name by the path of the states around it. New `TRANSITIONS_TO` edges
+  follow the flow (`via` is `next`, `default`, `choice`, `catch`, `branch` or
+  `map`). `query_graph_tool` has two new patterns, `next_states_of` and
+  `previous_states_of`, to list the states a state hands over to and the states
+  that hand over to it, and `path_to` now follows transitions from one state to
+  another. A Task that calls a Lambda function, a nested state machine, an
+  ECS task, an SNS topic, an SQS queue, a DynamoDB table or a few other
+  resources gets a `REFERENCES` edge to `external:aws-<service>:<name>`. Only
+  the resource name is kept: no account ID, region, parameter, path, choice
+  value or comment ever enters the graph. A `${placeholder}` or an intrinsic
+  function in place of a name is recorded as dynamic, with the placeholder's
+  key name and nothing else. A definition that is not valid JSON, or is over
+  1 MiB, keeps only its file node.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
@@ -34,6 +230,23 @@
   finished, and which git and editor hooks are installed and the version of
   the copy they run. It changes nothing, exits 1 when a check
   fails, and takes `--json`.
+- Calls to an injected interface that has several implementations now resolve
+  to the one implementation picked by `@Qualifier`, `@Primary` or the bean or
+  field name, so call graphs and impact analysis reach the real class. Calls
+  that cannot be decided stay on the interface as before. Run
+  `code-review-graph build` once to update an existing graph.
+- Scala calls now link across files. `callers_of`, `get_impact_radius_tool` and
+  `path_to` follow `Foo.bar(...)` into an object in another file, `new Foo(...)`
+  and `Foo(...)` for a companion `apply` or a case class, calls on a value
+  declared as `Foo`, bare calls to members the enclosing class inherits or an
+  import brings in, and test calls into the code under test. Scala imports
+  (plain, selectors, renames, wildcards on an object, imports relative to
+  chained `package` clauses) now point at the file that declares the name; an
+  import of something outside the repository stays external, a renamed import
+  is no longer dropped, and a call that several declarations could mean is
+  marked ambiguous instead of guessed. Library names such as `assert`, `load` or
+  `drop` are never linked by name alone. Run `code-review-graph build` once to
+  refresh an existing Scala graph.
 
 ### Changed
 
@@ -45,6 +258,11 @@
   `get_knowledge_gaps_tool` also stops listing configuration keys (JSON and YAML paths, Liquid outputs,
   Spring properties) as isolated nodes, whatever `include_tests` says.
 
+- `detect_changes_tool` on a `serve --multi-repo` server refuses a call that names no pull request,
+  head or changed files. The server holds each repository's default branch with no working tree, so
+  such a call used to review that branch's last commit as if it were the change. The error says to
+  pass `pr`, `head` or `changed_files`. The bundled `review-pr` reference now describes the
+  pull-request route (`pr` on `detect_changes_tool` and `pr_blast_radius_tool`) for a shared server.
 - Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
   `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
   is deleted when the call ends (leftovers of a killed call are swept on the next one). The
@@ -67,6 +285,28 @@
 
 ### Fixed
 
+- `detect_changes_tool` with `pr` or `head` no longer sends every added symbol name when
+  `detail_level="minimal"`: the `pull_request` section then carries the two commits and the
+  added and removed totals only. In the standard level the names are paged like the other lists:
+  `max_results` rows a page, `symbols_truncated` says while rows remain, and the same `next_cursor`
+  reads the next page of changed functions and of symbols together. The totals count every symbol.
+  Names are sanitised like any node name.
+- `pr_blast_radius_tool` and `detect_changes_tool` accept a `head` commit or a `base` branch the
+  checkout has not fetched. A full commit SHA, or a branch name, is fetched from `origin` when the
+  checkout lacks it. An unresolvable ref now fails with an error naming the ref (`head` or
+  `base`) and Git's own message, instead of "git rev-parse failed: no detail".
+- Server logs now carry every tool error reply (tool name, repository and error), so a failed call
+  can be found in the server's log.
+- A write that fails part-way (a full disk, an unencodable string) no longer leaves a `.tmp` file
+  behind for the install manifest or the watcher health file.
+- When class names, file-name parts or keywords tie on count, a community is
+  now named after the alphabetically first one, not the one that came first
+  among its members, so presenting the same files in another order no longer
+  renames it.
+- `@FeignClient` interfaces are no longer reported as dead code. Run
+  `code-review-graph build` once to update an existing graph.
+- Feign client methods no longer start an execution flow just because of their
+  mapping annotation. Run `code-review-graph build` once to update an existing graph.
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could
@@ -198,6 +438,15 @@
   its analysis; it leaves a notice naming both commits.
 - A call that could mean several functions now stores them in sorted order, so
   the same code gives the same graph whatever order its files are read in.
+
+### Internal
+
+- `analyze_changes` accepts `changed_nodes`, for callers that already know the changed symbols.
+- `ember_extract.py`, `ember_template.py` and `ember_resolver.py` add the Ember
+  support; tests are `test_ember_parser.py`, `test_ember_template.py` (including
+  hostile-input bounds) and `test_ember_resolver.py`, over the synthetic apps in
+  `tests/fixtures/ember/`. `ember_resolved` is a resolver-bound key in
+  `graph.py`, so Ember edges are `INFERRED`.
 
 ## [2.4.0] - 2026-11-10
 
@@ -433,6 +682,11 @@ settings are off unless you turn them on. Read the
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - Dependency minimums are raised to versions that are tested and that install
   on every supported Python: `mcp>=1.29.0`, `anyio>=4.8.0`, `tree-sitter>=0.26.0`,
   `tree-sitter-language-pack>=0.13.0` and `pyyaml>=6.0.2`. PyYAML 6.0 fails to
@@ -1214,6 +1468,11 @@ settings are off unless you turn them on. Read the
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - Keyword search is rebuilt, and it needs a rebuilt graph. `_fts_search`
   wrapped the whole query in one pair of double quotes, so every multi-word
   search was an exact-adjacency phrase match: on a build of this repository
@@ -1844,6 +2103,11 @@ breaking changes.
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - Updated supported async, embedding, watchdog, checkout, cache, and Python
   setup dependencies while keeping the published compatibility bounds explicit
   (PRs #544, #629, and #631).
@@ -1921,6 +2185,11 @@ reviews its own pull requests with its own graph. No breaking changes.
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - README benchmarks section now leads with the ~82x median per-question
   reduction (528x presented as the best case, not the headline), the
   limitations block is visible instead of collapsed, and "100% impact recall"
@@ -2078,6 +2347,11 @@ Focused reliability and token-efficiency release for MCP/CLI review workflows. N
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - **Architecture overview is compact by default**: `get_architecture_overview_tool` now defaults to `detail_level="minimal"`, dropping per-community member lists and aggregating cross-community edges by community pair. Full per-edge output remains available with `detail_level="standard"`.
 - **Bounded change analysis**: `detect_changes_tool` can now cap very large changed-function and transitive-test frontiers with `CRG_MAX_CHANGED_FUNCS` and `CRG_MAX_TRANSITIVE_FRONTIER`, and can return a structured timeout error via `CRG_TOOL_TIMEOUT`.
 
@@ -2282,6 +2556,11 @@ Major feature release — 15 new capabilities, 6 community PRs merged, 6 new MCP
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - MCP tool count: 22 → 28.
 - Schema version: 8 → 9 (edge confidence columns).
 - Community detection uses resolution scaling for large graphs.
@@ -2319,6 +2598,11 @@ Additive feature release — new language parsers, new platform install target, 
 
 ### Changed
 
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
 - `install` and `init` commands now preview instruction-file targets before writing (no-op if nothing would change). This is always-on and does not require `--dry-run`.
 - Default embedding path remains fully local (`sentence-transformers`); no behavior change unless you explicitly opt in to a cloud provider.
 

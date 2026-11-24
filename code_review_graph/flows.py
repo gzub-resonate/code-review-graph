@@ -549,7 +549,12 @@ def detect_entry_points(
         )
         is_entry = (
             node.qualified_name not in called
-            or _has_framework_decorator(node)
+            or (
+                # A Feign client method is where a flow leaves the service,
+                # so its mapping annotation does not make it a route.
+                _has_framework_decorator(node)
+                and not node.extra.get("spring_feign_client")
+            )
             or _matches_entry_name(node)
         )
 
@@ -797,12 +802,24 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
                 membership_rows,
             )
 
-        conn.execute("DELETE FROM metadata WHERE key = 'csharp_flows_dirty'")
+        for key in FLOWS_DIRTY_KEYS:
+            conn.execute("DELETE FROM metadata WHERE key = ?", (key,))
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
     return count
+
+
+#: Metadata flags a resolver sets when it rebinds calls in files that were not
+#: reparsed, so callers and entry points can change anywhere. A resolver with
+#: that property adds its key here.
+FLOWS_DIRTY_KEYS = ("csharp_flows_dirty", "scala_flows_dirty")
+
+
+def flows_dirty(store: GraphStore) -> bool:
+    """Whether a resolver rebound calls and the flows owe a full retrace."""
+    return any(store.get_metadata(key) == "1" for key in FLOWS_DIRTY_KEYS)
 
 
 def incremental_trace_flows(
@@ -826,8 +843,8 @@ def incremental_trace_flows(
 
     Returns the number of re-traced flows that were stored.
     """
-    if store.get_metadata("csharp_flows_dirty") == "1":
-        # C# rebinding can change callers and entry points in files that were
+    if flows_dirty(store):
+        # C# and Scala rebinding can change callers and entry points in files that were
         # never reparsed, so a changed-file set cannot bound the work. Retrace
         # in full until the binder reports a complete affected set.
         return store_flows(store, trace_flows(store, max_depth=max_depth))

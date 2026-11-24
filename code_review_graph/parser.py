@@ -32,6 +32,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
+from . import asl_parse, ember_extract, ember_template, js_api_extract, py_api_extract
+from . import scala_parse as _scala_parse
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
     IMPORT_CONTEXT_DEFERRED,
@@ -41,11 +43,34 @@ from .constants import (
     IMPORT_SCOPE_KEY,
     IMPORT_SCOPE_PACKAGE,
     IMPORT_SCOPE_TREE,
+    SPRING_FEIGN_EDGE_KIND,
     normalize_file_path,
     release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .infra_references import (
+    DYNAMIC_GITHUB_ACTIONS_TARGET,
+    EXTERNAL_DYNAMIC_DOCKER_TARGET,
+    EXTERNAL_DYNAMIC_TERRAFORM_TARGET,
+    EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET,
+    EXTERNAL_TERRAFORM_MODULE_PREFIX,
+    MAX_DOCKERFILE_BYTES,
+    MAX_DOCKERFILE_LINES,
+    MAX_INFRA_REFERENCES_PER_FILE,
+    clean_stage_alias,
+    docker_image_target,
+    format_docker_image,
+    github_actions_target,
+    is_dockerfile_name,
+    is_github_workflow_path,
+    is_plain_local_path,
+    is_reference_text,
+    parse_docker_image,
+    parse_github_uses,
+    parse_terragrunt_source,
+)
 from .npm_alias_resolver import NpmAliasResolver
+from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
 
 try:
     import yaml as _yaml  # type: ignore[import-untyped]
@@ -1308,9 +1333,11 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".yml": "yaml",
     ".yaml": "yaml",
     ".json": "json",
+    ".asl": "asl",
     ".robot": "robot",
     ".resource": "robot",
     ".liquid": "liquid",
+    ".hbs": "handlebars",
 }
 
 # ``.h`` is shared by C and C++. Keep C as the extension default, then promote
@@ -1782,12 +1809,29 @@ def _builtin_language_names() -> frozenset[str]:
     """
     return (
         frozenset(EXTENSION_TO_LANGUAGE.values())
+        | frozenset({"dockerfile"})  # detected by file name, not extension
         | frozenset(_CLASS_TYPES)
         | frozenset(_FUNCTION_TYPES)
         | frozenset(_IMPORT_TYPES)
         | frozenset(_CALL_TYPES)
     )
 
+
+# Terragrunt blocks that name another unit, and the one attribute read from each.
+_TERRAGRUNT_REFERENCE_ATTRIBUTES = {
+    "terraform": "source",
+    "include": "path",
+    "dependency": "config_path",
+    "dependencies": "paths",
+}
+
+# What a directory named by a Terragrunt reference stands for, in order. ``*.tf`` is the
+# first Terraform file by name, for a module that has no ``main.tf``.
+_TERRAGRUNT_CHILDREN = ("", "terragrunt.hcl", "main.tf")
+_TERRAFORM_CHILDREN = ("", "terragrunt.hcl", "main.tf", "*.tf")
+
+# Most ``dependencies.paths`` entries one block adds.
+_MAX_TERRAGRUNT_DEPENDENCY_PATHS = 100
 
 # Patterns that indicate a test function
 _TEST_PATTERNS = [
@@ -1920,6 +1964,12 @@ _SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
     "EventListener",
 })
 
+# Stereotypes whose ``value`` names the bean
+_SPRING_BEAN_NAME_ANNOTATIONS = frozenset({
+    "Component", "Service", "Repository", "Controller", "RestController",
+    "Configuration",
+})
+
 # Spring DI injection annotations (field/setter/constructor-level)
 _SPRING_INJECT_ANNOTATIONS = frozenset({
     "Autowired", "Inject", "Resource",
@@ -1964,6 +2014,17 @@ _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
 _JAVA_WILDCARD_KEY = "__crg_java_wildcard__"
 _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
+# Spring Cloud OpenFeign declares an HTTP client as an annotated interface.
+# Its request mappings describe calls the service makes, not routes it serves.
+_SPRING_FEIGN_CLIENT_ANNOTATIONS = frozenset({"FeignClient"})
+_SPRING_FEIGN_CLIENT_KEY = "__crg_spring_feign_client__:"
+# Rendered in a Feign route in place of a path piece that cannot be resolved at
+# parse time (a constant, a call). Angle brackets are not valid in a URL path, so
+# it cannot collide with a real segment, and unlike ``{...}`` it is not a path
+# variable and contains no ``?`` that a query-string strip would cut at.
+_SPRING_FEIGN_UNRESOLVED = "<unresolved>"
+_SPRING_FEIGN_URI_TYPES = frozenset({"URI", "java.net.URI"})
+_SPRING_FEIGN_ABSOLUTE_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # Marks a Python local name bound to a MODULE rather than to a symbol inside
 # one (``from . import cli``). The value is that module's file; a reference to
@@ -3384,6 +3445,7 @@ _JSON_VALUE_TYPES = {
     "string": "string",
     "true": "boolean",
 }
+
 # Folders whose JSON is data for a test, a demo or the docs, not settings for
 # the project. On vega, ``docs/`` alone held 168 example specs and data sets
 # that would have become 12,725 paths.
@@ -4000,6 +4062,11 @@ class CodeParser:
         """
         if path.name.lower().endswith(".blade.php"):
             return "blade"
+        if is_dockerfile_name(path.name):
+            return "dockerfile"
+        # A Step Functions definition is JSON, but it is a state machine, not data.
+        if path.name.lower().endswith((".asl.json", ".asl")):
+            return "asl"
         suffix = path.suffix.lower()
         lang = self._extension_map.get(suffix)
         if lang == "yaml" and _is_ansible_path(path):
@@ -4159,6 +4226,8 @@ class CodeParser:
             return self._parse_blade(path, source)
         if language == "liquid":
             return self._parse_liquid(path, source)
+        if language == "handlebars":
+            return self._parse_handlebars(path, source)
 
         # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
         if language == "vue":
@@ -4209,6 +4278,10 @@ class CodeParser:
         if language == "robot":
             return self._parse_robot(path, source)
 
+        # Dockerfiles: stages and the images they start from or copy from.
+        if language == "dockerfile":
+            return self._parse_dockerfile(path, source)
+
         # SQL: dedicated parser — tree-sitter for tables/views/functions +
         # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
         if language == "sql":
@@ -4252,6 +4325,10 @@ class CodeParser:
             if _yaml is None:
                 return [], []
             return self._parse_yaml(path, source)
+
+        # Step Functions state machines: states and transitions, never values.
+        if language == "asl":
+            return self._parse_asl(path, source)
 
         # JSON: the same value-free paths, and data files stay out.
         if language == "json":
@@ -4300,6 +4377,11 @@ class CodeParser:
             tree.root_node, language, source, file_path_str,
         )
         self._index_ambiguous_method_scopes(tree.root_node, language, import_map)
+        ember_enabled = language in ("javascript", "typescript", "tsx") and (
+            ember_extract.has_evidence(tree.root_node, source)
+        )
+        if ember_enabled:
+            import_map[ember_extract.EMBER_EVIDENCE_KEY] = "1"
         if language == "python":
             self._expand_python_star_imports(
                 tree.root_node, file_path_str, import_map,
@@ -4324,10 +4406,41 @@ class CodeParser:
             python_property_read_edges = []
 
         # Walk the tree
-        self._extract_from_tree(
-            tree.root_node, source, language, file_path_str, nodes, edges,
-            import_map=import_map, defined_names=defined_names,
-        )
+        if language == "scala":
+            _scala_parse.begin_file()
+        try:
+            self._extract_from_tree(
+                tree.root_node, source, language, file_path_str, nodes, edges,
+                import_map=import_map, defined_names=defined_names,
+            )
+        finally:
+            if language == "scala":
+                _scala_parse.end_file()
+
+        if ember_enabled:
+            ember_facts = ember_extract.extract(
+                tree.root_node, source, file_path_str, nodes, edges,
+                NodeInfo, EdgeInfo, language,
+            )
+            self._stamp_ember_roles(nodes, file_path_str, ember_facts)
+
+        if (
+            language in ("javascript", "typescript", "tsx")
+            and ember_extract.role_from_path(file_path_str)
+        ):
+            self._emit_ember_reexports(tree.root_node, file_path_str, language, edges)
+
+        if language in ("javascript", "typescript", "tsx"):
+            self._emit_js_api_endpoints(
+                tree.root_node, source, path, file_path_str, language, test_file,
+                nodes, edges,
+            )
+
+        if language == "python":
+            self._emit_py_api_endpoints(
+                tree.root_node, source, path, file_path_str, language, test_file,
+                nodes, edges,
+            )
 
         if language == "elixir":
             nodes, edges = self._merge_elixir_clauses(nodes, edges)
@@ -4735,6 +4848,157 @@ class CodeParser:
                 line=lines[0],
             ))
 
+        return nodes, edges
+
+    def _emit_ember_reexports(
+        self, root, file_path: str, language: str, edges: list[EdgeInfo],
+    ) -> None:
+        """``export { default } from '<addon>/services/x'`` is an import edge.
+
+        An addon puts a one-line re-export under ``app/`` so its module joins
+        the host application's namespace. Nothing else in the graph records
+        that line, and the Ember resolver follows it to the real module. Only
+        modules at an Ember path are read this way.
+        """
+        for node in root.children:
+            if node.type != "export_statement":
+                continue
+            spec = ember_extract.string_value(node.child_by_field_name("source"))
+            if not spec:
+                continue
+            target = self._resolve_module_to_file(spec, file_path, language) or spec
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path,
+                target=target,
+                file_path=file_path,
+                line=node.start_point[0] + 1,
+                extra={"ember_reexport": True},
+            ))
+
+    def _emit_js_api_endpoints(
+        self,
+        root,
+        source: bytes,
+        path: Path,
+        file_path: str,
+        language: str,
+        is_test: bool,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit HTTP client and server ``Endpoint`` nodes for a JS/TS file."""
+        rel_path = file_path
+        if self._repo_root is not None:
+            try:
+                rel_path = normalize_file_path(path.resolve().relative_to(self._repo_root))
+            except (ValueError, OSError):
+                rel_path = file_path
+        try:
+            js_api_extract.extract(
+                root, source, file_path, rel_path, path, nodes, edges,
+                NodeInfo, EdgeInfo, language, is_test,
+            )
+        except (RecursionError, ValueError) as exc:  # pragma: no cover - defensive
+            logger.warning("JS API extraction skipped for %s: %s", file_path, exc)
+
+    def _emit_py_api_endpoints(
+        self,
+        root,
+        source: bytes,
+        path: Path,
+        file_path: str,
+        language: str,
+        is_test: bool,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit FastAPI/Flask route ``Endpoint`` nodes for a Python file."""
+        rel_path = file_path
+        if self._repo_root is not None:
+            try:
+                rel_path = normalize_file_path(path.resolve().relative_to(self._repo_root))
+            except (ValueError, OSError):
+                rel_path = file_path
+        try:
+            py_api_extract.extract(
+                root, source, file_path, rel_path, nodes, edges,
+                NodeInfo, EdgeInfo, language, is_test,
+            )
+        except (RecursionError, ValueError) as exc:  # pragma: no cover - defensive
+            logger.warning("Python route extraction skipped for %s: %s", file_path, exc)
+
+    def _stamp_ember_roles(
+        self,
+        nodes: list[NodeInfo],
+        file_path: str,
+        facts: "ember_extract.ModuleFacts",
+    ) -> None:
+        """Record ``extra["ember_kind"]`` on an Ember module and its classes.
+
+        The module path decides first (``app/services/x.js`` is a service); the
+        base class (``Service.extend``, ``extends Component``) decides only
+        where the path says nothing, so a path never loses to a base class.
+        """
+        path_role = ember_extract.role_from_path(file_path)
+        for node in nodes:
+            if node.kind == "File":
+                role = path_role or facts.base_role
+                if role:
+                    node.extra["ember_kind"] = role
+            elif node.kind == "Class":
+                role = facts.class_roles.get(node.name) or path_role
+                if role:
+                    node.extra["ember_kind"] = role
+
+    def _parse_handlebars(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index an Ember template: a File node and what it invokes by name.
+
+        Each distinct component, helper or modifier name becomes one
+        ``IMPORTS_FROM`` edge with an ``ember:<ref>:<name>`` placeholder target
+        that ``ember_resolver`` binds to a file after the build. Template text,
+        attribute values and string literals are never stored.
+        """
+        file_path = normalize_file_path(path)
+        extra: dict = {}
+        role = ember_extract.role_from_path(file_path)
+        if role is not None or "/templates/" in file_path or file_path.endswith("/template.hbs"):
+            extra["ember_kind"] = "template"
+        nodes = [
+            NodeInfo(
+                kind="File",
+                name=file_path,
+                file_path=file_path,
+                line_start=1,
+                line_end=source.count(b"\n") + 1,
+                language="handlebars",
+                is_test=self._is_test_path(file_path),
+                extra=extra,
+            ),
+        ]
+        edges: list[EdgeInfo] = []
+        text = source.decode("utf-8", errors="replace")
+        for inv in ember_template.scan(text):
+            edge_extra: dict = {
+                "framework": "ember",
+                "ember_ref": inv.ref,
+                "ember_name": inv.name,
+                "ember_syntax": inv.syntax,
+            }
+            if inv.count > 1:
+                edge_extra["occurrences"] = inv.count
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path,
+                target=f"ember:{inv.ref}:{inv.name}",
+                file_path=file_path,
+                line=inv.line,
+                extra=edge_extra,
+            ))
         return nodes, edges
 
     def _parse_vue(
@@ -11488,7 +11752,254 @@ class CodeParser:
         file_extra["yaml_duplicate_keys"] = duplicate_summaries
         file_extra["yaml_unsupported_key_count"] = unsupported_key_count
         file_extra["yaml_truncated"] = truncated
+        self._emit_github_actions_references(path, documents, file_path, file_extra, edges)
         return nodes, edges
+
+    def _emit_github_actions_references(
+        self,
+        path: Path,
+        documents: list,
+        file_path: str,
+        file_extra: dict[str, Any],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Record the ``uses:`` references of a workflow or composite action file.
+
+        Only ``jobs.<id>.uses`` (a reusable workflow) and ``steps[].uses`` (an action) are
+        read, and only that one string per entry: ``with``, ``env`` and ``secrets`` are never
+        visited. Each reference is an ``IMPORTS_FROM`` edge from the file to
+        ``external:github-actions:<owner/repo[/path]>`` (the ref stays in ``extra``); a
+        ``./`` reference that names an existing file or action directory points at that file.
+        Capped at ``MAX_INFRA_REFERENCES_PER_FILE``; a malformed entry is skipped.
+        """
+        original = normalize_file_path(path).split("/")
+        github_index = is_github_workflow_path(tuple(part.lower() for part in original))
+        if github_index is None:
+            return
+        repo_dir = "/".join(original[:github_index])
+
+        found: list[tuple[str, str, str, Any]] = []  # (scope, job, uses text, node)
+
+        def add_uses(scope: str, job: str, mapping: object) -> None:
+            if not isinstance(mapping, _YamlMapping):
+                return
+            node = _yaml_get_key(mapping, "uses")
+            text = _yaml_scalar(node) if node is not None else None
+            if text is not None:
+                found.append((scope, job, text, node))
+
+        def add_steps(job: str, mapping: object) -> None:
+            if not isinstance(mapping, _YamlMapping):
+                return
+            steps = _yaml_get_key(mapping, "steps")
+            if isinstance(steps, _YamlSequence):
+                for step in steps.value:
+                    add_uses("step", job, step)
+
+        for document in documents:
+            if not isinstance(document, _YamlMapping):
+                continue
+            jobs = _yaml_get_key(document, "jobs")
+            if isinstance(jobs, _YamlMapping):
+                for job_key, job in jobs.value:
+                    job_id = _yaml_scalar(job_key) or ""
+                    add_uses("job", job_id, job)
+                    add_steps(job_id, job)
+            add_steps("", _yaml_get_key(document, "runs"))
+
+        references: list[dict[str, Any]] = []
+        for scope, job, text, node in found:
+            if len(references) >= MAX_INFRA_REFERENCES_PER_FILE:
+                file_extra["infra_references_truncated"] = True
+                break
+            parts = parse_github_uses(text, scope)
+            if parts is None:
+                continue
+            parts["scope"] = scope
+            if job:
+                parts["job"] = job
+            line = _yaml_line(node)
+            parts["line"] = line
+            target = self._github_actions_target(parts, repo_dir)
+            references.append(parts)
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM", source=file_path, target=target,
+                file_path=file_path, line=line,
+                extra={"resolution": "github_actions_uses", **parts},
+            ))
+        if references:
+            file_extra["github_actions_uses"] = references
+
+    def _github_actions_target(self, parts: dict[str, Any], repo_dir: str) -> str:
+        """Edge target for one parsed ``uses`` value (see ``parse_github_uses``)."""
+        kind = parts["kind"]
+        if kind == "docker":
+            image = parts.get("image")
+            return docker_image_target(image) if image else DYNAMIC_GITHUB_ACTIONS_TARGET
+        if kind == "local":
+            local = parts.get("local_path")
+            if not local:
+                return DYNAMIC_GITHUB_ACTIONS_TARGET
+            base = Path(repo_dir) if repo_dir else Path(".")
+            return self._confined_local_file(
+                base, local, ("", "action.yml", "action.yaml"),
+            ) or local
+        if not parts.get("owner_repo"):
+            return DYNAMIC_GITHUB_ACTIONS_TARGET
+        return github_actions_target(parts["owner_repo"], parts.get("path", ""))
+
+    def _parse_dockerfile(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index the build stages of a Dockerfile and the images they reference.
+
+        Only ``FROM`` and ``COPY --from`` are read. A stage is a ``Class`` node named
+        ``stage:<alias>`` (``stage:<index>`` without an alias). ``FROM <image>`` and
+        ``COPY --from=<image>`` give an ``IMPORTS_FROM`` edge from the file to
+        ``external:docker-image:<name>`` with ``tag``, ``digest`` and ``stage`` in ``extra``;
+        ``FROM <stage>`` and ``COPY --from=<stage or index>`` give a ``DEPENDS_ON`` edge from
+        stage to stage. An image that uses a build argument (``FROM ${BASE}``) is recorded
+        as dynamic with no name and is not resolved. The image text itself is never stored:
+        only its name, tag and digest, without credentials or query. ``ARG``, ``ENV``, ``LABEL`` and
+        every other instruction are never read.
+        """
+        file_path = normalize_file_path(path)
+        file_extra: dict[str, Any] = {"values_indexed": False}
+        line_count = source.count(b"\n") + 1
+        nodes = [NodeInfo(
+            kind="File", name=file_path, file_path=file_path, line_start=1,
+            line_end=line_count, language="dockerfile", extra=file_extra,
+        )]
+        edges: list[EdgeInfo] = []
+        if len(source) > MAX_DOCKERFILE_BYTES:
+            file_extra["infra_references_truncated"] = True
+            return nodes, edges
+        parser = self._get_parser("dockerfile")
+        if parser is None:
+            return nodes, edges
+        try:
+            root = parser.parse(source).root_node
+        except (ValueError, RuntimeError) as exc:  # pragma: no cover - defensive
+            logger.debug("Dockerfile parse error in %s: %s", path, exc)
+            return nodes, edges
+
+        def text(node: Any) -> str:
+            return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+        stages: list[NodeInfo] = []
+        stage_by_alias: dict[str, int] = {}
+        references = 0
+
+        def stage_qualified(index: int) -> str:
+            return self._qualify(stages[index].name, file_path, None)
+
+        def add_image(
+            raw: str, line: int, resolution: str, current: Optional[int], via: str,
+        ) -> None:
+            image = parse_docker_image(raw)
+            extra: dict[str, Any] = {"resolution": resolution, "via": via, **image}
+            if current is not None:
+                extra["stage"] = stages[current].extra.get("stage_name") or None
+                extra["stage_index"] = current
+            target = (
+                docker_image_target(image["name"]) if image["name"]
+                else EXTERNAL_DYNAMIC_DOCKER_TARGET
+            )
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM", source=file_path, target=target,
+                file_path=file_path, line=line, extra=extra,
+            ))
+
+        def add_stage_edge(source_index: int, target_index: int, line: int, via: str) -> None:
+            edges.append(EdgeInfo(
+                kind="DEPENDS_ON", source=stage_qualified(source_index),
+                target=stage_qualified(target_index), file_path=file_path, line=line,
+                extra={
+                    "resolution": "dockerfile_stage", "via": via,
+                    "stage": stages[target_index].extra.get("stage_name") or None,
+                    "stage_index": target_index,
+                },
+            ))
+
+        instructions = [
+            c for c in root.children if c.type in ("from_instruction", "copy_instruction")
+        ]
+        truncated = False
+        for node in instructions:
+            line = node.start_point[0] + 1
+            if line > MAX_DOCKERFILE_LINES or references >= MAX_INFRA_REFERENCES_PER_FILE:
+                truncated = True
+                break
+            if node.type == "from_instruction":
+                spec = next((c for c in node.children if c.type == "image_spec"), None)
+                alias_node = next((c for c in node.children if c.type == "image_alias"), None)
+                if spec is None:
+                    continue
+                raw = text(spec).strip()
+                alias = clean_stage_alias(
+                    text(alias_node).strip() if alias_node is not None else ""
+                )
+                index = len(stages)
+                key = alias.lower()
+                name = f"stage:{alias}" if alias and key not in stage_by_alias else f"stage:{index}"
+                stage = NodeInfo(
+                    kind="Class", name=name, file_path=file_path, line_start=line,
+                    line_end=node.end_point[0] + 1, language="dockerfile",
+                    extra={
+                        "dockerfile_type": "stage", "stage_index": index,
+                        "stage_name": alias,
+                        "base_image": format_docker_image(parse_docker_image(raw)),
+                    },
+                )
+                stages.append(stage)
+                if alias and key not in stage_by_alias:
+                    stage_by_alias[key] = index
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path,
+                    target=stage_qualified(index), file_path=file_path, line=line,
+                ))
+                references += 1
+                earlier = stage_by_alias.get(raw.lower())
+                if earlier is not None and earlier < index:
+                    add_stage_edge(index, earlier, line, "from")
+                elif raw.lower() != "scratch":
+                    add_image(raw, line, "dockerfile_from", index, "from")
+            else:
+                param = next(
+                    (c for c in node.children
+                     if c.type == "param" and text(c).startswith("--from=")),
+                    None,
+                )
+                if param is None:
+                    continue
+                raw = text(param)[len("--from="):].strip()
+                current = len(stages) - 1 if stages else None
+                references += 1
+                earlier = stage_by_alias.get(raw.lower())
+                if earlier is None and raw.isdigit() and int(raw) < len(stages):
+                    earlier = int(raw)
+                if current is not None and earlier is not None and earlier < current:
+                    add_stage_edge(current, earlier, line, "copy_from")
+                elif raw:
+                    add_image(raw, line, "dockerfile_copy_from", current, "copy_from")
+        for stage in stages:
+            if stage.line_end > line_count:  # pragma: no cover - defensive
+                stage.line_end = line_count
+        nodes.extend(stages)
+        if truncated:
+            file_extra["infra_references_truncated"] = True
+        return nodes, edges
+
+    def _parse_asl(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index a Step Functions state machine (see :mod:`code_review_graph.asl_parse`)."""
+        return asl_parse.parse_asl(
+            path, source, self._get_parser("json"), NodeInfo, EdgeInfo,
+            _is_test_file(normalize_file_path(path)),
+        )
 
     def _parse_json(
         self,
@@ -13224,6 +13735,13 @@ class CodeParser:
         if block_type == "locals":
             return self._emit_hcl_locals(body_node, file_path, nodes, edges)
 
+        if block_type in _TERRAGRUNT_REFERENCE_ATTRIBUTES and file_path.lower().endswith(".hcl"):
+            if body_node is not None:
+                self._emit_terragrunt_reference(
+                    block_type, labels, body_node, file_path, edges, line_start,
+                )
+            return True
+
         cfg = _HCL_BLOCK_CFG.get(block_type)
         if cfg is None:  # "terraform" and unknown blocks silently skipped
             return True
@@ -13255,11 +13773,29 @@ class CodeParser:
         if block_type == "module":
             src = self._hcl_get_attribute_string(body_node, "source")
             if src:
-                resolved = self._resolve_module_to_file(src, file_path, "hcl")
-                edges.append(EdgeInfo(
-                    kind="IMPORTS_FROM", source=file_path, target=resolved or src,
-                    file_path=file_path, line=line_start,
-                ))
+                parts = parse_terragrunt_source(src)
+                if parts["kind"] == "local":
+                    resolved = self._resolve_module_to_file(src, file_path, "hcl")
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM", source=file_path, target=resolved or src,
+                        file_path=file_path, line=line_start,
+                    ))
+                else:
+                    # A registry, git or archive source: only its address and ref are kept,
+                    # never a credential or query value that the raw string may carry.
+                    target = EXTERNAL_DYNAMIC_TERRAFORM_TARGET
+                    extra: dict[str, Any] = {
+                        "resolution": "terraform_module", "dynamic": not parts["base"],
+                    }
+                    if parts["base"]:
+                        target = EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
+                        extra.update(
+                            source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
+                        )
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM", source=file_path, target=target,
+                        file_path=file_path, line=line_start, extra=extra,
+                    ))
 
         if emit_refs:
             provider_attributes = (
@@ -13273,6 +13809,306 @@ class CodeParser:
             )
 
         return True
+
+    def _emit_terragrunt_reference(
+        self,
+        block_type: str,
+        labels: list[str],
+        body_node,
+        file_path: str,
+        edges: list[EdgeInfo],
+        line: int,
+    ) -> None:
+        """Emit the references a Terragrunt ``terraform``, ``include``, ``dependency`` or
+        ``dependencies`` block names.
+
+        Only ``terraform.source``, ``include.path``, ``dependency.config_path`` and
+        ``dependencies.paths`` are read. ``inputs``, ``mock_outputs`` and every other attribute
+        are not visited. A local path resolves to the file or module it names, as a ``.tf``
+        module ``source`` does; a remote source points at
+        ``external:terraform-module:<address>`` with the ``ref`` in ``extra``. Credentials and
+        query parameters other than ``ref`` and ``version`` are dropped, and the raw source is
+        never stored.
+
+        An expression (``find_in_parent_folders()``, ``"${get_repo_root()}/m"``, a ``local``) is
+        reduced by :class:`TerragruntEvaluator` from the files alone: nothing is run, no
+        environment variable is read and no file outside the repository is opened. What it
+        reduces to is used once, to find the target, and is never stored. When it cannot be
+        reduced, or names a file that is not in the repository, the edge is ``dynamic`` with a
+        coarse ``dynamic_reason`` and no text.
+        """
+        attribute = _TERRAGRUNT_REFERENCE_ATTRIBUTES[block_type]
+        expr, attr_line = self._terragrunt_attribute(body_node, attribute)
+        if expr is None:
+            return
+        entries: Optional[list[tuple[Any, int]]]
+        if block_type == "dependencies":
+            entries = self._terragrunt_path_list(expr)
+            if entries is None:  # not a list written out: one reference that stays dynamic
+                self._append_terragrunt_edge(
+                    block_type, labels, None, False, file_path, edges, attr_line or line,
+                    reason="unsupported_function",
+                )
+                return
+        else:
+            entries = [(expr, attr_line or line)]
+        evaluator: Optional[TerragruntEvaluator] = None
+        for entry, entry_line in entries:
+            if evaluator is None and not self._hcl_is_literal_string(entry):
+                evaluator = self._terragrunt_evaluator(body_node, file_path)
+            self._append_terragrunt_edge(
+                block_type, labels, entry, True, file_path, edges, entry_line,
+                evaluator=evaluator,
+            )
+
+    def _append_terragrunt_edge(
+        self,
+        block_type: str,
+        labels: list[str],
+        expr,
+        has_expr: bool,
+        file_path: str,
+        edges: list[EdgeInfo],
+        line: int,
+        *,
+        evaluator: Optional[TerragruntEvaluator] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        raw = ""
+        is_literal = False
+        if has_expr:
+            found = self._terragrunt_expression_text(expr)
+            if found is None:
+                return
+            raw, is_literal = found
+        extra: dict[str, Any] = {
+            "resolution": "terragrunt_reference", "block": block_type,
+            "dynamic": not is_literal,
+        }
+        if labels:
+            extra["name"] = labels[0]
+        target = EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        value: Optional[str] = None
+        if has_expr and not is_literal:
+            if evaluator is None:
+                reason = "not_found"
+            else:
+                value, reason = evaluator.evaluate(expr)
+        if value is not None:
+            target = self._terragrunt_static_target(block_type, value, file_path, extra)
+            if target == EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET:
+                reason = reason or "not_found"
+            else:
+                extra["resolved_statically"] = True
+                extra["dynamic"] = False
+        elif is_literal and block_type == "terraform":
+            parts = parse_terragrunt_source(raw)
+            extra.update(
+                source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
+            )
+            if parts["kind"] == "local":
+                if is_plain_local_path(raw):
+                    target = self._terragrunt_local_target(raw, file_path, _TERRAFORM_CHILDREN)
+            elif parts["base"]:
+                target = EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
+        elif is_literal and is_plain_local_path(raw):
+            target = self._terragrunt_local_target(raw, file_path, _TERRAGRUNT_CHILDREN)
+        if target == EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET:
+            extra["dynamic"] = True
+            if reason in DYNAMIC_REASONS:
+                extra["dynamic_reason"] = reason
+        edges.append(EdgeInfo(
+            kind="IMPORTS_FROM", source=file_path, target=target,
+            file_path=file_path, line=line, extra=extra,
+        ))
+
+    def _terragrunt_static_target(
+        self, block_type: str, value: str, file_path: str, extra: dict[str, Any],
+    ) -> str:
+        """The target of a statically evaluated reference, or the dynamic target.
+
+        *value* is used here and not kept. A remote ``terraform.source`` is reduced exactly
+        like a written-out one (no credentials, only ``ref`` and ``version``). A local path
+        must name an existing file inside the repository.
+        """
+        children: tuple[str, ...]
+        if block_type == "terraform":
+            parts = parse_terragrunt_source(value)
+            extra.update(
+                source_kind=parts["kind"], ref=parts["ref"], subdir=parts["subdir"],
+            )
+            if parts["kind"] != "local" and not os.path.isabs(value):
+                if parts["base"]:
+                    return EXTERNAL_TERRAFORM_MODULE_PREFIX + parts["base"]
+                return EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+            extra["source_kind"] = "local"
+            children = _TERRAFORM_CHILDREN
+        else:
+            children = _TERRAGRUNT_CHILDREN
+        if not is_plain_local_path(value):
+            return EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        base = Path(file_path).parent
+        raw = value
+        if os.path.isabs(value):
+            anchor = base if base.is_absolute() else (self._repo_root or Path.cwd()) / base
+            try:
+                raw = os.path.relpath(value, os.path.realpath(anchor))
+            except ValueError:
+                return EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+        found = self._confined_local_file(base, raw, children)
+        return found if found else EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET
+
+    def _terragrunt_evaluator(self, body_node, file_path: str) -> Optional[TerragruntEvaluator]:
+        """An evaluator for the file *body_node* is in, or ``None`` without a repository root."""
+        if self._repo_root is None:
+            return None
+        root = body_node
+        while root.parent is not None:
+            root = root.parent
+        parser = self._get_parser("hcl")
+        if parser is None:
+            return None
+
+        def parse(data: bytes):
+            return parser.parse(data).root_node
+
+        def excluded(resolved: Path) -> bool:
+            return normalize_file_path(resolved) in self._excluded_files
+
+        return TerragruntEvaluator(self._repo_root, Path(file_path), root, parse, excluded)
+
+    @staticmethod
+    def _hcl_is_literal_string(expr) -> bool:
+        literal = _hcl_child(expr, "literal_value")
+        string_lit = _hcl_child(literal, "string_lit") if literal is not None else None
+        return string_lit is not None and _hcl_child(string_lit, "template_literal") is not None
+
+    @staticmethod
+    def _terragrunt_path_list(expr) -> Optional[list[tuple[Any, int]]]:
+        """The ``(expression, line)`` of each entry of a written-out list, else ``None``."""
+        collection = _hcl_child(expr, "collection_value")
+        tup = _hcl_child(collection, "tuple") if collection is not None else None
+        if tup is None:
+            return None
+        return [
+            (child, child.start_point[0] + 1)
+            for child in tup.children
+            if child.type == "expression"
+        ][:_MAX_TERRAGRUNT_DEPENDENCY_PATHS]
+
+    @staticmethod
+    def _terragrunt_attribute(body_node, attr_name: str) -> tuple[Optional[Any], int]:
+        """``(expression node, line)`` of attribute *attr_name*, or ``(None, 0)`` if absent."""
+        for attr in body_node.children:
+            if attr.type != "attribute":
+                continue
+            key = _hcl_child(attr, "identifier")
+            expr = _hcl_child(attr, "expression")
+            if key is None or expr is None or _hcl_text(key) != attr_name:
+                continue
+            return expr, attr.start_point[0] + 1
+        return None, 0
+
+    @staticmethod
+    def _terragrunt_expression_text(expr) -> Optional[tuple[str, bool]]:
+        """``(text, is_literal)`` of an expression, or ``None`` if it is not reference-shaped.
+
+        A plain quoted string is literal. Any other expression is returned as its source text
+        with ``is_literal`` false, only so that the caller can tell it apart; the text is
+        never stored. One that is not a reference-shaped string is dropped.
+        """
+        literal = _hcl_child(expr, "literal_value")
+        string_lit = _hcl_child(literal, "string_lit") if literal is not None else None
+        template = (
+            _hcl_child(string_lit, "template_literal") if string_lit is not None else None
+        )
+        if template is not None:
+            text, is_literal = _hcl_text(template).strip(), True
+        else:
+            text, is_literal = _hcl_text(expr).strip(), False
+        if not is_reference_text(text):
+            return None
+        return text, is_literal
+
+    def _terragrunt_local_target(
+        self, raw: str, file_path: str, children: tuple[str, ...],
+    ) -> str:
+        """The in-repo file a relative Terragrunt path names, else the raw text.
+
+        A path to a directory (a module, or a dependency's config) names the first of
+        *children* inside it that exists.
+        """
+        resolved = self._resolve_module_to_file(raw, file_path, "hcl")
+        if resolved:
+            return resolved
+        return self._confined_local_file(Path(file_path).parent, raw, children) or raw
+
+    def _confined_local_file(
+        self, base: Path, raw: str, children: tuple[str, ...],
+    ) -> Optional[str]:
+        """The existing file *raw* names below *base*, or ``None`` when it is not allowed.
+
+        Used for the local references of infrastructure files. An absolute *raw* is never
+        probed. Each probed path (*raw* itself, then each of *children* inside it) must
+        resolve, symbolic links included, to a file inside the repository root and must not
+        be an excluded file. Without a repository root only a relative path that stays
+        below the working directory is accepted.
+        """
+        if (
+            not raw
+            or Path(raw).is_absolute()
+            or raw.startswith(("/", "\\"))
+            or re.match(r"[A-Za-z]:", raw)
+        ):
+            return None
+        candidate = Path(os.path.normpath(base / raw))
+        root = self._repo_root
+        if root is None:
+            if candidate.is_absolute() or candidate.parts[:1] == (os.pardir,):
+                return None
+            anchor = Path.cwd().resolve()
+        else:
+            anchor = root
+        for name in children:
+            if name == "*.tf":
+                name = self._first_terraform_file(candidate, anchor)
+                if not name:
+                    continue
+            target = candidate / name if name else candidate
+            probe = target if target.is_absolute() else anchor / target
+            try:
+                resolved = probe.resolve()
+                if not _path_is_within(resolved, anchor) or not resolved.is_file():
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if (
+                normalize_file_path(resolved) in self._excluded_files
+                or normalize_file_path(target) in self._excluded_files
+            ):
+                continue
+            return normalize_file_path(target)
+        return None
+
+    @staticmethod
+    def _first_terraform_file(directory: Path, anchor: Path) -> str:
+        """The name of the first ``*.tf`` file (by name) in *directory*, or ``""``.
+
+        Sorted, so the answer does not depend on the order the file system lists entries.
+        At most 5,000 entries are looked at.
+        """
+        probe = directory if directory.is_absolute() else anchor / directory
+        names: list[str] = []
+        try:
+            with os.scandir(probe) as entries:
+                for count, entry in enumerate(entries):
+                    if count >= 5_000:
+                        return ""
+                    if entry.name.endswith(".tf") and entry.is_file():
+                        names.append(entry.name)
+        except OSError:
+            return ""
+        return min(names) if names else ""
 
     def _emit_hcl_locals(
         self,
@@ -15359,6 +16195,59 @@ class CodeParser:
                     values.extend(self._spring_config_string_literals(argument))
         return values
 
+    def _spring_annotation_literal(self, annotation_node) -> tuple[Optional[str], bool]:
+        """Read the ``value`` argument of a Java annotation as one string literal.
+
+        Returns ``(value, dynamic)``.  ``dynamic`` is true when the annotation
+        names a value that is not a plain string literal (a constant or an
+        expression), so a caller must not guess what it stands for.
+        """
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type == "element_value_pair":
+                    named = [part for part in argument.children if part.is_named]
+                    if len(named) < 2 or named[0].text.decode("utf-8", "replace") != "value":
+                        continue
+                    argument = named[-1]
+                elif not argument.is_named:
+                    continue
+                if argument.type == "string_literal":
+                    text = argument.text.decode("utf-8", errors="replace")
+                    if len(text) >= 2 and "\\" not in text:
+                        return text[1:-1], False
+                return None, True
+        return None, False
+
+    def _spring_qualifier_extra(self, owner_node) -> dict:
+        """``qualifier`` extra for a field or parameter carrying ``@Qualifier``."""
+        for annotation in self._java_annotations_named(owner_node, frozenset({"Qualifier"})):
+            value, _ = self._spring_annotation_literal(annotation)
+            return {"qualifier": value} if value else {"qualifier_dynamic": True}
+        return {}
+
+    def _spring_bean_identity_extra(self, class_node) -> dict:
+        """Bean name and qualifier values declared on a Spring component class."""
+        extra: dict = {}
+        qualifiers: list[str] = []
+        for annotation in self._java_annotations_named(
+            class_node,
+            _SPRING_BEAN_NAME_ANNOTATIONS | frozenset({"Qualifier"}),
+        ):
+            name = self._java_annotation_name(annotation)
+            value, dynamic = self._spring_annotation_literal(annotation)
+            if name == "Qualifier":
+                if value:
+                    qualifiers.append(value)
+            elif value:
+                extra.setdefault("spring_bean_name", value)
+            elif dynamic:
+                extra["spring_bean_name_dynamic"] = True
+        if qualifiers:
+            extra["spring_qualifiers"] = sorted(set(qualifiers))
+        return extra
+
     def _emit_spring_config_edges(
         self,
         class_node,
@@ -15546,6 +16435,7 @@ class CodeParser:
                 "injection_type": injection_type,
                 "field_name": field_name,
             }
+            extra.update(self._spring_qualifier_extra(field_node))
             if import_map is not None:
                 extra["java_type"] = self._spring_java_type(field_type, import_map)
             edges.append(EdgeInfo(
@@ -15587,6 +16477,7 @@ class CodeParser:
                     extra: dict = {"injection_type": "constructor"}
                     if param_name:
                         extra["field_name"] = param_name
+                    extra.update(self._spring_qualifier_extra(param))
                     if import_map is not None:
                         extra["java_type"] = self._spring_java_type(param_type, import_map)
                     edges.append(EdgeInfo(
@@ -15784,6 +16675,277 @@ class CodeParser:
                             file_path=file_path,
                             line=annotation.start_point[0] + 1,
                             extra=metadata,
+                        ))
+                        emitted += 1
+        return emitted
+
+    @staticmethod
+    def _spring_feign_literal(node) -> tuple[str, bool]:
+        """Fold a Java annotation value into ``(text, dynamic)`` without evaluating it.
+
+        String literals and ``+`` chains of them fold into one value. Anything
+        else (a constant, a call) contributes ``_SPRING_FEIGN_UNRESOLVED`` as its
+        text and marks the value dynamic, so a dropped piece stays visible.
+        """
+        if node.type == "string_literal":
+            text = node.text.decode("utf-8", errors="replace")
+            return (text[1:-1] if len(text) >= 2 else "", False)
+        if node.type == "parenthesized_expression":
+            inner = [part for part in node.children if part.is_named]
+            if len(inner) == 1:
+                return CodeParser._spring_feign_literal(inner[0])
+        if node.type == "binary_expression":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            operator = node.child_by_field_name("operator")
+            if (
+                left is not None
+                and right is not None
+                and operator is not None
+                and operator.text == b"+"
+            ):
+                left_text, left_dynamic = CodeParser._spring_feign_literal(left)
+                right_text, right_dynamic = CodeParser._spring_feign_literal(right)
+                return (left_text + right_text, left_dynamic or right_dynamic)
+        return (_SPRING_FEIGN_UNRESOLVED, True)
+
+    @staticmethod
+    def _spring_feign_literal_parts(*texts: str) -> list[str]:
+        """Return the known literal fragments of route texts, in order."""
+        parts: list[str] = []
+        for text in texts:
+            parts.extend(
+                piece for piece in text.split(_SPRING_FEIGN_UNRESOLVED) if piece
+            )
+        return parts
+
+    def _spring_feign_has_uri_parameter(self, method_node) -> bool:
+        """Return whether a Feign method takes a ``java.net.URI`` argument."""
+        parameters = method_node.child_by_field_name("parameters")
+        if parameters is None:
+            return False
+        for parameter in parameters.children:
+            if parameter.type != "formal_parameter":
+                continue
+            type_node = parameter.child_by_field_name("type")
+            if type_node is None:
+                continue
+            text = type_node.text.decode("utf-8", errors="replace")
+            if "".join(text.split()) in _SPRING_FEIGN_URI_TYPES:
+                return True
+        return False
+
+    @staticmethod
+    def _spring_feign_values(value_node) -> list[tuple[str, bool]]:
+        """Return the folded values of one annotation argument (array or scalar)."""
+        if value_node.type == "element_value_array_initializer":
+            return [
+                CodeParser._spring_feign_literal(part)
+                for part in value_node.children
+                if part.is_named and not part.type.endswith("comment")
+            ]
+        return [CodeParser._spring_feign_literal(value_node)]
+
+    @staticmethod
+    def _spring_feign_arguments(annotation_node) -> list[tuple[str, object]]:
+        """Return ``(key, value_node)`` pairs; a lone unnamed argument is ``value``."""
+        arguments: list[tuple[str, object]] = []
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type == "element_value_pair":
+                    named = [part for part in argument.children if part.is_named]
+                    if len(named) >= 2 and named[0].type == "identifier":
+                        key = named[0].text.decode("utf-8", errors="replace")
+                        arguments.append((key, named[-1]))
+                elif argument.is_named and not argument.type.endswith("comment"):
+                    arguments.append(("value", argument))
+        return arguments
+
+    @staticmethod
+    def _spring_feign_placeholder_keys(text: str) -> list[str]:
+        """Return the normalized ``${key}`` names in a string, in order, without defaults."""
+        keys: list[str] = []
+        for match in _SPRING_PLACEHOLDER_RE.finditer(text):
+            key = normalize_spring_config_key(match.group(1).split(":", 1)[0].strip())
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _spring_feign_client_attributes(self, annotation_node) -> dict:
+        """Read ``@FeignClient`` attributes; the ``url`` is reduced to placeholder keys."""
+        name: Optional[str] = None
+        context_id: Optional[str] = None
+        path = ""
+        path_dynamic = False
+        url_text = ""
+        for key, value_node in self._spring_feign_arguments(annotation_node):
+            values = self._spring_feign_values(value_node)
+            text, dynamic = values[0] if values else ("", False)
+            if key in ("name", "value", "serviceId"):
+                # ``name`` wins over ``value``; neither is meaningful when dynamic.
+                if not dynamic and (name is None or key == "name"):
+                    name = text
+            elif key == "contextId":
+                if not dynamic:
+                    context_id = text
+            elif key == "path":
+                path, path_dynamic = text, dynamic
+            elif key == "url":
+                url_text = "" if dynamic else text
+        config_keys: list[str] = []
+        for text in (name or "", url_text, path):
+            for key in self._spring_feign_placeholder_keys(text):
+                if key not in config_keys:
+                    config_keys.append(key)
+        return {
+            "name": name or None,
+            "context_id": context_id or None,
+            "path": path,
+            "path_dynamic": path_dynamic,
+            "url_literal": bool(_SPRING_PLACEHOLDER_RE.sub("", url_text).strip()),
+            "config_keys": config_keys,
+        }
+
+    def _emit_spring_feign_config_edges(
+        self,
+        class_node,
+        class_name: str,
+        enclosing_class: Optional[str],
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit DEPENDS_ON_CONFIG edges for ``${key}`` placeholders in ``@FeignClient``."""
+        source = self._qualify(class_name, file_path, enclosing_class)
+        for annotation in self._java_annotations_named(
+            class_node, _SPRING_FEIGN_CLIENT_ANNOTATIONS,
+        ):
+            for key in self._spring_feign_client_attributes(annotation)["config_keys"]:
+                edges.append(EdgeInfo(
+                    kind="DEPENDS_ON_CONFIG",
+                    source=source,
+                    target=f"config:{key}",
+                    file_path=file_path,
+                    line=annotation.start_point[0] + 1,
+                    extra={"config_key": key, "resolution": "feign_client"},
+                ))
+
+    def _emit_spring_feign_client_nodes(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        import_map: dict[str, str],
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> int:
+        """Emit outbound endpoints and REQUESTS edges for a Feign client method."""
+        encoded = import_map.get(f"{_SPRING_FEIGN_CLIENT_KEY}{class_name or ''}")
+        if not encoded:
+            return 0
+        try:
+            client = json.loads(encoded)
+        except (TypeError, ValueError):
+            return 0
+        if not isinstance(client, dict):
+            return 0
+        annotations = self._java_annotations_named(
+            method_node,
+            frozenset(_SPRING_REQUEST_MAPPINGS),
+        )
+        if not annotations:
+            return 0
+
+        prefixes = client.get("prefixes")
+        if not isinstance(prefixes, list) or not all(isinstance(p, str) for p in prefixes):
+            prefixes = []
+        prefixes = prefixes or [""]
+        interface_keys = [k for k in client.get("config_keys", []) if isinstance(k, str)]
+
+        source = self._qualify(method_name, file_path, class_name)
+        # Feign sends the request to the URI argument instead of the mapped path.
+        url_from_argument = self._spring_feign_has_uri_parameter(method_node)
+        emitted = 0
+        for annotation_index, annotation in enumerate(annotations):
+            annotation_name = self._java_annotation_name(annotation)
+            if annotation_name is None:
+                continue
+            mapped: list[tuple[str, bool]] = []
+            for key, value_node in self._spring_feign_arguments(annotation):
+                if key in ("path", "value"):
+                    mapped.extend(self._spring_feign_values(value_node))
+            mapped = mapped or [("", False)]
+            # OpenFeign's SpringMvcContract treats a @RequestMapping without
+            # ``method`` as GET, unlike a controller where it matches any verb.
+            verbs = self._spring_mapping_methods(annotation, annotation_name)
+            if verbs == ["ANY"]:
+                verbs = ["GET"]
+            for prefix in prefixes:
+                for path, path_dynamic in mapped:
+                    client_path = client.get("path", "")
+                    route = self._join_spring_route(
+                        self._join_spring_route(client_path, prefix),
+                        path,
+                    )
+                    unresolved = _SPRING_FEIGN_UNRESOLVED in route
+                    config_keys = list(interface_keys)
+                    for key in self._spring_feign_placeholder_keys(path):
+                        if key not in config_keys:
+                            config_keys.append(key)
+                    route_dynamic = bool(
+                        client.get("path_dynamic")
+                        or unresolved
+                        or path_dynamic
+                        or _SPRING_FEIGN_ABSOLUTE_URL_RE.match(path)
+                    )
+                    for verb in verbs:
+                        endpoint_name = (
+                            f"{method_name}@{annotation_name}"
+                            f"[{annotation_index}:{emitted}] {verb} {route}"
+                        )
+                        metadata: dict[str, Any] = {
+                            "annotation": annotation_name,
+                            "client_method": method_name,
+                            "http_method": verb,
+                            "route": route,
+                            "role": "client",
+                            "client": "feign",
+                            "config_keys": config_keys,
+                            "route_dynamic": route_dynamic,
+                            "url_literal": bool(client.get("url_literal")),
+                        }
+                        if unresolved:
+                            metadata["route_literal_parts"] = (
+                                self._spring_feign_literal_parts(client_path, prefix, path)
+                            )
+                        if url_from_argument:
+                            metadata["url_from_argument"] = True
+                        service = client.get("name")
+                        if service and "${" not in service:
+                            metadata["service"] = service
+                        else:
+                            metadata["service_unresolved"] = True
+                        if client.get("context_id"):
+                            metadata["context_id"] = client["context_id"]
+                        nodes.append(NodeInfo(
+                            kind="Endpoint",
+                            name=endpoint_name,
+                            file_path=file_path,
+                            line_start=annotation.start_point[0] + 1,
+                            line_end=annotation.end_point[0] + 1,
+                            language="java",
+                            parent_name=class_name,
+                            extra=metadata,
+                        ))
+                        edges.append(EdgeInfo(
+                            kind=SPRING_FEIGN_EDGE_KIND,
+                            source=source,
+                            target=self._qualify(endpoint_name, file_path, class_name),
+                            file_path=file_path,
+                            line=annotation.start_point[0] + 1,
+                            extra={**metadata, "resolution": "spring_feign_client"},
                         ))
                         emitted += 1
         return emitted
@@ -16637,6 +17799,8 @@ class CodeParser:
                 )
             if any(c.type == "modifier" and c.text == b"partial" for c in child.children):
                 extra["csharp_partial"] = True
+        if language == "scala":
+            extra.update(_scala_parse.class_extra(child))
         # TypeScript interfaces and type aliases share kind Class but have no
         # runtime body, so changes.py must not report them as test gaps (#1109).
         if language in ("typescript", "tsx") and child.type in (
@@ -16682,6 +17846,7 @@ class CodeParser:
                 extra["spring_stereotype"] = spring_stereotypes[0]
             if class_annotations:
                 extra["spring_annotations"] = class_annotations
+            extra.update(self._spring_bean_identity_extra(child))
             temporal_roles = [
                 a for a in class_annotations if a in _TEMPORAL_INTERFACE_ANNOTATIONS
             ]
@@ -16703,6 +17868,35 @@ class CodeParser:
                     import_map[f"{_SPRING_REQUEST_PREFIX_KEY}{name}"] = json.dumps(
                         request_prefixes,
                     )
+                feign_annotations = self._java_annotations_named(
+                    child, _SPRING_FEIGN_CLIENT_ANNOTATIONS,
+                )
+                if feign_annotations:
+                    feign = self._spring_feign_client_attributes(feign_annotations[0])
+                    # Legacy: current OpenFeign rejects @RequestMapping on a client
+                    # interface, older releases applied it as a route prefix.
+                    # Folded with the Feign helpers so an unresolved constant stays
+                    # visible instead of being dropped as it is for a server prefix.
+                    feign_prefixes: list[str] = []
+                    for mapping in self._java_annotations_named(
+                        child, frozenset({"RequestMapping"}),
+                    ):
+                        for key, value_node in self._spring_feign_arguments(mapping):
+                            if key in ("path", "value"):
+                                feign_prefixes.extend(
+                                    text for text, _ in self._spring_feign_values(value_node)
+                                )
+                    feign["prefixes"] = feign_prefixes
+                    # Keyed by the full scope chain so a nested interface resolves.
+                    feign_scope = f"{class_parent}.{name}" if class_parent else name
+                    import_map[f"{_SPRING_FEIGN_CLIENT_KEY}{feign_scope}"] = json.dumps(
+                        feign,
+                    )
+                    extra["spring_feign_client"] = True
+                    if feign["name"] and "${" not in feign["name"]:
+                        extra["feign_name"] = feign["name"]
+                    if feign["context_id"] and "${" not in feign["context_id"]:
+                        extra["feign_context_id"] = feign["context_id"]
 
         # Class-level annotation persistence for all annotation-bearing
         # languages.  Kotlin (@HiltViewModel, @AndroidEntryPoint) and C#
@@ -16781,6 +17975,9 @@ class CodeParser:
                 import_map,
             )
             self._emit_spring_config_edges(
+                child, name, enclosing_class, file_path, edges,
+            )
+            self._emit_spring_feign_config_edges(
                 child, name, enclosing_class, file_path, edges,
             )
             # Temporal: emit TEMPORAL_STUB edges for activity/workflow stub fields
@@ -17009,18 +18206,33 @@ class CodeParser:
         if child.type == "abstract_method_signature":
             method_extra["abstract"] = True
         if language == "java" and deco_list:
-            endpoint_count = self._emit_spring_endpoint_nodes(
-                child,
-                name,
-                enclosing_class,
-                file_path,
-                import_map or {},
-                nodes,
-                edges,
-            )
-            if endpoint_count:
-                method_extra["spring_endpoint"] = True
-                method_extra["spring_endpoint_count"] = endpoint_count
+            if f"{_SPRING_FEIGN_CLIENT_KEY}{enclosing_class or ''}" in (import_map or {}):
+                # A Feign client method is an outbound call, never a served route.
+                feign_count = self._emit_spring_feign_client_nodes(
+                    child,
+                    name,
+                    enclosing_class,
+                    file_path,
+                    import_map or {},
+                    nodes,
+                    edges,
+                )
+                if feign_count:
+                    method_extra["spring_feign_client"] = True
+                    method_extra["spring_feign_request_count"] = feign_count
+            else:
+                endpoint_count = self._emit_spring_endpoint_nodes(
+                    child,
+                    name,
+                    enclosing_class,
+                    file_path,
+                    import_map or {},
+                    nodes,
+                    edges,
+                )
+                if endpoint_count:
+                    method_extra["spring_endpoint"] = True
+                    method_extra["spring_endpoint_count"] = endpoint_count
             temporal_method_annots = [
                 a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS
             ]
@@ -17094,6 +18306,9 @@ class CodeParser:
             # Lets consumers tell a constructor from a method; Spring AOP,
             # for one, cannot intercept constructors.
             method_extra["java_constructor"] = True
+
+        if language == "scala":
+            method_extra.update(_scala_parse.function_extra(child))
 
         docstring = self._get_docstring_summary(child, language)
         if docstring:
@@ -17188,6 +18403,8 @@ class CodeParser:
         invocation). Returning False lets the dispatcher fall through to call
         extraction instead of silently dropping the call. See: Ruby call graph.
         """
+        if language == "scala":
+            return self._extract_scala_imports(child, file_path, edges)
         specs = self._extract_import_specs(child, language, source, file_path)
         csharp_extra = {}
         if language == "csharp":
@@ -17229,6 +18446,35 @@ class CodeParser:
                 file_path=file_path,
                 line=spec.line,
                 extra={**csharp_extra, **extra},
+            ))
+        return bool(specs)
+
+    def _extract_scala_imports(
+        self, child, file_path: str, edges: list[EdgeInfo],
+    ) -> bool:
+        """IMPORTS_FROM edges for one Scala import, one per name it brings in.
+
+        The target stays the dotted name; ``scala_resolver`` binds it to a file
+        once every file's declarations are known. The extra says what the
+        import brought in (a name, a rename or a wildcard).
+        """
+        specs = _scala_parse.import_specs(child)
+        line = child.start_point[0] + 1
+        for spec in specs:
+            module = _scala_parse.import_edge_target(spec)
+            target, scope = self._resolve_import_target(module, file_path, "scala")
+            extra: dict = _scala_parse.import_edge_extra(spec)
+            if target is None:
+                target = module
+            elif scope:
+                extra[IMPORT_SCOPE_KEY] = scope
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path,
+                target=target,
+                file_path=file_path,
+                line=line,
+                extra=extra,
             ))
         return bool(specs)
 
@@ -17421,6 +18667,11 @@ class CodeParser:
                 member_call = self._get_js_member_call_name(child)
                 if member_call:
                     call_extra["member_call"] = member_call
+                if import_map is not None and import_map.get(ember_extract.EMBER_EVIDENCE_KEY):
+                    chained = ember_extract.chained_receiver(child)
+                    if chained:
+                        # ``this.get('svc').run()``: the property the call goes through.
+                        call_extra["ember_receiver"], call_extra["ember_method"] = chained
             if (
                 language in self._TYPED_CALL_LANGUAGES
                 or language in ("cpp", "go", "rust")
@@ -17460,6 +18711,9 @@ class CodeParser:
                     call_extra["receiver_form"] = "expression"
                 if language == "java" and child.type == "method_reference":
                     call_extra["call_syntax"] = "method_reference"
+
+            if language == "scala":
+                call_extra.update(_scala_parse.call_extra(child, call_name))
 
             if language == "java" and child.type == "method_invocation":
                 self._emit_spring_webflux_endpoint(

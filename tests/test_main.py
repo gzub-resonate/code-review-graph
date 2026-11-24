@@ -193,6 +193,8 @@ class TestLongRunningToolsAreAsync:
         "get_suggested_questions_tool",
         "traverse_graph_tool",
         "cross_repo_search_tool",
+        "cross_repo_requests_tool",
+        "pr_blast_radius_tool",
     }
 
     #: The only tools allowed to run inline on the event loop.
@@ -725,6 +727,7 @@ class TestGraphBackedToolProvenanceCoverage:
         ("get_docs_section_tool", False),
         ("list_repos_tool", False),
         ("cross_repo_search_tool", True),
+        ("cross_repo_requests_tool", True),
     ])
     def test_non_single_repository_tools_do_not_claim_one_graph(
         self, tool_name, offloads,

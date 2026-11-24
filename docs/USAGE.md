@@ -215,6 +215,12 @@ code-review-graph register /path/to/other/repo --alias mylib
 ```
 Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset. `code-review-graph serve --http --multi-repo` runs one HTTP server for every registered repository; each tool call must then name one in `repo_root`.
 
+To see which endpoint in another registered repository an outbound Spring Feign call reaches, call `cross_repo_requests_tool`. It lists the calls of every registered repository (or of `repos=["mylib"]`), with the matching endpoint's repository, file, line and route, or the reason there is none (`status="ambiguous"` and `status="no_route_match"` are the usual follow-ups). It reads the existing graphs read-only; each graph's endpoints come from an index its build stored, and the join is computed on every call. See [COMMANDS.md](COMMANDS.md#cross_repo_requests_tool).
+
+To see what a pull request touches, call `pr_blast_radius_tool` with the pull request number (`pr=353`) and, for a stacked one, its parent branch as `base`. It reads the changed files from Git, so files the pull request adds are included although the graph, built from the default branch, has never seen them. See [COMMANDS.md](COMMANDS.md#pr_blast_radius_tool).
+
+A repository can also be known by extra names that you keep in `repo-aliases.toml`. See [REPO_ALIASES.md](REPO_ALIASES.md).
+
 `code-review-graph repos` lists each repository's registered `data_dir`, marking
 missing directories with `[MISSING]`. If a registered directory disappears and
 the repository still has a local `.code-review-graph/graph.db`, graph commands
@@ -306,7 +312,7 @@ code-review-graph eval --all --embed
 
 ## Supported Languages
 
-The parser covers Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), dbt models (`ref()` and `source()` become imports), Terraform/OpenTofu (`.tf`, and Terraform blocks in `.hcl` files; an `.hcl` file with no Terraform blocks keeps only a file node), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte single-file components, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
+The parser covers Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), dbt models (`ref()` and `source()` become imports), Terraform/OpenTofu (`.tf`, and Terraform blocks in `.hcl` files; an `.hcl` file with no Terraform blocks keeps only a file node), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte single-file components, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), AWS Step Functions state machines (`.asl.json`, `.asl`; states and transitions, never parameters or values), Liquid templates (`.liquid`), and Ember Handlebars templates (`.hbs`). Other `.properties` files are not treated as source code. Dockerfiles (`Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile`; stages, `FROM` and `COPY --from` images only), GitHub Actions workflows (`uses:` references only) and Terragrunt `.hcl` files (`source`, `include`, `dependency` only) are indexed as references to `external:` targets, never as values.
 
 Extension-less scripts are detected by shebang for bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
 
@@ -325,12 +331,20 @@ methods use the full chain too (`Alpha.Same.run` and `Beta.Same.run`). C# names 
 namespace and the full containing-type path. Local calls stay in that lexical class. Rebuild
 an existing graph to replace rows created with colliding identities.
 
+Scala calls are linked across files from declarations and scopes, not from names alone:
+`Foo.bar(...)` where `Foo` is an object, `new Foo(...)`, `Foo(...)` for a companion `apply` or
+a case class, a call on a value declared as `Foo`, and a bare call to a member the enclosing
+type inherits or an import brings in. Imports resolve through package clauses, renames and
+wildcards, and an import of something outside the repository stays external. A call that
+several declarations could mean is listed as ambiguous, and a library name is never linked.
+Rebuild an existing Scala graph once to record what the resolver reads.
+
 Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
 Their imports, calls, and references alone do not keep application symbols alive in
 dead-code reports. Normal application callers and ordinary test evidence still count.
 
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests, YamlPaths, DocSections, JsonPaths, Variables and Outputs (Liquid templates), plus Endpoints, Schedulers, Events and ConfigProperties where framework enrichment applies
-- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
+- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, REQUESTS, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB, TRANSITIONS_TO)
 - **Confidence**: each `CALLS`, `REFERENCES` and `TESTED_BY` edge has a `confidence_tier`: `EXTRACTED` (1.0) when the source names a real node, `INFERRED` (0.8, or the resolver's own score) when a resolver chose it, `AMBIGUOUS` (0.4) when several nodes fit, and `UNRESOLVED` (0.2) when none does
 
 See [schema.md](schema.md) for details.

@@ -24,7 +24,7 @@ Claude Code is one supported client among several.
 │  ┌────────────────────────────────────────────┐              │
 │  │      MCP Server (stdio or localhost HTTP)  │              │
 │  │                                            │              │
-│  │  30 MCP tools + 5 MCP prompts              │              │
+│  │  32 MCP tools + 5 MCP prompts              │              │
 │  │  ├── Core: build, postprocess, impact,     │              │
 │  │  │   query, review, search, traverse,      │              │
 │  │  │   embed, stats, docs, minimal context,  │              │
@@ -74,7 +74,7 @@ All modules live in `code_review_graph/`.
 | `embeddings.py` | Embedding providers and the `embeddings` table |
 | `changes.py`, `change_details.py`, `refactor.py`, `analysis.py`, `hints.py`, `uncertainty.py`, `context_savings.py`, `context_history.py` | Change risk analysis, the `detect-changes --details` sections, refactoring helpers, hub/bridge/gap analysis, response hints, uncertainty markers, savings estimates and the opt-in savings log |
 | `tools/` | MCP tool implementations, split by domain |
-| `main.py`, `prompts.py` | FastMCP server (30 tools, 5 prompts). Tool modules load on first use |
+| `main.py`, `prompts.py` | FastMCP server (32 tools, 5 prompts). Tool modules load on first use |
 | `multi_worktree.py` | `serve --multi-worktree`: one child server per linked Git worktree |
 | `cli.py`, `daemon.py`, `daemon_cli.py`, `errors.py`, `stdio.py` | CLI, the multi-repo watch daemon, one-line CLI errors and text-stream setup |
 | `visualization.py`, `neighbourhood.py`, `exports.py`, `wiki.py`, `graph_diff.py`, `memory.py`, `forget.py` | HTML visualisation, seeded views and paths, export formats, wiki generation, snapshot diffing, Q&A memory, file removal |
@@ -175,7 +175,7 @@ node type tables (`_CLASS_TYPES`, `_FUNCTION_TYPES` and similar in `parser.py`) 
 Languages that have a bundled Tree-sitter grammar but no built-in parser can be added
 through `.code-review-graph/languages.toml` (`docs/CUSTOM_LANGUAGES.md`). Some formats have a parser of their own. For notebooks, Vue,
 Svelte and Blade files, HTML pages, XSLT, JSON and SQL it still uses a Tree-sitter grammar;
-Liquid, Robot Framework, ReScript, VB.NET, generic YAML, Ansible and Spring configuration are
+Liquid, Robot Framework, ReScript, VB.NET, Step Functions state machines, generic YAML, Ansible and Spring configuration are
 read without one.
 
 ### C# namespace identity and binding

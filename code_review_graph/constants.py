@@ -249,6 +249,7 @@ IMPACT_EDGE_WEIGHTS: dict[str, float] = {
     "IMPLEMENTS": 0.9,
     "TESTED_BY": 0.7,
     "REFERENCES": 0.6,
+    "TRANSITIONS_TO": 0.8,
     "DEPENDS_ON": 0.6,
     "IMPORTS_FROM": 0.5,
     "CONTAINS": 0.3,
@@ -270,6 +271,7 @@ IMPACT_EDGE_DIRECTIONS: dict[str, str] = {
     "IMPLEMENTS": IMPACT_DIRECTION_INCOMING,
     "TESTED_BY": IMPACT_DIRECTION_OUTGOING,
     "REFERENCES": IMPACT_DIRECTION_INCOMING,
+    "TRANSITIONS_TO": IMPACT_DIRECTION_INCOMING,
     "DEPENDS_ON": IMPACT_DIRECTION_INCOMING,
     "IMPORTS_FROM": IMPACT_DIRECTION_INCOMING,
     "CONTAINS": IMPACT_DIRECTION_NONE,
@@ -423,6 +425,10 @@ IMPORT_CONTEXT_DEFERRED = "deferred"
 #: the sibling, and a file's own package is already loaded before the file is.
 IMPORT_CONTEXT_PARENT_PACKAGE = "parent_package"
 
+#: Edge kind from a Spring Cloud OpenFeign client method to its outbound Endpoint
+#: node. One constant, so the direction can be renamed in one place.
+SPRING_FEIGN_EDGE_KIND = "REQUESTS"
+
 #: Every ``query_graph`` pattern and what it finds. The MCP tool and the CLI
 #: ``query`` command both take these, so a new one reaches both.
 QUERY_PATTERNS = {
@@ -434,6 +440,8 @@ QUERY_PATTERNS = {
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
+    "next_states_of": "Find the Step Functions states a state hands over to",
+    "previous_states_of": "Find the Step Functions states that hand over to a state",
     "triggers_of": "Find methods invoked by a scheduler or other trigger",
     "triggered_by": "Find schedulers or other triggers that invoke a method",
     "publishers_of": "Find methods that publish an event",
@@ -442,6 +450,8 @@ QUERY_PATTERNS = {
     "advised_by": "Find AOP advice methods that intercept a given method",
     "handlers_of": "Find methods that handle an endpoint",
     "endpoints_for": "Find endpoints handled by a method",
+    "requests_of": "Find outbound HTTP endpoints a client method requests",
+    "requesters_of": "Find client methods that request an outbound endpoint",
     "consumers_of": "Find classes that consume a Spring configuration property",
     "file_summary": "Get a summary of all nodes in a file",
     "path_to": "Find how a given symbol or file reaches another",

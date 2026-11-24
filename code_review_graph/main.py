@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from .tools import (
         apply_refactor_func,
         build_or_update_graph,
+        cross_repo_requests_func,
         cross_repo_search_func,
         detect_changes_func,
         embed_graph,
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
         list_communities_func,
         list_flows,
         list_graph_stats,
+        pr_blast_radius_func,
         query_graph,
         refactor_func,
         run_postprocess,
@@ -69,6 +71,7 @@ if TYPE_CHECKING:
 _LAZY_TOOL_NAMES = frozenset({
     "apply_refactor_func",
     "build_or_update_graph",
+    "cross_repo_requests_func",
     "cross_repo_search_func",
     "detect_changes_func",
     "embed_graph",
@@ -95,6 +98,7 @@ _LAZY_TOOL_NAMES = frozenset({
     "query_graph",
     "refactor_func",
     "run_postprocess",
+    "pr_blast_radius_func",
     "semantic_search_nodes",
     "traverse_graph_func",
     "with_provenance",
@@ -157,6 +161,24 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
     if _multi_repo:
         return _registered_repo_root(repo_root)
     return repo_root if repo_root else _default_repo_root
+
+
+def _require_a_named_change(
+    changed_files: Optional[list[str]], pr: Optional[int], head: Optional[str],
+) -> None:
+    """Refuse a review that names no change when the server has no working tree to diff.
+
+    ``serve --multi-repo`` serves checkouts of each default branch. A call with no ``pr``,
+    ``head`` or ``changed_files`` would diff the checkout's last commit and present that as
+    the review, so it is refused with what to pass instead.
+    """
+    if _multi_repo and pr is None and not head and changed_files is None:
+        raise ToolError(
+            "This server holds each repository's default branch, so there is no working tree "
+            "to diff and a call without a change would review the last commit on that branch. "
+            "Pass pr=<number> (or head=<ref or commit>, with base=<parent branch> for a "
+            "stacked pull request), or changed_files=[...]."
+        )
 
 
 def _registered_repo_root(repo_root: Optional[str]) -> str:
@@ -246,6 +268,15 @@ async def _run_off_loop(work: Callable[[], dict]) -> dict:
     return await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
 
 
+def _log_tool_error(tool_name: str, root: str | None, result: Any) -> None:
+    """Log a tool's ``status: error`` reply so a failed call shows up in the server's logs."""
+    if isinstance(result, dict) and result.get("status") == "error":
+        logger.warning(
+            "tool error tool=%s repo_root=%r error=%r",
+            tool_name, root, str(result.get("error", ""))[:500],
+        )
+
+
 async def _offload(
     tool_name: str,
     work: Callable[[], dict],
@@ -306,6 +337,15 @@ async def _offload(
         timeout_hint: Advice appended to the timeout message.
     """
     def run_fn() -> Any:
+        try:
+            return _run_logged()
+        except Exception as exc:
+            logger.error(
+                "tool raised tool=%s repo_root=%r error=%r", tool_name, root, str(exc)[:500],
+            )
+            raise
+
+    def _run_logged() -> Any:
         # Resolve lazy attributes inside the worker: on a cold call the import
         # pulls in _common, the parser and the grammar package, which would
         # otherwise block the event loop before the timeout even starts.
@@ -314,9 +354,11 @@ async def _offload(
         for name in getattr(getattr(work, "__code__", None), "co_names", ()):
             if name in _LAZY_TOOL_NAMES and name not in globals():
                 _resolve_attr(name)
+        result = work()
+        _log_tool_error(tool_name, root, result)
         if provenance:
-            return _resolve_attr("with_provenance")(work(), root)
-        return work()
+            return _resolve_attr("with_provenance")(result, root)
+        return result
 
     tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
     if not bounded or tool_timeout <= 0:
@@ -326,6 +368,9 @@ async def _offload(
         return await asyncio.wait_for(_run_off_loop(run_fn), timeout=tool_timeout)
     except asyncio.TimeoutError:
         message = f"{tool_name} timed out after {tool_timeout}s. {timeout_hint}"
+        logger.warning(
+            "tool timed out tool=%s repo_root=%r after=%ss", tool_name, root, tool_timeout,
+        )
         error_response = {
             "status": "error",
             "error": message,
@@ -532,6 +577,7 @@ async def get_impact_radius_tool(
     detail_level: str = "standard",
     resolution: str = "all",
     max_files: int = 25,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Analyze the blast radius of changed files in the codebase.
 
@@ -558,6 +604,14 @@ async def get_impact_radius_tool(
         max_files: File display limit in compact mode (default 25, maximum 200).
             Does not reduce the graph traversal budget set by max_results.
         resolution: "all" (default) or "direct" to traverse only calls bound to an indexed node.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            ``impacted_nodes`` ("standard", page size ``max_results``, at most 100)
+            or ``impacted_files`` ("compact", page size ``max_files``). The other
+            lists stay capped and repeat on every page. Not for "minimal".
+            Omit it for the first page.
+
+    Returns the impact radius; ``next_cursor`` is present when more impacted
+    nodes (files, in compact) remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -566,7 +620,7 @@ async def get_impact_radius_tool(
             changed_files=changed_files, max_depth=max_depth,
             max_results=max_results,
             repo_root=root, base=base, detail_level=detail_level,
-            resolution=resolution, max_files=max_files,
+            resolution=resolution, max_files=max_files, cursor=cursor,
         ),
         root,
     )
@@ -581,6 +635,7 @@ async def query_graph_tool(
     max_results: int = 100,
     resolution: str = "all",
     to: Optional[str] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -593,6 +648,8 @@ async def query_graph_tool(
     - children_of: Find nodes contained in a file or class
     - tests_for: Find tests for the target
     - inheritors_of: Find classes inheriting from the target
+    - next_states_of: Find the Step Functions states a state hands over to
+    - previous_states_of: Find the Step Functions states that hand over to a state
     - triggers_of: Find methods invoked by a scheduler or other trigger
     - triggered_by: Find schedulers or other triggers that invoke the target
     - publishers_of: Find methods that publish an event
@@ -601,6 +658,8 @@ async def query_graph_tool(
     - advised_by: Find AOP advice methods that intercept the target
     - handlers_of: Find methods that handle an endpoint
     - endpoints_for: Find endpoints handled by a method
+    - requests_of: Find outbound HTTP endpoints a client method requests
+    - requesters_of: Find client methods that request an outbound endpoint
     - consumers_of: Find classes that consume a Spring configuration property
     - file_summary: Get all nodes in a file
     - path_to: Find how the target reaches ``to``, one row per hop
@@ -627,6 +686,10 @@ async def query_graph_tool(
         resolution: "all" (default), "direct" for only calls bound to an indexed
             node, or "unresolved" for only the bare-name matches.
         to: For path_to, the node name, qualified name, or file path to reach.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            rows. Omit it for the first page. Not available for path_to.
+
+    Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -634,7 +697,7 @@ async def query_graph_tool(
         lambda: query_graph(
             pattern=pattern, target=target, repo_root=root,
             detail_level=detail_level, max_results=max_results,
-            resolution=resolution, to=to,
+            resolution=resolution, to=to, cursor=cursor,
         ),
         root,
     )
@@ -651,6 +714,7 @@ async def get_review_context_tool(
     detail_level: str = "standard",
     max_results: int = 100,
     max_files: int = 25,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Generate a focused, token-efficient review context for code changes.
 
@@ -670,6 +734,14 @@ async def get_review_context_tool(
             Default: 50. Each list reports its untruncated ``*_total``.
         max_files: Maximum files listed and given source snippets.
             Default: 25. Snippets share an 800-line budget.
+        cursor: The ``next_cursor`` of a previous reply (``context.next_cursor``),
+            to read the next page of changed files. Only valid for the same base,
+            changed files, depth and detail level on the same graph.
+
+    Returns:
+        The review context. When more changed files remain, ``context.next_cursor``
+        is the ``cursor`` for the next page; only the changed files and their
+        snippets are paged, the graph lists are on the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -678,7 +750,7 @@ async def get_review_context_tool(
             changed_files=changed_files, max_depth=max_depth,
             include_source=include_source, max_lines_per_file=max_lines_per_file,
             repo_root=root, base=base, detail_level=detail_level,
-            max_results=max_results, max_files=max_files,
+            max_results=max_results, max_files=max_files, cursor=cursor,
         ),
         root,
     )
@@ -696,6 +768,7 @@ async def semantic_search_nodes_tool(
     include_source: bool = False,
     expand_neighbors: bool = False,
     max_source_lines: int = 60,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
 
@@ -729,6 +802,13 @@ async def semantic_search_nodes_tool(
                           answers "how does X work". Default: False.
         max_source_lines: With include_source, the most lines per snippet
                           (1-60). Default: 60.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            the ranking. Search ranks three times ``limit`` rows, and paging
+            reads that window, so keep ``limit`` and the other arguments the
+            same; a cursor is refused if the ranking changed. Omit it for the
+            first page.
+
+    Returns ranked nodes; ``next_cursor`` is present when ranked rows remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -737,7 +817,7 @@ async def semantic_search_nodes_tool(
             query=query, kind=kind, limit=limit, repo_root=root,
             model=model, provider=provider, detail_level=detail_level,
             include_source=include_source, expand_neighbors=expand_neighbors,
-            max_source_lines=max_source_lines,
+            max_source_lines=max_source_lines, cursor=cursor,
         ),
         root,
     )
@@ -838,6 +918,7 @@ async def find_large_functions_tool(
     limit: int = 50,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -854,13 +935,17 @@ async def find_large_functions_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full rows, "minimal" for fewer, smaller rows.
             Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
+
+    Returns oversized nodes; ``next_cursor`` is present when more remain.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "find_large_functions_tool",
         lambda: find_large_functions(
             min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-            limit=limit, repo_root=root, detail_level=detail_level,
+            limit=limit, repo_root=root, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -1126,6 +1211,9 @@ async def detect_changes_tool(
     detail_level: str = "standard",
     max_results: int = 25,
     max_flows: int = 20,
+    cursor: Optional[str] = None,
+    pr: Optional[int] = None,
+    head: Optional[str] = None,
 ) -> dict:
     """Detect changes and produce risk-scored, priority-ordered review guidance.
 
@@ -1149,15 +1237,36 @@ async def detect_changes_tool(
         max_flows: Maximum affected flows to embed. Embedded flows carry
             per-flow metadata only — use get_affected_flows_tool for step
             detail. Default: 20.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            changed functions (for a pull request, of its added and removed symbols
+            too). Only valid for the same base, changed files, depth and detail
+            level on the same graph.
+        pr: Pull request number. Reads the PR's changed files from refs/pull/<pr>/head,
+            parses them in memory and scores them against the graph, so new files are
+            covered. base then names the branch the PR merges into. Default: none.
+        head: A ref or commit to read the changed files from instead of pr.
+            A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
+
+    Returns:
+        The risk-scored analysis. When more changed functions remain,
+        ``next_cursor`` is the ``cursor`` for the next page; the other lists
+        are on the first page only. For a pull request, ``pull_request`` lists
+        at most ``max_results`` added and removed symbols a page, and the same
+        ``next_cursor`` reads the next page of both lists.
+
+        On a ``serve --multi-repo`` server a call naming no pull request, head or
+        changed files is refused, since the checkout has no working tree to diff.
     """
     root = _resolve_repo_root(repo_root)
+    _require_a_named_change(changed_files, pr, head)
     return await _offload(
         "detect_changes_tool",
         lambda: detect_changes_func(
             base=base, changed_files=changed_files,
             include_source=include_source, max_depth=max_depth,
             repo_root=root, detail_level=detail_level,
-            max_results=max_results, max_flows=max_flows,
+            max_results=max_results, max_flows=max_flows, cursor=cursor,
+            pr=pr, head=head,
         ),
         root,
         timeout_hint=_DETECT_CHANGES_TIMEOUT_HINT,
@@ -1174,6 +1283,7 @@ async def refactor_tool(
     repo_root: Optional[str] = None,
     max_results: int = 50,
     detail_level: str = "standard",
+    cursor: Optional[str] = None,
 ) -> dict:
     """Graph-powered refactoring operations.
 
@@ -1201,6 +1311,14 @@ async def refactor_tool(
             Default: 50.
         detail_level: "standard" for full records, "minimal" for
             identifying fields only. Default: standard.
+        cursor: The ``next_cursor`` of a previous reply, to read the next
+            page of the same mode and arguments. Omit it for the first page.
+            Paging only reads: a later rename page applies nothing and issues
+            no new refactor_id; apply with the id from the first page.
+
+    Returns:
+        Mode-specific results with ``total`` and ``truncated``. When the list
+        was cut, ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1208,7 +1326,7 @@ async def refactor_tool(
         lambda: refactor_func(
             mode=mode, old_name=old_name, new_name=new_name,
             kind=kind, file_pattern=file_pattern, repo_root=root,
-            max_results=max_results, detail_level=detail_level,
+            max_results=max_results, detail_level=detail_level, cursor=cursor,
         ),
         root,
     )
@@ -1502,6 +1620,7 @@ async def traverse_graph_tool(
     depth: int = 3,
     token_budget: int = 2000,
     repo_root: Optional[str] = None,
+    cursor: Optional[str] = None,
 ) -> dict:
     """BFS/DFS traversal from best-matching node with token budget.
 
@@ -1517,6 +1636,10 @@ async def traverse_graph_tool(
         token_budget: Approximate token limit for results, at most 10000.
             The walk stops when it runs out. Default: 2000.
         repo_root: Repository root path. Auto-detected if omitted.
+        cursor: The ``next_cursor`` of a previous reply, to read the next
+            ``token_budget`` of the same walk. Omit it for the first page.
+
+    Returns the traversal; ``next_cursor`` is present when the walk was cut.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1524,7 +1647,7 @@ async def traverse_graph_tool(
         lambda: traverse_graph_func(
             query=query, mode=mode, depth=depth,
             token_budget=token_budget,
-            repo_root=root or "",
+            repo_root=root or "", cursor=cursor,
         ),
         root,
     )
@@ -1587,6 +1710,109 @@ async def cross_repo_search_tool(
         ),
         None,
         provenance=False,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def cross_repo_requests_tool(
+    repos: Optional[list[str]] = None,
+    service: Optional[str] = None,
+    route: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 20,
+    max_results: int = 50,
+    origin: Optional[str] = None,
+    cursor: Optional[str] = None,
+) -> dict:
+    """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
+
+    Lists the Feign client calls of the registered repos and, for each, the
+    controller endpoint in the repo its service name points at, found by HTTP
+    method and route. Read-only; the join is computed on every call from each
+    repo's stored endpoint index (or its graph when it has none).
+    A call is ``matched`` (one endpoint), ``ambiguous`` (several),
+    ``case_mismatch`` (no exact route, but one that differs only in letter
+    case: a low-confidence lead, not a match), ``no_route_match``,
+    ``no_target_repo`` (no registered repo carries the service name) or
+    ``unmatchable`` with a ``reason`` (placeholder service name, absolute
+    ``url``, ``URI`` argument, or a route piece that could not be resolved).
+    Nothing is guessed.
+    A JavaScript call with no other match may still be ``matched`` at low
+    confidence (reason ``variable_matches_literal``) when its variable stands
+    against a fixed server segment.
+
+    JavaScript and TypeScript calls (axios, fetch, jQuery, Ember ajax and Ember
+    Data) have no service name and are matched by method and route against the
+    endpoints of every other registered repo; each row has an ``origin`` of
+    ``feign`` or ``js``. A match through a catch-all route such as a Next.js
+    ``[...path]`` proxy, or through a naming convention, has ``confidence``
+    ``low``.
+
+    Args:
+        repos: Optional aliases or folder names of the client repos to list
+            calls from. Default: every registered repo. Targets are always
+            looked up across the whole registry. Names matching no entry come
+            back in ``unknown``; names matching several are in ``ambiguous``.
+        service: Only calls to this Feign service name (exact).
+        route: Only calls whose route equals this or lies below it.
+        status: Only rows with this status.
+        limit: Maximum rows per client repo. Default: 20.
+        max_results: Maximum rows overall, at most 100. ``counts`` and
+            ``total`` cover every call that passed the filters. Default: 50.
+        origin: Only ``feign`` or only ``js`` calls. Default: both.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of
+            the same query. Omit it for the first page.
+    """
+    return await _offload(
+        "cross_repo_requests_tool",
+        lambda: cross_repo_requests_func(
+            repos=repos, service=service, route=route, status=status,
+            limit=limit, max_results=max_results, origin=origin, cursor=cursor,
+        ),
+        None,
+        provenance=False,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def pr_blast_radius_tool(
+    pr: Optional[int] = None,
+    head: Optional[str] = None,
+    base: Optional[str] = None,
+    depth: int = 3,
+    include_external: bool = True,
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Blast radius of a pull request, read from its changed files and the base graph.
+
+    The graph holds the default branch, so a pull request's new files are not in it. This
+    reads only the files the pull request touches, straight from Git, parses them in memory
+    and compares them with the base graph. Nothing is written to the graph. It reports, per
+    file, the symbols changed, added and removed and what reaches the changed ones; the
+    routes the pull request adds or removes; the endpoints affected; the client calls in
+    the other registered repos that reach them; migrations the pull request adds; and
+    changed members no test names. A stacked pull request should pass its parent branch as
+    ``base``; the result then also says how many files differ from the default branch.
+
+    Args:
+        pr: A pull request number. The server fetches ``refs/pull/<pr>/head`` from the
+            checkout's ``origin`` into a temporary repository that is removed afterwards.
+        head: A ref or commit to read the new files from, when no ``pr`` is given.
+            A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
+        base: The branch the pull request merges into. Default: the remote's default branch.
+        depth: Hops the reach walk follows from a changed symbol. Default: 3, at most 6.
+        include_external: Join the affected endpoints to the client calls of the other
+            registered repos. Default: True.
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    root = _resolve_repo_root(repo_root)
+    return await _offload(
+        "pr_blast_radius_tool",
+        lambda: pr_blast_radius_func(
+            pr=pr, head=head, base=base, depth=depth,
+            include_external=include_external, repo_root=root,
+        ),
+        root,
     )
 
 

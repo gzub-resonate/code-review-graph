@@ -272,6 +272,22 @@ def _run_python_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _flows_dirty(store: GraphStore) -> bool:
+    from .flows import flows_dirty
+    return flows_dirty(store)
+
+
+def _run_scala_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Scala import and call resolver, swallowing any failure so
+    it never fails a build."""
+    try:
+        from .scala_resolver import resolve_scala_calls
+        return resolve_scala_calls(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Scala resolver failed: %s", exc)
+        return None
+
+
 def _run_rescript_resolver(store: GraphStore) -> Optional[dict]:
     """Run the ReScript cross-module resolver, swallowing any failure so
     build never fails because of it. Returns stats or None on error.
@@ -308,6 +324,16 @@ def _run_aop_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_ember_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Ember convention resolver without failing a build."""
+    try:
+        from .ember_resolver import resolve_ember
+        return resolve_ember(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Ember resolver failed: %s", exc)
+        return None
+
+
 def _run_spring_event_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Spring application-event resolver without failing a build."""
     try:
@@ -340,6 +366,16 @@ def _run_hcl_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_asl_resolver(store: GraphStore) -> Optional[dict]:
+    """Link Step Functions states to the Terraform they run without failing a build."""
+    try:
+        from .asl_resolver import resolve_asl_local_targets
+        return resolve_asl_local_targets(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Step Functions resolver failed: %s", exc)
+        return None
+
+
 def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
     """Resolve static/scoped ``Class::method`` calls without failing a build."""
     try:
@@ -347,6 +383,16 @@ def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
         return resolve_scoped_calls(store, repo_root)
     except Exception as exc:  # noqa: BLE001 - best-effort post-pass
         logger.warning("Scoped call resolver failed: %s", exc)
+        return None
+
+
+def _run_endpoint_index(store: GraphStore, repo_root: Path) -> Optional[dict]:
+    """Store the repository's HTTP endpoints for the cross-repo tool, without failing a build."""
+    try:
+        from .endpoint_index import build_endpoint_index
+        return build_endpoint_index(store, repo_root)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Endpoint index failed: %s", exc)
         return None
 
 
@@ -2837,7 +2883,9 @@ def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
 
 # These languages are parsed by bounded fallbacks or config readers, so no
 # grammar package is loaded for them and probing one only costs a subprocess.
-_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties"})
+_NO_GRAMMAR_LANGUAGES = frozenset({
+    "rescript", "vbnet", "yaml", "properties", "handlebars",
+})
 
 
 def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
@@ -2864,6 +2912,8 @@ def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
             grammars.update(("javascript", "typescript", "html"))
         elif lang == "blade":
             grammars.update(("php", "html"))
+        elif lang == "asl":
+            grammars.add("json")
         elif lang == "c" and suffix == ".h":
             grammars.update(("c", "cpp"))
         elif lang in _NO_GRAMMAR_LANGUAGES:
@@ -3113,13 +3163,17 @@ def full_build(
     # Post-processing cannot redo these, so they run while the marker still
     # says in progress: a process killed here gets a full rebuild.
     python_stats = _run_python_resolver(store)
+    scala_stats = _run_scala_resolver(store)
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
     aop_stats = _run_aop_resolver(store)
     spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
+    ember_stats = _run_ember_resolver(store)
+    _run_asl_resolver(store)
     scoped_stats = _run_scoped_resolver(store, repo_root)
+    _run_endpoint_index(store, repo_root)
     jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
     _relink_stored_edges(store, repo_root, followed_dirs)
     _refresh_target_resolution(store)
@@ -3141,12 +3195,14 @@ def full_build(
         "total_edges": total_edges,
         "errors": errors,
         "python_resolution": python_stats,
+        "scala_resolution": scala_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
+        "ember_resolution": ember_stats,
         "scoped_resolution": scoped_stats,
         "jedi_enrichment": jedi_stats,
     }
@@ -3231,6 +3287,7 @@ def incremental_update(
             "errors": rebuilt["errors"],
             "identity_rebuild": True,
             "python_resolution": rebuilt["python_resolution"],
+            "scala_resolution": rebuilt["scala_resolution"],
             "rescript_resolution": rebuilt["rescript_resolution"],
             "spring_resolution": rebuilt["spring_resolution"],
             "event_resolution": rebuilt["event_resolution"],
@@ -3615,6 +3672,11 @@ def incremental_update(
     )
     python_stats = _run_python_resolver(store) if python_changed else None
 
+    scala_changed = has_graph_changes and any(
+        path.endswith(".scala") for path in candidate_paths
+    )
+    scala_stats = _run_scala_resolver(store) if scala_changed else None
+
     rescript_changed = has_graph_changes and any(
         rp.endswith((".res", ".resi")) for rp in all_files
     )
@@ -3638,6 +3700,17 @@ def incremental_update(
         rp.endswith((".tf", ".hcl")) for rp in all_files
     )
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
+    # Ember binds by module name across files, so any script or template change
+    # (including a deletion that only surfaces through reconciliation) reruns it.
+    ember_changed = has_graph_changes and any(
+        path.endswith((".js", ".ts", ".gjs", ".gts", ".hbs", ".mjs", ".cjs"))
+        for path in candidate_paths
+    )
+    ember_stats = _run_ember_resolver(store) if ember_changed else None
+    if has_graph_changes and any(
+        rp.endswith((".tf", ".hcl", ".asl", ".asl.json")) for rp in all_files
+    ):
+        _run_asl_resolver(store)
     # Project-only edits can rebind C# calls without reparsing a source file,
     # so a project file runs the resolver even when no source was stored.
     scoped_changed = any(
@@ -3646,6 +3719,8 @@ def incremental_update(
         for rp in candidate_paths
     )
     scoped_stats = _run_scoped_resolver(store, repo_root) if scoped_changed else None
+    if has_graph_changes:
+        _run_endpoint_index(store, repo_root)
     reparsed_py = [p for p in reparsed_paths if p.endswith(".py")]
     jedi_stats = (
         _run_jedi_enrichment(store, repo_root, files=reparsed_py, enrich=enrich)
@@ -3694,12 +3769,14 @@ def incremental_update(
         "errors": errors,
         "freshness_advanced": freshness_advanced,
         "python_resolution": python_stats,
+        "scala_resolution": scala_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
+        "ember_resolution": ember_stats,
         "scoped_resolution": scoped_stats,
         "jedi_enrichment": jedi_stats,
         **({"identity_rebuild": True} if csharp_upgrade else {}),
@@ -4650,6 +4727,7 @@ class _WatchSupervisor:
             "failed_paths": self.unwatched_paths,
             "phase": phase,
         }
+        temporary: Path | None = None
         try:
             self._health_path.parent.mkdir(parents=True, exist_ok=True)
             # Unique per writer, not per process: two supervisors in one
@@ -4660,6 +4738,11 @@ class _WatchSupervisor:
             os.replace(temporary, self._health_path)
         except OSError as exc:
             logger.debug("Could not write watcher health to %s: %s", self._health_path, exc)
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return
         self._last_health_write = now
         self._last_health_state = state
@@ -5023,7 +5106,7 @@ def _create_watch_handler(
                         files_updated > 0
                         # A project file change parses nothing but can rebind
                         # C# calls in unchanged files; the binder marks flows.
-                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                        or (changed_files and _flows_dirty(store))
                     ):
                         postprocess_result = on_files_updated(store)
                         _raise_watch_postprocess_warnings(postprocess_result)

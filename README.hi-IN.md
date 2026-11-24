@@ -237,11 +237,13 @@ code-review-graph build              # once: new file types and fixes reach only
   <img src="diagrams/diagram9_language_coverage.png" alt="श्रेणी के अनुसार भाषा कवरेज: वेब, बैकएंड, सिस्टम्स, मोबाइल, स्क्रिप्टिंग, शेल, डोमेन, कॉन्फ़िग और अन्य, साथ में Jupyter और Databricks नोटबुक" width="90%" />
 </p>
 
-पार्सर फ़ंक्शन, क्लास, इम्पोर्ट, कॉल स्थल, इनहेरिटेंस और टेस्ट निकालता है; जहाँ व्याकरण मौजूद है वहाँ Tree-sitter का और बाकी जगह लक्षित फ़ॉलबैक का उपयोग करता है। समर्थित: Python, JavaScript/TypeScript/TSX (`.mjs`, `.cjs`, `.mts` और `.cts` सहित), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, शेल स्क्रिप्ट, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) और dbt मॉडल, Terraform/OpenTofu (`.tf`, और `.hcl` फ़ाइलों के Terraform ब्लॉक; जिस `.hcl` फ़ाइल में कोई Terraform ब्लॉक नहीं, वह सिर्फ़ फ़ाइल नोड रखती है), Ansible YAML (playbook, role, task), Spring Boot ऐप्लिकेशन कॉन्फ़िग (`application.properties`, `application.yml`, `application.yaml` और इनके `application-<profile>` रूप; सिर्फ़ कुंजी नाम और मान के प्रकार, मान कभी नहीं), मान के बिना सामान्य YAML संरचना (`locales/` जैसे फ़ोल्डरों की अनुवाद फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), XSLT स्टाइलशीट (`.xsl`, `.xslt`), मान के बिना JSON संरचना (`.json`; अनुवाद, टेस्ट, docs, उदाहरण और डेटा फ़ाइलें सिर्फ़ फ़ाइल नोड रखती हैं, और lock फ़ाइलें छोड़ दी जाती हैं), Vue/Svelte SFC, HTML पेज (`.html`, `.htm`; इनलाइन स्क्रिप्ट, और id वाले `div`, `section` तथा `article` ब्लॉक `DocSection` नोड के रूप में), Astro फ़ाइलें (TypeScript व्याकरण से पार्स), Jupyter और Databricks नोटबुक (`.ipynb`, साथ में Databricks के `.py` एक्सपोर्ट), Perl XS फ़ाइलें (`.xs`), Robot Framework फ़ाइलें (`.robot`, `.resource`), और Liquid टेम्पलेट (`.liquid`)। अन्य `.properties` फ़ाइलों को स्रोत कोड नहीं माना जाता।
+पार्सर फ़ंक्शन, क्लास, इम्पोर्ट, कॉल स्थल, इनहेरिटेंस और टेस्ट निकालता है; जहाँ व्याकरण मौजूद है वहाँ Tree-sitter का और बाकी जगह लक्षित फ़ॉलबैक का उपयोग करता है। समर्थित: Python, JavaScript/TypeScript/TSX (`.mjs`, `.cjs`, `.mts` और `.cts` सहित), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, शेल स्क्रिप्ट, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) और dbt मॉडल, Terraform/OpenTofu (`.tf`, और `.hcl` फ़ाइलों के Terraform ब्लॉक; जिस `.hcl` फ़ाइल में कोई Terraform ब्लॉक नहीं, वह सिर्फ़ फ़ाइल नोड रखती है), Ansible YAML (playbook, role, task), Spring Boot ऐप्लिकेशन कॉन्फ़िग (`application.properties`, `application.yml`, `application.yaml` और इनके `application-<profile>` रूप; सिर्फ़ कुंजी नाम और मान के प्रकार, मान कभी नहीं), मान के बिना सामान्य YAML संरचना (`locales/` जैसे फ़ोल्डरों की अनुवाद फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), XSLT स्टाइलशीट (`.xsl`, `.xslt`), मान के बिना JSON संरचना (`.json`; अनुवाद, टेस्ट, docs, उदाहरण और डेटा फ़ाइलें सिर्फ़ फ़ाइल नोड रखती हैं, और lock फ़ाइलें छोड़ दी जाती हैं), Vue/Svelte SFC, HTML पेज (`.html`, `.htm`; इनलाइन स्क्रिप्ट, और id वाले `div`, `section` तथा `article` ब्लॉक `DocSection` नोड के रूप में), Astro फ़ाइलें (TypeScript व्याकरण से पार्स), Jupyter और Databricks नोटबुक (`.ipynb`, साथ में Databricks के `.py` एक्सपोर्ट), Perl XS फ़ाइलें (`.xs`), Robot Framework फ़ाइलें (`.robot`, `.resource`), AWS Step Functions स्टेट मशीन (`.asl.json`, `.asl`; केवल स्टेट और ट्रांज़िशन, पैरामीटर या मान कभी नहीं), Liquid टेम्पलेट (`.liquid`) और Ember Handlebars टेम्पलेट (`.hbs`)। अन्य `.properties` फ़ाइलों को स्रोत कोड नहीं माना जाता। Dockerfile (`Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile`; केवल स्टेज तथा `FROM` और `COPY --from` की इमेज), GitHub Actions वर्कफ़्लो (केवल `uses:` संदर्भ) और Terragrunt `.hcl` फ़ाइलें (केवल `source`, `include`, `dependency`) `external:` लक्ष्यों के संदर्भ के रूप में इंडेक्स होती हैं, उनके मान कभी संग्रहीत नहीं होते।
 
 PHP प्रोजेक्ट्स को रिपॉज़िटरी तक सीमित Composer PSR-4 समाधान, Blade टेम्पलेट संदर्भ, और जब स्रोत में स्पष्ट फ़्रेमवर्क इम्पोर्ट, मॉडल इनहेरिटेंस तथा रिसीवर का प्रमाण दिखता है तब Laravel Route और Eloquent एज भी मिलते हैं। `routes/*.php` में स्थिर Laravel रूट Endpoint नोड और कंट्रोलर तक HANDLES एज बनाते हैं, जिनमें स्थिर (literal) ग्रुप प्रीफ़िक्स भी शामिल हैं।
 
-Java प्रोजेक्ट्स को Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस से लक्ष्य तक के एज, और Temporal वर्कफ़्लो तथा ऐक्टिविटी एज मिलते हैं। हर रिज़ॉल्वर पार्स के बाद चलता है और उसे इंजेक्ट किया गया फ़ील्ड, प्रकाशित इवेंट या वर्कफ़्लो स्टब रिपॉज़िटरी में दिखाई देना चाहिए।
+Java प्रोजेक्ट्स को Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, OpenFeign क्लाइंट रिक्वेस्ट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस से लक्ष्य तक के एज, और Temporal वर्कफ़्लो तथा ऐक्टिविटी एज मिलते हैं। हर रिज़ॉल्वर पार्स के बाद चलता है और उसे इंजेक्ट किया गया फ़ील्ड, प्रकाशित इवेंट या वर्कफ़्लो स्टब रिपॉज़िटरी में दिखाई देना चाहिए।
+
+Ember.js प्रोजेक्ट्स को परंपरा-आधारित रेज़ोल्यूशन मिलता है: हर तरह से लिखे गए `@service` और `service()` इंजेक्शन (`this.get('x')` कॉल सहित) सर्विस फ़ाइल से, `store.findRecord('post')` और `belongsTo('post')` मॉडल से, `.hbs` टेम्पलेट में कॉम्पोनेंट, हेल्पर और मॉडिफ़ायर के इन्वोकेशन उनकी फ़ाइलों से, `<app>/...` इम्पोर्ट उस फ़ाइल से जिसका वे नाम लेते हैं, और `router.js` के रूट उन रूट, कंट्रोलर और टेम्पलेट से जुड़ते हैं जो उन्हें संभालते हैं। रेज़ॉल्वर पार्स के बाद चलता है, केवल ग्राफ़ पढ़ता है, और टेम्पलेट का टेक्स्ट या लिटरल मान कभी स्टोर नहीं करता; विवरण के लिए [docs/EMBER.md](docs/EMBER.md) देखें।
 
 </details>
 
@@ -415,7 +417,9 @@ jobs:
 | **इंक्रीमेंटल अपडेट** | सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका हैश बदला है। लगभग 3,000 फ़ाइलों वाली रिपॉज़िटरी में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड लेता है ([मापा गया](docs/REPRODUCING.md#incremental-update-latency))। |
 | **भाषा और नोटबुक समर्थन** | ऊपर [भाषा कवरेज](#भाषा-कवरेज-और-नोटबुक) देखें। |
 | **फ़्रेमवर्क-सचेत PHP पार्सिंग** | रिपॉज़िटरी तक सीमित Composer PSR-4 इम्पोर्ट, Blade टेम्पलेट संदर्भ, प्रमाण पर आधारित Laravel Route-से-कंट्रोलर और Eloquent संबंध एज |
-| **फ़्रेमवर्क-सचेत Java पार्सिंग** | Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस एज, Temporal वर्कफ़्लो तथा ऐक्टिविटी एज, और मान के बिना इंडेक्स होने वाली Spring Boot कॉन्फ़िग कुंजियाँ |
+| **फ़्रेमवर्क-सचेत Java पार्सिंग** | Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, OpenFeign क्लाइंट रिक्वेस्ट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस एज, Temporal वर्कफ़्लो तथा ऐक्टिविटी एज, और मान के बिना इंडेक्स होने वाली Spring Boot कॉन्फ़िग कुंजियाँ |
+| **फ़्रेमवर्क-सचेत Ember पार्सिंग** | Ember नामकरण परंपरा से सर्विस और कंट्रोलर इंजेक्शन, Ember Data मॉडल नाम, टेम्पलेट से कॉम्पोनेंट संदर्भ, `<app>/...` मॉड्यूल इम्पोर्ट और `router.js` रूट जुड़ते हैं; टेम्पलेट का टेक्स्ट या मान स्टोर नहीं होते |
+| **इन्फ्रास्ट्रक्चर संदर्भ** | GitHub Actions के `uses:`, Dockerfile के `FROM` और `COPY --from`, तथा Terragrunt के `source`, `include` और `dependency` `external:` लक्ष्यों की ओर जाने वाले एज बन जाते हैं, जिससे पता चलता है कि कौन-सी फ़ाइलें किसी साझा वर्कफ़्लो, बेस इमेज या मॉड्यूल का उपयोग करती हैं; इन फ़ाइलों का कोई अन्य मान संग्रहीत नहीं होता, और URL के क्रेडेंशियल तथा ref के अलावा क्वेरी स्ट्रिंग हटा दी जाती हैं |
 | **प्रभाव क्षेत्र विश्लेषण** | किसी बदलाव से कौन-से फ़ंक्शन, क्लास और फ़ाइलें प्रभावित हो सकती हैं |
 | **स्वतः अपडेट हुक** | एडिटर हुक, git हुक (हर कमिट से पहले, और checkout, merge तथा rebase के बाद) और watch मोड काम करते-करते ग्राफ़ अद्यतन करते हैं |
 | **सिमेंटिक खोज** | वैकल्पिक वेक्टर एम्बेडिंग: sentence-transformers, Google Gemini, MiniMax, Voyage AI, या कोई भी OpenAI-संगत एंडपॉइंट |
@@ -594,7 +598,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 MCP टूल</strong></summary>
+<summary><strong>32 MCP टूल</strong></summary>
 <br>
 
 ग्राफ़ बन जाने के बाद असिस्टेंट इनका उपयोग करता है। जो 25 टूल सिर्फ़ पढ़ते हैं, उन पर `readOnlyHint: true` लगा है, इसलिए क्लाइंट उन्हें बिना पूछे चला सकता है; लिखने वाले पाँच टूल (`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`) पर यह नहीं लगा।
@@ -631,6 +635,8 @@ alias = "project-b"
 | `get_wiki_page_tool` | एक विकी पृष्ठ |
 | `list_repos_tool` | दर्ज रिपॉज़िटरी |
 | `cross_repo_search_tool` | दर्ज रिपॉज़िटरी में खोज; `repos` से खोज को एक उपसमूह तक सीमित किया जा सकता है |
+| `cross_repo_requests_tool` | Spring Feign कॉल को अन्य दर्ज रिपॉज़िटरी में उनके संबंधित एंडपॉइंट से जोड़ता है |
+| `pr_blast_radius_tool` | पुल रिक्वेस्ट की बदली गई फ़ाइलों (नई फ़ाइलों सहित) को Git से पढ़कर आधार ग्राफ़ के ज़रिए प्रभाव क्षेत्र निकालता है |
 
 **MCP प्रॉम्प्ट** (5 वर्कफ़्लो टेम्पलेट):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
@@ -742,7 +748,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### टूल फ़िल्टरिंग
 
-CRG डिफ़ॉल्ट रूप से 30 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
+CRG डिफ़ॉल्ट रूप से 32 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
 
 ```bash
 # CLI flag

@@ -1189,3 +1189,18 @@ class TestCommunityHelpersDirect:
             assert len(leiden_res) >= 1
         else:
             assert leiden_res == []
+
+
+def test_community_name_ties_do_not_depend_on_member_order() -> None:
+    """Equal counts are broken by name, so reversing the members names it the same."""
+    from types import SimpleNamespace
+
+    from code_review_graph.communities import _extract_file_prefix, _extract_keywords
+
+    members = [
+        SimpleNamespace(kind="Function", name=name)
+        for name in ("alphaThing", "betaThing", "gammaWidget", "deltaWidget")
+    ]
+    assert _extract_keywords(members) == _extract_keywords(list(reversed(members)))
+    paths = ["/r/b/x.js", "/r/a/y.js"]
+    assert _extract_file_prefix(paths) == _extract_file_prefix(list(reversed(paths))) == "a"

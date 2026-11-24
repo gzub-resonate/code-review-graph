@@ -2327,6 +2327,83 @@ class TestScalaParsing:
         calls = [e for e in self.edges if e.kind == "CALLS"]
         assert len(calls) >= 3
 
+    def _parse(self, source: str):
+        return self.parser.parse_bytes(Path("Demo.scala"), source.encode())
+
+    def test_records_package_and_type_kind(self):
+        classes = {n.name: n.extra for n in self.nodes if n.kind == "Class"}
+        kinds = [n.extra["scala_kind"] for n in self.nodes if n.name == "UserService"]
+        assert kinds == ["class", "object"]  # the class and its companion
+        assert classes["Repository"]["scala_kind"] == "trait"
+        assert classes["User"]["scala_kind"] == "case_class"
+        assert classes["Color"]["scala_kind"] == "enum"
+        assert classes["UserService"]["scala_package"] == "com.example.auth"
+
+    def test_records_the_parents_as_written(self):
+        classes = {n.name: n.extra for n in self.nodes if n.kind == "Class"}
+        assert classes["InMemoryRepo"]["scala_parents"] == ["Repository", "Serializable"]
+
+    def test_chained_and_braced_package_clauses(self):
+        nodes, _ = self._parse("package a\npackage b\nclass One\n")
+        one = next(n.extra for n in nodes if n.name == "One")
+        assert one["scala_package"] == "a.b"
+        assert one["scala_package_scopes"] == ["a.b", "a"]
+        nodes, _ = self._parse("package c { package d { object Two } }\n")
+        two = next(n.extra for n in nodes if n.name == "Two")
+        assert two["scala_package"] == "c.d"
+        assert two["scala_package_scopes"] == ["c.d", "c"]
+        assert two["scala_kind"] == "object"
+
+    def test_renamed_hidden_wildcard_and_given_imports(self):
+        _, edges = self._parse(
+            "import x.{A, B => C, D => _, _}\n"
+            "import x.y.{E as F}\n"
+            "import x.given\n"
+            "import x.z.*\n"
+        )
+        imports = [(e.target, e.extra) for e in edges if e.kind == "IMPORTS_FROM"]
+        assert [t for t, _ in imports] == [
+            "x.A", "x.B", "x.*", "x.y.E", "x.*", "x.z.*",
+        ]
+        assert imports[1][1] == {"scala_import": "x.B", "scala_alias": "C"}
+        assert imports[2][1] == {"scala_import": "x", "scala_wildcard": True}
+        assert imports[3][1]["scala_alias"] == "F"
+        assert imports[4][1]["scala_given"] is True
+
+    def test_call_extra_records_form_receiver_and_declared_type(self):
+        _, edges = self._parse(
+            "class K(val p: Foo) {\n"
+            "  def f(a: Bar, b: List[Baz]): Unit = {\n"
+            "    val c = new Qux(1)\n"
+            "    a.go(); p.go(); c.go(); b.go(); Obj.run(1, 2); helper(); new Zed\n"
+            "    items.map(x => x.go())\n"
+            "    val Obj2 = other; Obj2.run()\n"
+            "  }\n"
+            "}\n"
+        )
+        calls = [e.extra for e in edges if e.kind == "CALLS"]
+        by = {(c["scala_name"], c.get("scala_receiver")): c for c in calls}
+        assert by[("go", "a")]["scala_receiver_type"] == "Bar"
+        assert by[("go", "p")]["scala_receiver_type"] == "Foo"
+        assert by[("go", "c")]["scala_receiver_new"] == "Qux"
+        # ``List[Baz]`` is a List: the element type says nothing about ``b``.
+        assert by[("go", "b")]["scala_receiver_type"] == "List"
+        assert by[("run", "Obj")]["scala_argc"] == 2
+        assert "scala_receiver_local" not in by[("run", "Obj")]
+        assert by[("helper", None)]["scala_form"] == "bare"
+        assert by[("go", "x")]["scala_receiver_local"] is True
+        assert "scala_receiver_type" not in by[("go", "x")]
+        assert by[("run", "Obj2")]["scala_receiver_local"] is True
+        assert {c["scala_form"] for c in calls if c["scala_name"] == "Zed"} == {"new"}
+
+    def test_private_members_are_marked(self):
+        nodes, _ = self._parse(
+            "class K {\n  private def a() = 1\n  private[this] def b() = 1\n"
+            "  private[pkg] def c() = 1\n  def d() = 1\n}\n"
+        )
+        marked = {n.name: n.extra.get("scala_private") for n in nodes if n.kind == "Function"}
+        assert marked == {"a": True, "b": True, "c": None, "d": None}
+
 
 class TestSolidityParsing:
     def setup_method(self):
@@ -6213,3 +6290,207 @@ class TestAnsibleMetaParsing:
     def test_depends_on_name_key_collections(self):
         dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
         assert "security.hardening" in dep_targets
+
+
+class TestEmberTemplateParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.path = FIXTURES / "ember" / "classic" / "app" / "templates" / "projects.hbs"
+        self.nodes, self.edges = self.parser.parse_file(self.path)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(self.path) == "handlebars"
+        assert self.parser.detect_language(Path("x.handlebars")) is None
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert file_nodes[0].language == "handlebars"
+
+    def test_invocations_are_imports_with_placeholders(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert targets == {
+            "ember:component:task-card",
+            "ember:invocable:project-link",
+            "ember:modifier:did-render-thing",
+            "ember:invocable:t",
+        }
+
+    def test_no_grammar_is_needed_and_no_extra_nodes_are_made(self):
+        assert [n.kind for n in self.nodes] == ["File"]
+
+
+class TestDockerfileParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.path = FIXTURES / "sample.Dockerfile"
+        self.nodes, self.edges = self.parser.parse_file(self.path)
+        self.file_path = str(self.path)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("Dockerfile")) == "dockerfile"
+        assert self.parser.detect_language(Path("Dockerfile.dev")) == "dockerfile"
+        assert self.parser.detect_language(self.path) == "dockerfile"
+        assert self.parser.detect_language(Path("Containerfile")) == "dockerfile"
+
+    def test_file_node(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "dockerfile"
+
+    def test_finds_stages(self):
+        stages = [n for n in self.nodes if n.kind == "Class"]
+        assert [(s.name, s.line_start) for s in stages] == [
+            ("stage:build", 6),
+            ("stage:test", 15),
+            ("stage:configurable", 18),
+            ("stage:3", 21),
+        ]
+        assert stages[0].extra["base_image"] == "registry.example.com/base/python:3.12"
+        assert stages[2].extra["base_image"] is None  # ARG-based FROM is not resolved
+
+    def test_image_edges(self):
+        images = [
+            (e.target, e.line, e.extra["via"], e.extra["dynamic"])
+            for e in self.edges
+            if e.kind == "IMPORTS_FROM"
+        ]
+        assert images == [
+            ("external:docker-image:registry.example.com/base/python", 6, "from", False),
+            ("external:docker-image:dynamic", 18, "from", True),
+            ("external:docker-image:registry.example.com:5000/base/runtime", 21, "from", False),
+            ("external:docker-image:acme/tool", 24, "copy_from", False),
+        ]
+        runtime = [e for e in self.edges if e.line == 21 and e.kind == "IMPORTS_FROM"][0]
+        assert runtime.extra["tag"] == "1.0"
+        assert runtime.extra["digest"].startswith("sha256:0123")
+
+    def test_stage_dependencies(self):
+        prefix = self.file_path + "::"
+        deps = [
+            (e.source.removeprefix(prefix), e.target.removeprefix(prefix), e.line, e.extra["via"])
+            for e in self.edges
+            if e.kind == "DEPENDS_ON"
+        ]
+        assert deps == [
+            ("stage:test", "stage:build", 15, "from"),
+            ("stage:configurable", "stage:build", 19, "copy_from"),
+            ("stage:3", "stage:build", 22, "copy_from"),
+            ("stage:3", "stage:build", 23, "copy_from"),
+        ]
+
+    def test_values_are_not_indexed(self):
+        dumped = repr(self.nodes) + repr(self.edges)
+        assert "not-a-real-value" not in dumped
+
+
+class TestAslParsing:
+    """Amazon States Language (AWS Step Functions) state machines."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.path = FIXTURES / "sample.asl.json"
+        self.nodes, self.edges = self.parser.parse_file(self.path)
+        self.states = {n.identity_name: n for n in self.nodes if n.kind == "Function"}
+
+    def _flow(self, via=None):
+        return {
+            (e.source.split("::", 1)[1], e.target.split("::", 1)[1], e.extra.get("via"))
+            for e in self.edges
+            if e.kind == "TRANSITIONS_TO" and (via is None or e.extra.get("via") == via)
+        }
+
+    def test_detects_language_by_file_name(self):
+        assert self.parser.detect_language(Path("orders.asl.json")) == "asl"
+        assert self.parser.detect_language(Path("orders.ASL.JSON")) == "asl"
+        assert self.parser.detect_language(Path("orders.asl")) == "asl"
+        assert self.parser.detect_language(Path("orders.json")) == "json"
+        assert self.parser.detect_language(Path("asl.json")) == "json"
+
+    def test_file_and_machine_nodes(self):
+        file_node = next(n for n in self.nodes if n.kind == "File")
+        assert file_node.language == "asl"
+        assert file_node.extra["values_indexed"] is False
+        machine = next(n for n in self.nodes if n.kind == "Class")
+        assert machine.name == "sample"
+        assert machine.extra["state_count"] == 15
+        assert machine.extra["unresolved_transitions"] == 0
+
+    def test_no_generic_json_nodes(self):
+        assert not [n for n in self.nodes if n.kind == "JsonPath"]
+        assert all(n.language == "asl" for n in self.nodes)
+
+    def test_every_state_type_is_found(self):
+        types = {n.extra["state_type"] for n in self.states.values()}
+        assert types == {
+            "Task", "Choice", "Parallel", "Map", "Wait", "Pass", "Succeed", "Fail",
+        }
+
+    def test_start_and_end_flags(self):
+        starts = {n.name for n in self.states.values() if n.extra["is_start"]}
+        assert starts == {"Validate Order", "Reserve Stock", "Notify Customer", "Price Item"}
+        assert self.states["sample/Done"].extra["end"] is True
+        assert self.states["sample/Reject Order"].extra["end"] is True
+        assert self.states["sample/Route Order"].extra["end"] is False
+
+    def test_nested_states_have_unique_qualified_names(self):
+        assert "sample/Fan Out[0]/Reserve Stock" in self.states
+        assert "sample/Fan Out[1]/Notify Customer" in self.states
+        assert "sample/Process Items[map]/Price Item" in self.states
+        qualified = [
+            e.target for e in self.edges if e.kind == "CONTAINS" and "::" in e.target
+        ]
+        assert len(qualified) == len(set(qualified))
+
+    def test_next_default_choice_and_catch_transitions(self):
+        assert ("sample/Validate Order", "sample/Route Order", "next") in self._flow("next")
+        assert ("sample/Route Order", "sample/Fan Out", "default") in self._flow("default")
+        assert self._flow("choice") == {
+            ("sample/Route Order", "sample/Manual Review", "choice"),
+            ("sample/Route Order", "sample/Fan Out", "choice"),
+        }
+        assert self._flow("catch") == {
+            ("sample/Validate Order", "sample/Reject Order", "catch"),
+        }
+
+    def test_parallel_branches_and_map_processor_transitions(self):
+        assert self._flow("branch") == {
+            ("sample/Fan Out", "sample/Fan Out[0]/Reserve Stock", "branch"),
+            ("sample/Fan Out", "sample/Fan Out[1]/Notify Customer", "branch"),
+        }
+        assert self._flow("map") == {
+            ("sample/Process Items", "sample/Process Items[map]/Price Item", "map"),
+        }
+        assert (
+            "sample/Process Items[map]/Pause", "sample/Process Items[map]/Tag Item", "next",
+        ) in self._flow("next")
+
+    def test_task_targets_use_references_edges(self):
+        refs = {
+            e.source.split("::", 1)[1]: (e.target, e.extra["resource_kind"])
+            for e in self.edges
+            if e.kind == "REFERENCES"
+        }
+        assert refs == {
+            "sample/Validate Order": ("external:aws-lambda:validate-order", "lambda"),
+            "sample/Manual Review": ("external:aws-lambda:request-review", "lambda"),
+            "sample/Fan Out[0]/Reserve Stock": ("external:aws-dynamodb:inventory", "dynamodb"),
+            "sample/Fan Out[1]/Notify Customer": ("external:aws-sns:order-events", "sns"),
+            "sample/Start Fulfilment": ("external:aws-states:fulfilment-flow", "states"),
+            "sample/Run Packer": ("external:aws-ecs:packing-cluster", "ecs"),
+        }
+
+    def test_placeholder_and_intrinsic_targets_are_dynamic(self):
+        placeholder = self.states["sample/Process Items[map]/Price Item"].extra
+        assert placeholder["target_dynamic"] is True
+        assert placeholder["target_placeholders"] == ["price_item_arn"]
+        intrinsic = self.states["sample/Notify Dynamic"].extra
+        assert intrinsic["target_dynamic"] is True
+        assert "target_placeholders" not in intrinsic
+        assert not [
+            e for e in self.edges
+            if e.kind == "REFERENCES" and e.source.endswith("/Notify Dynamic")
+        ]
+
+    def test_state_lines_span_the_state_object(self):
+        state = self.states["sample/Done"]
+        assert state.line_start == state.line_end
+        parallel = self.states["sample/Fan Out"]
+        assert parallel.line_end - parallel.line_start > 20

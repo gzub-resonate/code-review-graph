@@ -119,10 +119,10 @@ code-review-graph dead-code --limit 20         # 0, the default, means no limit
 # Read-only graph queries (CLI mirrors of the MCP tools)
 code-review-graph query callers_of <target>    # Takes every query_graph_tool pattern: callers_of,
                                                 #   references_to, callees_of, imports_of, importers_of,
-                                                #   children_of, tests_for, inheritors_of, triggers_of,
-                                                #   triggered_by, publishers_of, listeners_of, advises,
-                                                #   advised_by, handlers_of, endpoints_for, consumers_of,
-                                                #   file_summary, path_to
+                                                #   children_of, tests_for, inheritors_of, next_states_of,
+                                                #   previous_states_of, triggers_of, triggered_by, publishers_of,
+                                                #   listeners_of, advises, advised_by, handlers_of, endpoints_for,
+                                                #   requests_of, requesters_of, consumers_of, file_summary, path_to
 code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
 code-review-graph impact [--files F ...] [--depth N] [--max-results N] [--base REF] [--detail-level compact] [--max-files N]
 code-review-graph search <query> [--kind Function] [--limit N]
@@ -499,6 +499,7 @@ base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard", "minimal", or "compact"
 max_files: int = 25             # Compact-mode display limit (hard ceiling 200)
 resolution: str = "all"          # "all" or "direct" (only calls bound to a node)
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 An impacted node that calls or references the changed code in one hop carries
 `call_site` (`line`, plus `file` only when the call is written outside the node's
@@ -533,15 +534,17 @@ code-review-graph impact --files src/auth.py --detail-level minimal
 #### `query_graph_tool`
 ```
 pattern: str    # callers_of, references_to, callees_of, imports_of, importers_of,
-                # children_of, tests_for, inheritors_of, triggers_of, triggered_by,
-                # publishers_of, listeners_of, advises, advised_by, handlers_of,
-                # endpoints_for, consumers_of, file_summary, path_to
+                # children_of, tests_for, inheritors_of, next_states_of, previous_states_of,
+                # triggers_of, triggered_by, publishers_of, listeners_of, advises, advised_by,
+                # handlers_of, endpoints_for, requests_of, requesters_of, consumers_of,
+                # file_summary, path_to
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
 resolution: str = "all"          # "all", "direct", or "unresolved"
 to: str | None                   # path_to only: the node or file to reach
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the
@@ -553,6 +556,13 @@ sentence says how many. Call sites
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller. Within that order, calls bound to a node come
 before bare-name guesses.
+
+A target written `external:<kind>:<name>`, such as `external:aws-lambda:order-validator`
+or `external:github-actions:actions/checkout`, names code outside the repository. No node
+has that name, so `callers_of`, `references_to` and `importers_of` read the edges that end
+there (calls, references and imports respectively) and list who points at it. A target
+nothing points at gives an empty answer, not `not_found`. The other patterns do not read
+external targets.
 
 A full name that one real symbol has resolves to it, even when tests or test
 helpers share the name; the summary says how many it skipped. When two real
@@ -593,6 +603,7 @@ base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Graph nodes per list (max 100) and edges (max 150)
 max_files: int = 25              # Files listed and given snippets (max 200)
+cursor: str | None               # `context.next_cursor` of the previous reply
 ```
 `changed_files` is ordered by risk score (highest first, per file in
 `context.file_risk`), and both `max_files` and the shared 800-line snippet
@@ -607,6 +618,9 @@ the files whose regions did not all fit. Each list reports its untruncated
 Changed files the graph has no nodes for are listed in `unmatched_files`, and
 when none of the changed files is in the graph, `risk` is `"unknown"`.
 Responses may include estimated `context_savings` metadata.
+Only the risk-ranked `changed_files` are paged (see Paging): each page brings its
+files with their `file_risk` and snippets. `impacted_files`, the `graph` lists and
+`review_guidance` describe the whole change, so they are on the first page only.
 
 #### `traverse_graph_tool`
 ```
@@ -615,6 +629,7 @@ depth: int = 3                  # Clamped to 1-6
 mode: str = "bfs"               # "bfs" or "dfs"
 token_budget: int = 2000        # At most 10000 approximate tokens; the walk stops there
 repo_root: str | None
+cursor: str | None              # next_cursor of the previous reply (see Paging)
 ```
 `truncated` means the budget ran out before the walk did.
 
@@ -631,6 +646,7 @@ detail_level: str = "standard"
 include_source: bool = False     # Attach each hit's source lines
 expand_neighbors: bool = False   # With include_source: also the top hits' callers and callees
 max_source_lines: int = 60       # Lines per snippet (1-60)
+cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
 Search ranks three times what it shows. `total` and `result_count` count the
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
@@ -672,6 +688,7 @@ file_path_pattern: str | None      # File path substring
 limit: int = 50                    # At most 100; at most 25 with detail_level "minimal"
 repo_root: str | None
 detail_level: str = "standard"     # "minimal" gives fewer, smaller rows
+cursor: str | None                 # next_cursor of the previous reply (see Paging)
 ```
 `total` and `result_count` count every match before the cut.
 
@@ -829,6 +846,12 @@ repo_root: str | None
 detail_level: str = "standard"
 max_results: int = 25        # Changed functions, test gaps, changed files (max 100)
 max_flows: int = 20          # Affected flows embedded (max 200)
+cursor: str | None           # `next_cursor` of the previous reply
+pr: int = None               # Score a pull request's files (read from refs/pull/<pr>/head), new files included
+head: str = None             # Or a ref/commit to read the changed files from; base then names the target branch
+                             # Reply gains `pull_request`: commits, symbol totals, and (not in minimal) the added and
+                             # removed names, `max_results` rows a page (max 100), with `symbols_truncated` set
+                             # while rows remain. The same `cursor` reads the next page of functions and symbols
 ```
 Main tool for code review. Maps changed files to affected functions, YAML and JSON
 paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and
@@ -837,6 +860,9 @@ and review priorities.
 Embedded flows carry per-flow metadata only; use `get_affected_flows_tool` for
 step detail. `changed_functions_total`, `test_gaps_total` and `affected_flows_total`
 report the untruncated counts. Responses may include estimated `context_savings` metadata.
+Only `changed_functions` is paged (see Paging); a later page holds just those rows,
+`risk_score` and the totals. The other lists are on the first page and stay bounded by
+`max_results` and `max_flows`, so the first page can be `truncated` without a `next_cursor`.
 
 When the diff only deletes lines, the code around the gap did not change, so it
 is not listed as changed. The old version of the file is read instead: a
@@ -862,9 +888,12 @@ file_pattern: str | None     # (dead_code) File path substring
 repo_root: str | None
 max_results: int = 50        # Edits/symbols/suggestions returned (max 150)
 detail_level: str = "standard"  # "minimal" keeps identifying fields only
+cursor: str | None           # next_cursor of the previous reply (see Paging)
 ```
 Truncating a rename preview truncates only the response. The stored preview
-keeps every edit, so `apply_refactor_tool` applies the full set.
+keeps every edit, so `apply_refactor_tool` applies the full set. Paging a rename
+preview only reads: a later page issues no new `refactor_id` and never applies an
+edit, so apply with the id the first page returned, before it expires.
 
 `old_name` is matched exactly: a name, `Class.method` or a qualified name such as
 `pkg/util.py::helper`. When a bare name belongs to several symbols, the first by
@@ -928,6 +957,198 @@ are capped at 20 entries; `unknown_total` / `ambiguous_total` and
 `unknown_truncated` / `ambiguous_truncated` report the real counts, and the
 summary reports the counts rather than echoing the names.
 
+#### `cross_repo_requests_tool`
+```
+repos: list[str] | None      # Calling repos (aliases or folder names); default: every registered repo
+service: str | None          # Only calls to this Feign service name (exact)
+route: str | None            # Only calls whose route equals this or lies below it
+status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
+limit: int = 20              # Rows per calling repo
+max_results: int = 50        # Rows overall (max 100)
+origin: str | None           # feign | js; default: both
+cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
+```
+
+Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
+call, to the server endpoint it reaches in another registered repository. The join is computed on every call from the
+graphs that already exist, opened read-only. Each repo's side of it (its client calls and its server endpoints, with
+FastAPI and Flask router prefixes already joined) is worked out when its graph is built and kept in the graph's
+`metadata` table under `endpoint_index`, so a call does not re-read every `Endpoint` node. A graph built before that, or
+one whose `Endpoint` rows changed since, is read the old way and gives the same answer; the reply's `endpoint_index`
+field says how many repos came from each (`stored`, `computed`), and an `update` or `build` refreshes a repo's index.
+Each row has the
+calling repo, file and line, the HTTP method, route and service name, a
+`status`, and `candidates` (repo, file, line, method, route; at most five,
+with `candidates_total`).
+
+A page takes up to `limit` rows from each calling repo and keeps the first
+`max_results` of them; `next_cursor` then continues each repo where it stopped,
+so every call can be read. `counts` and `total` always cover every call. A
+cursor is refused if the filters or any of the rows changed since it was made.
+
+How a call is classified:
+
+- `unmatchable`, with a `reason`, when the target cannot be known from the
+  code: `service_unresolved` (the `@FeignClient` name is a `${...}`
+  placeholder or absent), `url_from_argument` (a `java.net.URI` argument
+  receives the request), `url_literal` (the client has a fixed `url`),
+  `route_dynamic` or `placeholder_in_route` (part of the route could not be
+  resolved). These are never guessed.
+- The service name picks the target repository: a registry alias or folder
+  name first, then a name in `repo-aliases.toml`, then a name that differs only
+  in case, `-` versus `_` or repeated separators. That last step must reach
+  exactly one repository. Otherwise the status is `no_target_repo` with
+  `service_not_registered`, `service_name_ambiguous` or `target_unreadable`.
+  Sibling checkouts that share a folder name are all searched.
+- Within the target, an endpoint matches when its HTTP method is the same (an
+  endpoint mapped for every method matches any) and its route is the same
+  after dropping the query string, collapsing repeated slashes, dropping a
+  trailing slash and treating every `{name}` as one wildcard segment. Case is
+  kept. A `{name}` in the call does not match a fixed segment on the server.
+  One endpoint is `matched`, several are `ambiguous`, none is `no_route_match`.
+- A call with no exact match whose route equals a server route once case is
+  ignored is `case_mismatch` (reason `route_differs_by_case`, `confidence`
+  `low`), with those endpoints as `candidates`. It is a lead to check, not a
+  match: a case-sensitive server does not serve it. Only a call that would
+  otherwise be `no_route_match` can become one.
+- For a JavaScript or TypeScript call that still has no match, a `{name}` in the call may
+  stand against a fixed server segment (`/agents/{name}/threads` reaches
+  `/agents/planner/threads`): reason `variable_matches_literal`, `confidence` `low`.
+  The call needs the same segment count, an equal method and at least two segments it
+  spells out, and more than 10 matching server routes is too open to report. Only a
+  call that would otherwise be `no_route_match` can change.
+
+Every row has an `origin`: `feign` for a Spring client method, `js` for a
+JavaScript or TypeScript call. Feign rows are classified exactly as above.
+
+JavaScript and TypeScript calls (`origin: "js"`) have no service name, so they
+are matched by HTTP method and normalised route. A relative URL goes to the
+origin that served the page, so the server endpoints of the caller's own
+repository are searched first (its Next.js `app/api` routes, an Express server
+beside the client); only when they have no match does the search widen to every
+other registered repository. A row has a `client_kind`
+(`axios`, `fetch`, `jquery`, `ember-ajax` or `ember-data`). One matching
+location, or several in one repository (`reason: "several_handlers_in_repo"`,
+for example handlers of one path that differ by `params=`), is `matched`;
+several repositories are `ambiguous` with the candidate repositories; none is
+`no_route_match`. A call
+is `unmatchable` with one of these reasons: `non_literal_url` (a variable or
+computed URL, or a template or concatenation that starts with an unknown
+piece), `absolute_url` (a full `https://...` URL or an absolute `baseURL`),
+`method_dynamic` (the method is not a literal) or `placeholder_in_route`.
+A match carries `confidence: "low"` and `confidence_notes` when it rests on a
+guess: `ember_data_convention` (the route was derived from a model name),
+`receiver_inferred` (an instance imported from another file, recognised by its
+name), `base_url_not_literal`, or `catch_all_route`. A server route that takes
+the rest of the path (a Next.js `[...path]` route, an Express `*`) matches only
+a call with the same HTTP method and a literal prefix that is a whole leading
+path, with at least one more segment (none for `[[...path]]`), and only when no
+exact route fits; a catch-all at the root matches nothing. Its candidate has
+`catch_all: true`.
+
+Python servers are indexed too, so a frontend or another service can reach
+them. FastAPI and Starlette-style routers (`APIRouter`, `FastAPI`) and Flask
+(`Flask`, `Blueprint`) routes are read from `@router.get/post/put/patch/delete/head/options`,
+`@app.api_route(path, methods=[...])` and `@app.route(path, methods=[...])`
+(default `GET`), with Flask `<int:id>` turned into `{id}` and a trailing
+`{name:path}` or `<path:name>` read as a catch-all. A route's full path is the
+prefix of every router above it plus its own path: `APIRouter(prefix=...)`,
+`Blueprint(url_prefix=...)` and the `prefix=` or `url_prefix=` of
+`include_router` and `register_blueprint`, followed across files through
+`import` and `from ... import` (relative ones too). A router mounted twice
+gives a route for each mount. A prefix or path that is not a string literal is
+never guessed: the route is left out. Routes in test, fixture and example
+directories are ignored; class-based Flask views and `add_url_rule` are not
+read.
+
+What the parser records for JavaScript and TypeScript (all of it is a plain
+`Endpoint` node: client ones have `role: "client"` and a `REQUESTS` edge from
+the enclosing function, server ones a `HANDLES` edge from the handler):
+
+- Calls: `axios.get/post/put/patch/delete/head/options(url)`,
+  `axios({method, url})`, `axios.request`, instances from `axios.create`
+  (their `baseURL` is applied only when it is a string literal in the same
+  file, or set by `instance.defaults.baseURL = '...'`), `fetch(url, {method})`,
+  `$.ajax`, `$.getJSON`, `$.get`, `$.post`, and Ember `this.ajax`,
+  `this.ajax.request` and `ajax`. The URL may be a string, a template literal
+  (each `${expr}` becomes `{param}`), a `+` concatenation, or a same-file
+  top-level `const` string; a leading unknown piece is never guessed. A query
+  string glued to the path (`` `/feeds${query}` `` where `query` is
+  `cond ? `?${q}` : ''`) is dropped with the rest of the query, but only when
+  every declaration of that name in the file is a `const` holding an empty or
+  `?...` string; a parameter or any other binding of the same name keeps it a
+  path parameter. A call whose URL cannot be read is recorded as unmatchable
+  only for a certain HTTP client (axios, `$.ajax`, Ember ajax, `fetch`), never
+  for an imported instance. Test files are skipped.
+- Ember Data: a model under `app/models` (or `addon/models`, or a pods
+  `model.js`) becomes `GET /<ns>/<types>`, `GET /<ns>/<types>/{id}`,
+  `POST /<ns>/<types>`, `PUT /<ns>/<types>/{id}` and `DELETE /<ns>/<types>/{id}`,
+  from the literal `namespace` of `adapters/application` and the model's own
+  adapter (which may also set a literal `pathForType`). The edges are
+  `INFERRED` at 0.6. A `RESTAdapter` camelizes the plural (`blogPosts`) and
+  updates with `PUT`; a `JSONAPIAdapter` dasherizes (`blog-posts`) and
+  updates with `PATCH`. A `host` is recorded but not used; `urlFor*` hooks are
+  ignored; a non-literal `namespace` or `pathForType` makes the model
+  unmatchable. Plurals follow the regular rules (`y` to `ies`, `s`/`x`/`z`/`ch`/`sh`
+  to `es`, otherwise `s`) with a short irregular list (`person`, `child`, `man`,
+  `woman`, `mouse`, `foot`, `tooth`, `goose`, `ox`) and uncountables such as
+  `sheep` and `series`; any other irregular noun is wrong. The adapter files are
+  read from disk when the model is parsed, so an adapter edit shows after the
+  model is parsed again. An Ember Data model that extends `Fragment` from
+  `ember-data-model-fragments` is skipped, because a fragment lives inside its
+  owner record and is never requested; a model that only uses `fragment(...)`
+  attributes still is a resource.
+- Servers: Next.js app router `route.ts|js` exports (`GET`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `HEAD`, `OPTIONS`; the path comes from the directory,
+  `[id]` becomes `{id}`, `(group)` and `@slot` directories are dropped,
+  `[...path]` and `[[...path]]` are catch-alls), the pages router under
+  `pages/api` (methods read from `req.method` comparisons, otherwise `ANY`), and
+  `app.get('/x', handler)` style calls in files that load Express, Koa, Fastify,
+  Hono, restify, Hapi, polka or connect (also `router.route('/x').get(...)`
+  and `fastify.route({method, url})`). `:id` becomes `{id}`. `app.use('/prefix',
+  router)` mounting is not followed, so a mounted router's routes are
+  recorded without the prefix. A handler written inline, `app.get('/x', (req,
+  res) => ...)`, becomes a Function node named by where it sits
+  (`handler@L12C20`), so every route has its own handler; the calls in its body
+  belong to it, except those on its first line, which stay with the code that
+  registered the route.
+
+`repos` selects the calling repositories only; targets are always looked up
+across the whole registry. Names that match no entry are returned in
+`unknown`, ambiguous ones in `ambiguous`, as for `cross_repo_search_tool`.
+`counts` and `total` cover every call that passed the filters; `results` is
+capped by `limit` and `max_results`, and `truncated` says so. A repository whose
+graph is missing or unreadable is listed in `unreadable` (with its role,
+`client` or `target`, and a short reason) and does not stop the call.
+
+#### `pr_blast_radius_tool`
+```
+pr: int | None               # Pull request number; the server fetches refs/pull/<pr>/head from origin
+head: str | None             # A ref or commit to read the new files from, when no pr is given
+base: str | None             # The branch the PR merges into; default: the remote's default branch
+depth: int = 3               # Hops the reach walk follows from a changed symbol (max 6)
+include_external: bool = True  # Join affected endpoints to client calls in the other registered repos
+repo_root: str | None        # Repository root; auto-detected
+```
+
+The graph holds the default branch, so a pull request's new files are not in it. This tool reads only the files the
+pull request touches, straight from Git, parses each in memory with the parser a build uses and compares the result with
+the base graph. Nothing is written to the graph. What is fetched goes into a temporary repository that is removed when the call ends, so
+the checkout gains no branch, ref, object or working-tree change.
+
+Per file it reports the symbols **changed** (a symbol the base graph has, overlapped by a changed line), **added** (only the
+new file has it) and **removed** (only the base graph has it), `reached` (what depends on the changed and removed symbols,
+over the same edge kinds the impact radius follows, `depth` hops out; `reached_tests` counts the tests among them
+separately), `same_repo_files` and the changed members no test
+names (`untested`). `contract_changes` lists routes the pull request adds or removes. `endpoints` lists the endpoints it
+adds, removes or reaches, each with `external_callers`; `external_callers` lists the client calls in the other registered
+repos (Feign, JavaScript and TypeScript) that reach them, read from each repo's stored endpoint index. `schema_changes`
+lists the DDL in migration files the pull request adds or changes. `notes` states what the answer rests on: a stacked
+pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow
+clone without a merge base, Python routes whose router prefix sits in a file the pull request does not touch, and files
+that could not be parsed. At most 300 files are parsed per request; lists are capped, with `files_truncated` and
+`external_callers_total` reporting the real size.
+
 ## Result Bounds
 
 Every tool that returns a list is bounded, so one MCP response cannot fill a
@@ -945,12 +1166,15 @@ context window (see #849). The contract is the same everywhere:
 
 `list_flows_tool`, `list_communities_tool`, `get_hub_nodes_tool`,
 `get_bridge_nodes_tool`, `get_surprising_connections_tool`, `get_knowledge_gaps_tool`,
-`get_community_tool`, `get_architecture_overview_tool`, `get_flow_tool` and
-`cross_repo_search_tool` do not stop at their ceiling: when more rows exist the reply carries `next_cursor`, and passing it
-back as `cursor` returns the next page, so the ceiling bounds one reply, not what
-you can read. This follows the cursor pagination the MCP specification defines for
-its list operations (`cursor` in, `nextCursor` out), with the result key spelled in
-snake_case like the other keys here.
+`get_community_tool`, `get_architecture_overview_tool`, `get_flow_tool`,
+`cross_repo_search_tool`, `cross_repo_requests_tool`, `get_impact_radius_tool`,
+`query_graph_tool`, `semantic_search_nodes_tool`, `find_large_functions_tool`,
+`traverse_graph_tool`, `get_review_context_tool`, `detect_changes_tool` and
+`refactor_tool` do not stop at their ceiling: when more rows exist the reply carries
+`next_cursor`, and passing it back as `cursor` returns the next page, so the ceiling
+bounds one reply, not what you can read. This follows the cursor pagination the MCP
+specification defines for its list operations (`cursor` in, `nextCursor` out), with the
+result key spelled in snake_case like the other keys here.
 
 - A reply with no `next_cursor` is the last page. `truncated` is `true` exactly
   when `next_cursor` is present, `total` is always the whole list, and a page after
@@ -962,7 +1186,34 @@ snake_case like the other keys here.
   updated, is refused with an error that says to start over without a cursor.
   Cursors are not signed and hold no state on the server.
 - Ties in a ranking are ordered by a fixed key (flow and community id, a node's
-  qualified name, an edge's endpoints and id), so a page never repeats or skips a row.
+  qualified name, a node's id for `find_large_functions_tool`, an edge's endpoints and
+  id), so a page never repeats or skips a row.
+- A review is computed from a git diff on every call, so the cursors of
+  `get_review_context_tool` and `detect_changes_tool` are also bound to the base,
+  the exact ordered changed-file list, the depth and the detail level, and to the
+  rows they page over. A different diff, base or file list refuses the cursor.
+  `detail_level="minimal"` has no pages. In `get_review_context_tool` the cursor
+  and `offset` are in `context`, next to `truncated`.
+- `refactor_tool` pages the edit list of a rename, the dead-code list and the
+  suggestion list. A cursor is bound to the mode and its arguments (`old_name` and
+  `new_name`, or `kind` and `file_pattern`), so one from another mode is refused.
+- `get_impact_radius_tool` pages one list: `impacted_nodes` in standard mode (page
+  size `max_results`, at most 100; the traversal grows to reach the page) and
+  `impacted_files` in compact mode (page size `max_files`, among the files of the
+  `max_results` nodes traversed). The other lists keep their caps and repeat on
+  every page, and `truncated` stays true while any of them is cut. `minimal`
+  takes no cursor. It is refused when the changed files, depth, resolution or
+  detail level differ.
+- `query_graph_tool` pages rows in the order the graph yields them; `path_to` is a
+  single route and takes no cursor. `results_omitted` counts the rows not in the
+  reply, including earlier pages.
+- `semantic_search_nodes_tool` ranks a window three times `limit` long, and the
+  window sets the ranking, so a cursor reads that window and needs the same
+  `limit`. The cursor also records the ranked order itself, so one made before
+  embeddings were added or the model changed is refused.
+- `traverse_graph_tool` pages the same walk: `token_budget` applies to each page,
+  `next_cursor` is present exactly when `truncated` is true, except that a budget
+  too small for a single node returns neither nodes nor a cursor.
 - Where a reply holds several lists, one cursor moves them together by position:
   `get_knowledge_gaps_tool` shows the same row positions of every category (a category
   with no rows left is empty), `get_architecture_overview_tool` pages the

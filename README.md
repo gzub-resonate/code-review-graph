@@ -237,14 +237,16 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, Config and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) and dbt models, Terraform/OpenTofu (`.tf`, and Terraform blocks in `.hcl` files; an `.hcl` file with no Terraform blocks keeps only a file node), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte SFCs, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`, plus Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) and dbt models, Terraform/OpenTofu (`.tf`, and Terraform blocks in `.hcl` files; an `.hcl` file with no Terraform blocks keeps only a file node), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte SFCs, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`, plus Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), AWS Step Functions state machines (`.asl.json`, `.asl`; states and transitions, never parameters or values), Liquid templates (`.liquid`), and Ember Handlebars templates (`.hbs`). Other `.properties` files are not treated as source code. Dockerfiles (`Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile`; stages, `FROM` and `COPY --from` images only), GitHub Actions workflows (`uses:` references only) and Terragrunt `.hcl` files (`source`, `include`, `dependency` only) are indexed as references to `external:` targets, never as values.
 
 PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references,
 and Laravel Route and Eloquent edges when the source shows explicit framework imports, model
 inheritance and receiver evidence. Static Laravel routes in `routes/*.php` emit Endpoint nodes
 and controller HANDLES edges, including literal group prefixes.
 
-Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice-to-target edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
+Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, OpenFeign client requests, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice-to-target edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
+
+Ember.js projects get convention-based resolution: `@service` and `service()` injection in every spelling (including `this.get('x')` calls) is bound to the service file, `store.findRecord('post')` and `belongsTo('post')` to the model, component, helper and modifier invocations in `.hbs` templates to their files, `<app>/...` imports to the files they name, and `router.js` routes to the route, controller and template that handle them. The resolver runs after the parse, reads only the graph, and never stores template text or literal values; see [docs/EMBER.md](docs/EMBER.md).
 
 </details>
 
@@ -418,7 +420,9 @@ Updates, impact analysis, search, visualisation, CI reviews, refactoring and mul
 | **Incremental updates** | Re-parses only files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5 s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
 | **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above. |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
-| **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
+| **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, OpenFeign client requests, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
+| **Framework-aware Ember parsing** | Service and controller injection, Ember Data model names, template-to-component references, `<app>/...` module imports and `router.js` routes bound by the Ember naming convention, with no template text or values stored |
+| **Infrastructure references** | GitHub Actions `uses:`, Dockerfile `FROM` and `COPY --from`, and Terragrunt `source`, `include` and `dependency` become edges to `external:` targets, so "which files use this shared workflow, base image or module" has an answer; no other value in those files is stored, and URL credentials and query strings other than the ref are dropped |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
 | **Auto-update hooks** | Editor hooks, git hooks (before each commit, after checkout, merge and rebase) and watch mode update the graph as you work |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint |
@@ -597,7 +601,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for th
 </details>
 
 <details>
-<summary><strong>30 MCP tools</strong></summary>
+<summary><strong>32 MCP tools</strong></summary>
 <br>
 
 The assistant uses these once the graph is built. The 25 tools that only read carry `readOnlyHint: true`, so a client can run them without asking; the five that write (`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`) do not.
@@ -634,6 +638,8 @@ The assistant uses these once the graph is built. The 25 tools that only read ca
 | `get_wiki_page_tool` | One wiki page |
 | `list_repos_tool` | Registered repositories |
 | `cross_repo_search_tool` | Search registered repositories; `repos` limits the search to a subset |
+| `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories |
+| `pr_blast_radius_tool` | What a pull request's changed files reach, new files included, read from Git and reached through the base graph |
 
 **MCP prompts** (5 workflow templates):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
@@ -745,7 +751,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### Tool Filtering
 
-CRG exposes 30 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
+CRG exposes 32 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
 
 ```bash
 # CLI flag

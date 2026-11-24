@@ -1,6 +1,6 @@
 """MCP tool definitions for the Code Review Graph server.
 
-Exposes 30 tools (each registered in main.py with a ``_tool`` suffix):
+Exposes 32 tools (each registered in main.py with a ``_tool`` suffix):
 1. build_or_update_graph  - full or incremental build
 2. get_impact_radius      - blast radius from changed files
 3. query_graph            - predefined graph queries
@@ -31,6 +31,7 @@ Exposes 30 tools (each registered in main.py with a ``_tool`` suffix):
 28. traverse_graph        - BFS/DFS traversal from best-matching node
 29. run_postprocess       - flows, communities and FTS for an existing graph
 30. get_minimal_context   - compact task-scoped entry point (call this first)
+31. cross_repo_requests   - join Spring Feign and JS/TS calls to the endpoints they reach
 """
 
 from __future__ import annotations
@@ -84,8 +85,11 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "apply_refactor_func": (".refactor_tools", "apply_refactor_func"),
     "refactor_func": (".refactor_tools", "refactor_func"),
     # registry_tools
+    "cross_repo_requests_func": (".registry_tools", "cross_repo_requests_func"),
     "cross_repo_search_func": (".registry_tools", "cross_repo_search_func"),
     "list_repos_func": (".registry_tools", "list_repos_func"),
+    # pr_tools
+    "pr_blast_radius_func": (".pr_tools", "pr_blast_radius_func"),
     # review
     "detect_changes_func": (".review", "detect_changes_func"),
     "get_affected_flows_func": (".review", "get_affected_flows_func"),
@@ -126,8 +130,11 @@ __all__ = [
     "apply_refactor_func",
     "refactor_func",
     # registry_tools
+    "cross_repo_requests_func",
     "cross_repo_search_func",
     "list_repos_func",
+    # pr_tools
+    "pr_blast_radius_func",
     # review
     "detect_changes_func",
     "get_affected_flows_func",
