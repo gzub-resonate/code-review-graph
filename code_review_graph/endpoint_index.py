@@ -68,6 +68,13 @@ def relative_file(repo_path: Path, file_path: Optional[str]) -> Optional[str]:
         return None
 
 
+def _strings(value: Any) -> Optional[tuple[str, ...]]:
+    """*value* as a tuple of strings, or ``None`` when it is not a list of them."""
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return tuple(value)
+    return None
+
+
 def extract_endpoints(nodes: list[GraphNode], repo_path: Path) -> Endpoints:
     """Client calls and server endpoints held by a repository's ``Endpoint`` nodes.
 
@@ -112,6 +119,7 @@ def extract_endpoints(nodes: list[GraphNode], repo_path: Path) -> Endpoints:
                     method_dynamic=bool(extra.get("method_dynamic")),
                     absolute_url=bool(extra.get("absolute_url")),
                     notes=tuple(notes),
+                    query_keys=_strings(extra.get("query_keys")),
                 ))
                 continue
             if client_tag != "feign":
@@ -134,6 +142,8 @@ def extract_endpoints(nodes: list[GraphNode], repo_path: Path) -> Endpoints:
                 http_method=method, route=route,
                 catch_all=bool(extra.get("catch_all")),
                 optional_catch_all=bool(extra.get("optional_catch_all")),
+                params=_strings(extra.get("params")) or (),
+                headers=_strings(extra.get("headers")) or (),
             ))
     servers.extend(_python_servers(py_routes, py_maps))
     return clients, servers
@@ -201,11 +211,17 @@ def _row(item: Any, skip: tuple[str, ...]) -> dict[str, Any]:
 def _client(row: dict[str, Any]) -> fl.ClientCall:
     fields = dict(row)
     fields["notes"] = tuple(fields.get("notes", ()))
+    if fields.get("query_keys") is not None:
+        fields["query_keys"] = tuple(fields["query_keys"])
     return fl.ClientCall(repo="", **fields)
 
 
 def _server(row: dict[str, Any]) -> fl.ServerEndpoint:
-    return fl.ServerEndpoint(repo="", **row)
+    fields = dict(row)
+    for key in ("params", "headers"):
+        if key in fields:
+            fields[key] = tuple(fields[key])
+    return fl.ServerEndpoint(repo="", **fields)
 
 
 def endpoint_stamp(store: GraphStore) -> str:

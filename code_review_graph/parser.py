@@ -16572,6 +16572,20 @@ class CodeParser:
                     paths.extend(self._java_string_literal_values(argument))
         return paths or [""]
 
+    def _spring_mapping_conditions(self, annotation_node, key: str) -> list[str]:
+        """The ``params`` or ``headers`` conditions of a mapping, as written."""
+        values: list[str] = []
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type != "element_value_pair":
+                    continue
+                named = [part for part in argument.children if part.is_named]
+                if len(named) >= 2 and named[0].text.decode("utf-8", errors="replace") == key:
+                    values.extend(self._java_string_literal_values(named[-1]))
+        return values
+
     def _spring_mapping_methods(self, annotation_node, name: str) -> list[str]:
         """Extract HTTP verbs from composed mappings or RequestMethod values."""
         composed = _SPRING_REQUEST_MAPPINGS[name]
@@ -16661,12 +16675,16 @@ class CodeParser:
                             f"{method_name}@{annotation_name}"
                             f"[{annotation_index}:{emitted}] {method} {route}"
                         )
-                        metadata = {
+                        metadata: dict[str, Any] = {
                             "annotation": annotation_name,
                             "handler": method_name,
                             "http_method": method,
                             "route": route,
                         }
+                        for key in ("params", "headers"):
+                            found_conditions = self._spring_mapping_conditions(annotation, key)
+                            if found_conditions:
+                                metadata[key] = found_conditions
                         seen[(method, route)] = (metadata, path)
                         nodes.append(NodeInfo(
                             kind="Endpoint",

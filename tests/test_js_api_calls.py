@@ -1045,3 +1045,107 @@ def test_strip_comments_is_linear_on_long_blank_runs():
         start = time.perf_counter()
         _strip_comments(text)
         assert time.perf_counter() - start < 2.0
+
+
+# --- confidence of recognised-instance matches, and handlers that differ by params ----------
+
+_ACCOUNTS_CONTROLLER = """
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/v1/admin")
+class AccountAdminController {
+    @GetMapping(path = {"/accounts", "/accounts/"})
+    Object all() { return null; }
+
+    @GetMapping(path = {"/accounts", "/accounts/"}, params = "onlyActiveCampaigns")
+    Object activeCampaigns() { return null; }
+
+    @GetMapping(path = {"/accounts", "/accounts/"}, params = {"onlyActiveAccounts", "!legacy"})
+    Object activeAccounts() { return null; }
+
+    @PostMapping("/connections/permission-ad-account")
+    Object permit() { return null; }
+}
+"""
+
+
+def _admin_world(tmp_path, registry, client_source):
+    make_repo(tmp_path, registry, "api", {"src/AccountAdminController.java": _ACCOUNTS_CONTROLLER})
+    make_repo(tmp_path, registry, "web", {"src/a.ts": client_source})
+    return cross_repo_requests_func(repos=["web"])["results"]
+
+
+def test_spring_params_conditions_are_indexed_on_the_server_endpoint(tmp_path):
+    nodes, _ = parse(tmp_path, "AccountAdminController.java", _ACCOUNTS_CONTROLLER)
+    by_handler = {n.extra["handler"]: n.extra for n in nodes if n.kind == "Endpoint"}
+    assert "params" not in by_handler["all"]
+    assert by_handler["activeCampaigns"]["params"] == ["onlyActiveCampaigns"]
+    assert by_handler["activeAccounts"]["params"] == ["onlyActiveAccounts", "!legacy"]
+
+
+def test_receiver_inferred_exact_literal_single_match_is_high(tmp_path, registry):
+    found = _admin_world(tmp_path, registry, """
+import { apiClient } from '@/lib/client';
+export const permit = () => apiClient.post('/v1/admin/connections/permission-ad-account');
+""")
+    (row,) = found
+    assert row["status"] == "matched" and row["candidates_total"] == 1
+    assert row["confidence"] == "high" and row["confidence_notes"] == ["receiver_inferred"]
+
+
+def test_receiver_inferred_with_a_templated_route_is_medium(tmp_path, registry):
+    make_repo(tmp_path, registry, "api", {"src/C.java": """
+import org.springframework.web.bind.annotation.*;
+@RestController
+class C { @GetMapping("/v3/tags/{id}") Object one() { return null; } }
+"""})
+    make_repo(tmp_path, registry, "web", {"src/a.ts": """
+import { apiClient } from '@/lib/client';
+export const a = (id: string) => apiClient.get(`/v3/tags/${id}`);
+"""})
+    (row,) = cross_repo_requests_func(repos=["web"])["results"]
+    assert row["status"] == "matched"
+    assert row["confidence"] == "medium" and row["confidence_notes"] == ["receiver_inferred"]
+
+
+def test_several_handlers_of_one_path_are_medium(tmp_path, registry):
+    found = _admin_world(tmp_path, registry, """
+import { apiClient } from '@/lib/client';
+export const a = () => apiClient.get('/v1/admin/accounts');
+""")
+    # Several handlers of one path are a match, but never better than medium.
+    (row,) = found
+    assert row["status"] == "matched" and row["reason"] == "several_handlers_in_repo"
+    assert row["candidates_total"] == 3 and row["confidence"] == "medium"
+
+
+def test_handlers_differing_by_params_are_narrowed_by_the_call_query(tmp_path, registry):
+    found = _admin_world(tmp_path, registry, """
+import axios from 'axios';
+export const a = () => axios.get('/v1/admin/accounts?onlyActiveCampaigns=true');
+export const b = () => axios.get('/v1/admin/accounts?onlyActiveAccounts=true&x=1');
+export const c = () => axios.get('/v1/admin/accounts?legacy=1&onlyActiveAccounts=true');
+export const d = (q: string) => axios.get(`/v1/admin/accounts?${q}`);
+""")
+    a, b, c, d = sorted(found, key=lambda r: r["client_line"])
+    assert a["candidates_total"] == 1 and a["candidates"][0]["line"] == 10
+    assert b["candidates_total"] == 1 and b["candidates"][0]["line"] == 13
+    # ``!legacy`` rules that handler out, leaving the one with no condition.
+    assert c["candidates_total"] == 1 and c["candidates"][0]["line"] == 7
+    # A computed query says nothing: every handler stays possible.
+    assert d["candidates_total"] == 3 and d["reason"] == "several_handlers_in_repo"
+
+
+@pytest.mark.parametrize(("folded", "keys"), [
+    ("/a", None),
+    ("/a?", None),
+    ("/a?x=1&y={param}", ("x", "y")),
+    ("/a?x=1{param}", None),
+    ("/a?{param}=1", None),
+    ("/a?x=1#top", ("x",)),
+])
+def test_query_keys_are_known_only_when_the_url_spells_them_out(folded, keys):
+    from code_review_graph.js_api_extract import query_keys_of
+
+    assert query_keys_of(folded) == keys

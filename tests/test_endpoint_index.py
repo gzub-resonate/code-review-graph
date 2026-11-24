@@ -133,7 +133,7 @@ def test_every_flag_of_a_call_survives_the_round_trip():
     call = fl.ClientCall(
         repo="", file="a.ts", line=3, http_method="GET", route="/x/{id}", origin="js",
         client_kind="fetch", route_dynamic=True, method_dynamic=True, absolute_url=True,
-        notes=("receiver_inferred", "base_url_not_literal"),
+        notes=("receiver_inferred", "base_url_not_literal"), query_keys=("a", "b"),
     )
     feign = fl.ClientCall(
         repo="", file=None, line=None, http_method="POST", route="/y", service="orders",
@@ -141,7 +141,7 @@ def test_every_flag_of_a_call_survives_the_round_trip():
     )
     server = fl.ServerEndpoint(
         repo="", file="S.java", line=9, http_method="GET", route="/z/{...p}",
-        catch_all=True, optional_catch_all=True,
+        catch_all=True, optional_catch_all=True, params=("a", "!b"), headers=("X-Id",),
     )
     assert endpoint_index._client(endpoint_index._row(call, ("repo",))) == call
     assert endpoint_index._client(endpoint_index._row(feign, ("repo",))) == feign
