@@ -76,6 +76,7 @@ from .infra_references import (
     reduce_lambda_name,
     reduce_replacement_var,
 )
+from .messaging_edges import emit_messaging_edges
 from .npm_alias_resolver import NpmAliasResolver
 from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
 
@@ -18884,6 +18885,17 @@ class CodeParser:
             if publish_count:
                 method_extra["spring_event_publisher"] = True
                 method_extra["spring_event_publish_count"] = publish_count
+
+        if language in ("java", "python"):
+            # SQS/SNS/RabbitMQ/JMS publish and listen edges (messaging_edges.py).
+            emit_messaging_edges(
+                child,
+                self._qualify(name, file_path, enclosing_class),
+                file_path,
+                language,
+                edges,
+                method_extra,
+            )
 
         # Persist annotations/decorators so consumers can filter on them
         # (e.g. "show me all @Composable functions").  Stored in BOTH

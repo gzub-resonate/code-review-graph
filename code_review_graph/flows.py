@@ -378,6 +378,8 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(Get|Post|Put|Delete|Patch|RequestMapping)Mapping", re.IGNORECASE),
     re.compile(r"(Scheduled|EventListener|Bean|Configuration)", re.IGNORECASE),
     re.compile(r"(KafkaListener|RabbitListener|JmsListener)", re.IGNORECASE),
+    # AWS SQS / RabbitMQ listeners are invoked by their container, not by code.
+    re.compile(r"(SqsListener|RabbitHandler)", re.IGNORECASE),
     # Spring web error handlers, advice classes and bean lifecycle callbacks.
     re.compile(
         r"^(?:[\w.]+\.)?(?:ExceptionHandler|ControllerAdvice|RestControllerAdvice"
