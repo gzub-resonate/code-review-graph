@@ -136,6 +136,67 @@ def _is_bare_name_edge(edge: GraphEdge, known: set[str]) -> bool:
     return edge.kind in TARGET_RESOLUTION_KINDS and edge.target_qualified not in known
 
 
+#: Weight of a call bound to a node by its bare name alone when other non-test
+#: definitions share that name (every ``x.get()`` lands on one ``get``).
+NAME_MATCHED_EDGE_WEIGHT = 0.25
+#: Edge ``extra`` keys: the resolver bound the edge from a bare name, and the parser
+#: saw a receiver whose class is known (that one is real evidence, not a name match).
+_NAME_BOUND_KEY = "bare_call_target"
+_RECEIVER_CLASS_KEY = "receiver_class"
+
+
+def _shared_definition_names(nodes: list[GraphNode]) -> set[str]:
+    """Names that more than one non-test, non-File node defines."""
+    counts = Counter(
+        n.name for n in nodes if n.kind != "File" and not n.is_test and n.kind != "Test"
+    )
+    return {name for name, c in counts.items() if c > 1}
+
+
+def _is_name_matched_edge(
+    edge: GraphEdge, node_map: dict[str, GraphNode], shared: set[str],
+) -> bool:
+    """Is this CALLS edge a resolver's pick by bare name, to a name many symbols share?
+
+    Mirror of :func:`_name_matched_edges_sql`.
+    """
+    if edge.kind != "CALLS" or _NAME_BOUND_KEY not in edge.extra:
+        return False
+    if _RECEIVER_CLASS_KEY in edge.extra:
+        return False
+    target = node_map.get(edge.target_qualified)
+    return target is not None and target.name in shared
+
+
+def _name_matched_edges_sql(store: GraphStore) -> set[tuple[str, str]]:
+    """``(source, target)`` pairs whose every edge is a name-matched call.
+
+    Same predicate as :func:`_is_name_matched_edge`, in SQL so the betweenness graph
+    needs no extra Python pass over the edges.
+    """
+    matched = (
+        "o.kind = 'CALLS' AND o.extra LIKE '%\"bare_call_target\"%' "
+        "AND o.extra NOT LIKE '%\"receiver_class\"%'"
+    )
+    import sqlite3
+
+    try:
+        rows = store._conn.execute(  # noqa: S608  # nosec B608 - constant text
+        "SELECT DISTINCT e.source_qualified, e.target_qualified FROM edges e "
+        "JOIN nodes t ON t.qualified_name = e.target_qualified "
+        "WHERE e.kind = 'CALLS' AND e.extra LIKE '%\"bare_call_target\"%' "
+        "AND e.extra NOT LIKE '%\"receiver_class\"%' "
+        "AND t.name IN (SELECT name FROM nodes WHERE kind != 'File' AND is_test = 0 "
+        "AND kind != 'Test' GROUP BY name HAVING COUNT(*) > 1) "
+        "AND NOT EXISTS (SELECT 1 FROM edges o "
+        "WHERE o.source_qualified = e.source_qualified "
+        f"AND o.target_qualified = e.target_qualified AND NOT ({matched}))"
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    return {(r[0], r[1]) for r in rows}
+
+
 def _traced_edges(
     edges: list[GraphEdge], known: set[str],
 ) -> tuple[list[GraphEdge], dict[str, int]]:
@@ -177,8 +238,13 @@ def find_hub_nodes(
     non-test node are skipped: a design-system component resolves correctly and
     still tells a reviewer nothing.
 
+    Calls a resolver bound to a node by bare name alone (``x.get()`` landing on the one
+    ``get`` in reach) count :data:`NAME_MATCHED_EDGE_WEIGHT` when more than one non-test
+    definition shares that name. Ranking uses ``ranking_degree`` (weighted);
+    ``total_degree`` stays the raw count.
+
     Returns list of dicts with: name, qualified_name, kind, file,
-    in_degree, out_degree, total_degree, community_id, resolution_split
+    in_degree, out_degree, total_degree, ranking_degree, community_id, resolution_split
     (``direct``: edges counted, ``bare_name``: edges left out)
     """
     # Get all non-File nodes
@@ -190,10 +256,15 @@ def find_hub_nodes(
     )
     in_degree: dict[str, int] = Counter()
     out_degree: dict[str, int] = Counter()
+    weighted: dict[str, float] = Counter()
+    shared = _shared_definition_names(nodes)
     builds_on: set[str] = set()
     for e in edges:
         out_degree[e.source_qualified] += 1
         in_degree[e.target_qualified] += 1
+        w = NAME_MATCHED_EDGE_WEIGHT if _is_name_matched_edge(e, node_map, shared) else 1.0
+        weighted[e.source_qualified] += w
+        weighted[e.target_qualified] += w
         if e.kind in _OUTGOING_USE_KINDS:
             target = node_map.get(e.target_qualified)
             if target is not None and not target.is_test:
@@ -223,13 +294,14 @@ def find_hub_nodes(
             "in_degree": ind,
             "out_degree": outd,
             "total_degree": total,
+            "ranking_degree": round(weighted.get(qn, 0.0), 2),
             "community_id": community_map.get(qn),
             "resolution_split": {"direct": total, "bare_name": bare.get(qn, 0)},
         })
 
     # Equal degrees are ordered by qualified name, so a ranking read in pages never
     # repeats or skips a node.
-    scored.sort(key=lambda x: (-x["total_degree"], x["qualified_name"]))
+    scored.sort(key=lambda x: (-x["ranking_degree"], x["qualified_name"]))
     return scored[:top_n]
 
 
@@ -243,7 +315,7 @@ _BETWEENNESS_SEED = 0
 _BETWEENNESS_ENGINE_ENV = "CRG_BETWEENNESS_ENGINE"
 _BRIDGE_CACHE_KEY = "bridge_scores"
 #: Bump when the scoring changes, so an older cached result is never served.
-_BRIDGE_CACHE_VERSION = 1
+_BRIDGE_CACHE_VERSION = 2
 
 
 def _bridge_cache_signature(store: GraphStore) -> list[Any]:
@@ -271,9 +343,12 @@ def _compute_betweenness(store: GraphStore) -> dict[str, float]:
 
     # A call to a bare name is no path: through it, every caller of ``get`` would sit
     # next to every other, and the shortest paths between regions would run through names.
+    # Name-matched calls (see NAME_MATCHED_EDGE_WEIGHT) are dropped for the same reason.
     full = store._build_networkx_graph()
+    name_matched = _name_matched_edges_sql(store)
     nxg = full.edge_subgraph(
-        (u, v) for u, v, d in full.edges(data=True) if not d.get("unresolved_target")
+        (u, v) for u, v, d in full.edges(data=True)
+        if not d.get("unresolved_target") and (u, v) not in name_matched
     ).copy()
     try:
         n_nodes = nxg.number_of_nodes()

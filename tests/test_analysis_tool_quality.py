@@ -361,6 +361,58 @@ def test_bare_name_edges_do_not_make_a_hub(store):
     assert by_name["real_hub"]["resolution_split"] == {"direct": 4, "bare_name": 0}
 
 
+def _shared_name_graph(store):
+    """``get`` is defined twice; ``w1..w6`` call the one in reach by name only, and
+    ``real`` is called by 4 callers through a typed receiver (direct evidence)."""
+    get = _node(store, "get", "/r/a.java", language="java", parent="A")
+    _node(store, "get", "/r/b.java", language="java", parent="B")
+    real = _node(store, "fetch", "/r/c.java", language="java", parent="C")
+    for i in range(6):
+        w = _node(store, f"w{i}", f"/r/w{i}.java", language="java")
+        _edge(store, "CALLS", w, get, bare_call_target="get")
+    for i in range(4):
+        c = _node(store, f"c{i}", f"/r/k{i}.java", language="java")
+        _edge(store, "CALLS", c, real, bare_call_target="fetch", receiver_class="C")
+    store.commit()
+    return get, real
+
+
+def test_name_matched_calls_to_shared_names_are_down_ranked(store):
+    _shared_name_graph(store)
+
+    hubs = find_hub_nodes(store, top_n=10)
+
+    by_name = {h["qualified_name"].split("::")[-1]: h for h in hubs}
+    assert by_name["A.get"]["total_degree"] == 6
+    assert by_name["A.get"]["ranking_degree"] == 1.5
+    assert by_name["C.fetch"]["ranking_degree"] == 4.0
+    assert hubs[0]["name"] == "fetch"
+
+
+def test_unshared_name_matched_calls_keep_full_weight(store):
+    get = _node(store, "get", "/r/a.java", language="java", parent="A")
+    for i in range(3):
+        w = _node(store, f"w{i}", f"/r/w{i}.java", language="java")
+        _edge(store, "CALLS", w, get, bare_call_target="get")
+    store.commit()
+
+    (hub,) = [h for h in find_hub_nodes(store) if h["name"] == "get"]
+
+    assert hub["ranking_degree"] == hub["total_degree"] == 3
+
+
+def test_name_matched_calls_are_no_path_between_bridges(store):
+    left = _node(store, "left", "/r/l.java", language="java")
+    get = _node(store, "get", "/r/a.java", language="java", parent="A")
+    _node(store, "get", "/r/b.java", language="java", parent="B")
+    right = _node(store, "right", "/r/r.java", language="java")
+    _edge(store, "CALLS", left, get, bare_call_target="get")
+    _edge(store, "CALLS", get, right)
+    store.commit()
+
+    assert "get" not in {b["name"] for b in find_bridge_nodes(store)}
+
+
 def test_a_bare_name_is_no_path_between_bridges(store):
     left = _node(store, "left", "/r/l.py")
     mid = _node(store, "mid", "/r/m.py")
