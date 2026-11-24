@@ -336,6 +336,16 @@ def _run_ember_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_jooq_resolver(store: GraphStore, repo_root: Optional[Path] = None) -> Optional[dict]:
+    """Run the jOOQ generated-code resolver without failing a build."""
+    try:
+        from .jooq_resolver import resolve_jooq
+        return resolve_jooq(store, repo_root)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("jOOQ resolver failed: %s", exc)
+        return None
+
+
 def _run_spring_event_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Spring application-event resolver without failing a build."""
     try:
@@ -3255,6 +3265,7 @@ def full_build(
     spring_stats = _run_spring_resolver(store)
     aop_stats = _run_aop_resolver(store)
     spring_event_stats = _run_spring_event_resolver(store)
+    jooq_stats = _run_jooq_resolver(store, repo_root)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
     ember_stats = _run_ember_resolver(store)
@@ -3287,6 +3298,7 @@ def full_build(
         "spring_resolution": spring_stats,
         "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
+        "jooq_resolution": jooq_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "ember_resolution": ember_stats,
@@ -3790,6 +3802,7 @@ def incremental_update(
     spring_event_stats = (
         _run_spring_event_resolver(store) if spring_changed else None
     )
+    jooq_stats = _run_jooq_resolver(store, repo_root) if spring_changed else None
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     hcl_changed = has_graph_changes and any(
         rp.endswith((".tf", ".hcl")) for rp in all_files
@@ -3872,6 +3885,7 @@ def incremental_update(
         "spring_resolution": spring_stats,
         "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
+        "jooq_resolution": jooq_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "ember_resolution": ember_stats,
