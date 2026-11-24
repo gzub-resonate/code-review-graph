@@ -136,8 +136,10 @@ def _is_bare_name_edge(edge: GraphEdge, known: set[str]) -> bool:
     return edge.kind in TARGET_RESOLUTION_KINDS and edge.target_qualified not in known
 
 
-#: Weight of a call bound to a node by its bare name alone when other non-test
-#: definitions share that name (every ``x.get()`` lands on one ``get``).
+#: Ceiling on the weight of a call bound to a node by its bare name alone when other
+#: non-test definitions share that name (every ``x.get()`` lands on one ``get``). The
+#: weight is ``min(this, 1 / definitions)``: the more nodes share the name, the less a
+#: name match says about which one was meant.
 NAME_MATCHED_EDGE_WEIGHT = 0.25
 #: Edge ``extra`` keys: the resolver bound the edge from a bare name, and the parser
 #: saw a receiver whose class is known (that one is real evidence, not a name match).
@@ -145,16 +147,21 @@ _NAME_BOUND_KEY = "bare_call_target"
 _RECEIVER_CLASS_KEY = "receiver_class"
 
 
-def _shared_definition_names(nodes: list[GraphNode]) -> set[str]:
-    """Names that more than one non-test, non-File node defines."""
+def _shared_definition_names(nodes: list[GraphNode]) -> dict[str, int]:
+    """Names that more than one non-test, non-File node defines, with how many do."""
     counts = Counter(
         n.name for n in nodes if n.kind != "File" and not n.is_test and n.kind != "Test"
     )
-    return {name for name, c in counts.items() if c > 1}
+    return {name: c for name, c in counts.items() if c > 1}
+
+
+def _name_matched_weight(definitions: int) -> float:
+    """Weight of a name-matched edge to a name that *definitions* nodes share."""
+    return min(NAME_MATCHED_EDGE_WEIGHT, 1.0 / max(definitions, 1))
 
 
 def _is_name_matched_edge(
-    edge: GraphEdge, node_map: dict[str, GraphNode], shared: set[str],
+    edge: GraphEdge, node_map: dict[str, GraphNode], shared: dict[str, int] | set[str],
 ) -> bool:
     """Is this CALLS edge a resolver's pick by bare name, to a name many symbols share?
 
@@ -239,8 +246,9 @@ def find_hub_nodes(
     still tells a reviewer nothing.
 
     Calls a resolver bound to a node by bare name alone (``x.get()`` landing on the one
-    ``get`` in reach) count :data:`NAME_MATCHED_EDGE_WEIGHT` when more than one non-test
-    definition shares that name. Ranking uses ``ranking_degree`` (weighted);
+    ``get`` in reach) count ``min(NAME_MATCHED_EDGE_WEIGHT, 1 / n)`` when ``n > 1``
+    non-test definitions share that name, so a name defined on many classes is damped
+    harder than one defined twice. Ranking uses ``ranking_degree`` (weighted);
     ``total_degree`` stays the raw count.
 
     Returns list of dicts with: name, qualified_name, kind, file,
@@ -262,7 +270,9 @@ def find_hub_nodes(
     for e in edges:
         out_degree[e.source_qualified] += 1
         in_degree[e.target_qualified] += 1
-        w = NAME_MATCHED_EDGE_WEIGHT if _is_name_matched_edge(e, node_map, shared) else 1.0
+        w = 1.0
+        if _is_name_matched_edge(e, node_map, shared):
+            w = _name_matched_weight(shared[node_map[e.target_qualified].name])
         weighted[e.source_qualified] += w
         weighted[e.target_qualified] += w
         if e.kind in _OUTGOING_USE_KINDS:

@@ -389,6 +389,34 @@ def test_name_matched_calls_to_shared_names_are_down_ranked(store):
     assert hubs[0]["name"] == "fetch"
 
 
+def test_name_matched_weight_shrinks_with_how_many_definitions_share_the_name(store):
+    # 12 classes define ``get``; 24 callers reach G0.get by name alone. A constant 0.25
+    # would still give it 6.0, above the typed-receiver domain method (4.0).
+    gets = [
+        _node(store, "get", f"/r/g{i}.java", language="java", parent=f"G{i}") for i in range(12)
+    ]
+    domain = _node(store, "process", "/r/d.java", language="java", parent="Domain")
+    unique = _node(store, "fetchAll", "/r/u.java", language="java", parent="U")
+    for i in range(24):
+        w = _node(store, f"w{i}", f"/r/w{i}.java", language="java")
+        _edge(store, "CALLS", w, gets[0], bare_call_target="get")
+        _edge(store, "CALLS", w, unique, bare_call_target="fetchAll")
+    for i in range(4):
+        c = _node(store, f"c{i}", f"/r/k{i}.java", language="java")
+        _edge(store, "CALLS", c, domain, bare_call_target="process", receiver_class="Domain")
+    store.commit()
+
+    hubs = find_hub_nodes(store, top_n=50)
+
+    by_qn = {h["qualified_name"]: h for h in hubs}
+    assert by_qn[gets[0]]["total_degree"] == 24
+    assert by_qn[gets[0]]["ranking_degree"] == 2.0
+    assert by_qn[unique]["ranking_degree"] == 24.0
+    names = [h["qualified_name"] for h in hubs]
+    assert names.index(domain) < names.index(gets[0])
+    assert names[0] == unique
+
+
 def test_unshared_name_matched_calls_keep_full_weight(store):
     get = _node(store, "get", "/r/a.java", language="java", parent="A")
     for i in range(3):
