@@ -2183,13 +2183,17 @@ def main(
             # (DNS rebinding) and drive the tools, which read the user's code.
             # Non-browser MCP clients send no Origin and are unaffected; see
             # code_review_graph.http_origin_guard.
+            from .http_access_log import build_client_log_middleware
             from .http_origin_guard import build_http_middleware
 
             mcp.run(
                 transport="streamable-http",
                 host=host,
                 port=port,
-                middleware=build_http_middleware(host, port),
+                middleware=[
+                    *build_client_log_middleware(),
+                    *build_http_middleware(host, port),
+                ],
             )
         else:
             raise ValueError(f"unsupported transport: {transport!r}")
