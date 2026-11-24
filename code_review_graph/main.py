@@ -1220,8 +1220,9 @@ async def detect_changes_tool(
             per-flow metadata only — use get_affected_flows_tool for step
             detail. Default: 20.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
-            changed functions. Only valid for the same base, changed files, depth
-            and detail level on the same graph.
+            changed functions (for a pull request, of its added and removed symbols
+            too). Only valid for the same base, changed files, depth and detail
+            level on the same graph.
         pr: Pull request number. Reads the PR's changed files from refs/pull/<pr>/head,
             parses them in memory and scores them against the graph, so new files are
             covered. base then names the branch the PR merges into. Default: none.
@@ -1231,7 +1232,9 @@ async def detect_changes_tool(
     Returns:
         The risk-scored analysis. When more changed functions remain,
         ``next_cursor`` is the ``cursor`` for the next page; the other lists
-        are on the first page only.
+        are on the first page only. For a pull request, ``pull_request`` lists
+        at most ``max_results`` added and removed symbols a page, and the same
+        ``next_cursor`` reads the next page of both lists.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(

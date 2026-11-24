@@ -459,3 +459,19 @@ def test_a_group_cursor_stays_small_for_many_groups():
         groups, 1, 120, 120, page.next_cursor, scope=SCOPE, stamp=STAMP,
     )
     assert again.items[0] == "g0-1"
+
+
+def test_a_group_page_reports_each_groups_rows_and_where_they_start():
+    first = paging.paginate_groups(GROUPS, 3, 100, 100, scope=SCOPE, stamp=STAMP)
+    assert first.groups == (["a0", "a1", "a2"], [], ["c0", "c1", "c2"], ["d0"])
+    assert first.group_offsets == (0, 0, 0, 0)
+    second = paging.paginate_groups(
+        GROUPS, 3, 100, 100, first.next_cursor, scope=SCOPE, stamp=STAMP,
+    )
+    assert second.groups[0] == ["a3", "a4", "a5"]
+    assert second.group_offsets == (3, 0, 3, 1)
+
+
+def test_a_plain_page_has_no_group_fields():
+    page = paging.paginate(list(range(5)), 2, 10, scope=SCOPE, stamp=STAMP)
+    assert page.groups == () and page.group_offsets == ()

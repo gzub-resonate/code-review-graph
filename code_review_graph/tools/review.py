@@ -29,7 +29,15 @@ from ..incremental import (
     path_within_repo,
     resolve_review_base,
 )
-from ..paging import CursorError, graph_stamp, make_scope, paginate, shown_range
+from ..paging import (
+    CursorError,
+    Page,
+    graph_stamp,
+    make_scope,
+    paginate,
+    paginate_groups,
+    shown_range,
+)
 from ..parser import is_test_file, normalize_file_path
 from ._common import (
     _bounded,
@@ -54,8 +62,6 @@ _MAX_REVIEW_EDGES = 150
 _MAX_REVIEW_FILES = 200
 #: Names listed per file, and files listed, in the ``pull_request`` section of a pull request
 #: review; the totals beside them always count everything.
-_PR_NAMES_PER_FILE = 25
-_PR_FILES_SHOWN = 50
 _MAX_REVIEW_SOURCE_LINES = 800
 _MAX_LINES_PER_FILE = 500
 _MAX_CHANGED_FUNCTIONS = 100
@@ -1021,39 +1027,47 @@ def get_affected_flows_func(
 # ---------------------------------------------------------------------------
 
 
-def _pull_request_section(info: dict[str, Any], detail_level: str) -> dict[str, Any]:
+def _pull_request_rows(info: dict[str, Any]) -> list[dict[str, str]]:
+    """Every added and removed symbol of a pull request as one ordered list of rows.
+
+    Files keep the order the pull request lists them in, and within a file the added symbols
+    come before the removed ones, so a cursor pages through the same sequence on every call.
+    """
+    rows: list[dict[str, str]] = []
+    for path in dict.fromkeys([*info["added_symbols"], *info["removed_symbols"]]):
+        for change, by_file in (("added", info["added_symbols"]),
+                                ("removed", info["removed_symbols"])):
+            rows.extend(
+                {"file": path, "change": change, "name": name} for name in by_file.get(path, [])
+            )
+    return rows
+
+
+def _pull_request_section(
+    info: dict[str, Any], detail_level: str, rows_page: Page | None = None,
+) -> dict[str, Any]:
     """The ``pull_request`` part of a pull request review.
 
     ``minimal`` carries the two commits and the totals only. Otherwise the added and removed
-    symbol names are listed per file (at most ``_PR_NAMES_PER_FILE`` names for each of
-    ``_PR_FILES_SHOWN`` files), and ``symbols_truncated`` says when a list was cut. The totals
-    count every symbol either way. Names are sanitised like any node name sent to a client.
+    symbol names of one page of rows (see :func:`_pull_request_rows`) are listed per file, and
+    ``symbols_truncated`` says when rows remain on a later page. The totals count every
+    symbol either way. Names are sanitised like any node name sent to a client.
     """
-    added, removed = info["added_symbols"], info["removed_symbols"]
     section: dict[str, Any] = {
         "head": info["head"], "base": info["base"],
-        "added_symbols_total": sum(len(names) for names in added.values()),
-        "removed_symbols_total": sum(len(names) for names in removed.values()),
+        "added_symbols_total": sum(len(names) for names in info["added_symbols"].values()),
+        "removed_symbols_total": sum(len(names) for names in info["removed_symbols"].values()),
     }
-    if detail_level == "minimal":
+    if detail_level == "minimal" or rows_page is None:
         return section
-    cut_files: list[str] = []
-
-    def shown(by_file: dict[str, list[str]]) -> dict[str, list[str]]:
-        out: dict[str, list[str]] = {}
-        for path, names in list(by_file.items())[:_PR_FILES_SHOWN]:
-            kept = names[:_PR_NAMES_PER_FILE]
-            out[_sanitize_name(path)] = [_sanitize_name(name) for name in kept]
-            if len(names) > len(kept):
-                cut_files.append(_sanitize_name(path))
-        return out
-
-    section["added_symbols"] = shown(added)
-    section["removed_symbols"] = shown(removed)
-    files_cut = len(added) > _PR_FILES_SHOWN or len(removed) > _PR_FILES_SHOWN
-    section["symbols_truncated"] = bool(cut_files) or files_cut
-    if cut_files:
-        section["files_with_more_symbols"] = sorted(set(cut_files))
+    added: dict[str, list[str]] = {}
+    removed: dict[str, list[str]] = {}
+    for row in rows_page.items:
+        target = added if row["change"] == "added" else removed
+        target.setdefault(_sanitize_name(row["file"]), []).append(_sanitize_name(row["name"]))
+    section["added_symbols"] = added
+    section["removed_symbols"] = removed
+    section["symbols_truncated"] = rows_page.truncated
     return section
 
 
@@ -1096,7 +1110,9 @@ def detect_changes_func(
             200). The embedded flows carry per-flow metadata only; use
             get_affected_flows_tool for step detail. See #849.
         cursor: ``next_cursor`` from the previous reply, to read the next page
-            of changed functions. Omit it for the first page. A cursor is opaque
+            of changed functions. For a pull request the same cursor also reads the
+            next page of its added and removed symbols, each list by ``max_results``
+            rows a page. Omit it for the first page. A cursor is opaque
             and only valid for the same base, changed-file list, depth and
             detail level on the same graph; ``"minimal"`` has no pages.
         pr: A pull request number. The files the pull request changes are read from
@@ -1225,20 +1241,43 @@ def detect_changes_func(
         # review (base, changed files, depth, detail level), to the graph, and to the
         # ordered function names, since a diff is recomputed on every call.
         page = None
+        rows_page: Page | None = None
+        later_page = False
         source_funcs = analysis.get("changed_functions", [])
         if detail_level != "minimal":
-            page = paginate(
-                analysis.get("changed_functions", []), max_results, _MAX_CHANGED_FUNCTIONS,
-                cursor,
-                scope=make_scope(
-                    "detect_changes_tool", base=base, changed_files=changed_files,
-                    max_depth=max_depth, detail_level=detail_level,
-                ),
-                stamp=graph_stamp(store, _digest_of(
-                    changed_files,
-                    [f.get("qualified_name") for f in analysis.get("changed_functions", [])],
-                )),
+            scope = make_scope(
+                "detect_changes_tool", base=base, changed_files=changed_files,
+                max_depth=max_depth, detail_level=detail_level,
             )
+            names = [f.get("qualified_name") for f in analysis.get("changed_functions", [])]
+            if pr_info is None:
+                page = paginate(
+                    analysis.get("changed_functions", []), max_results, _MAX_CHANGED_FUNCTIONS,
+                    cursor, scope=scope,
+                    stamp=graph_stamp(store, _digest_of(changed_files, names)),
+                )
+                later_page = page.offset > 0
+            else:
+                # A pull request pages its changed functions and its symbol rows together,
+                # one cursor for both, each by at most ``max_results`` rows a page.
+                pr_rows = _pull_request_rows(pr_info)
+                size = min(max_results, _MAX_CHANGED_FUNCTIONS)
+                both = paginate_groups(
+                    [analysis.get("changed_functions", []), pr_rows], size, 2 * size,
+                    2 * _MAX_CHANGED_FUNCTIONS, cursor, scope=scope,
+                    stamp=graph_stamp(store, _digest_of(
+                        changed_files, names, pr_info["head"], pr_rows,
+                    )),
+                )
+                later_page = both.offset > 0
+                page = Page(
+                    list(both.groups[0]), len(analysis.get("changed_functions", [])),
+                    both.group_offsets[0],
+                    both.next_cursor,
+                )
+                rows_page = Page(
+                    list(both.groups[1]), len(pr_rows), both.group_offsets[1], both.next_cursor,
+                )
             source_funcs = page.items
 
         # Optionally include source snippets for changed functions, spending a
@@ -1291,7 +1330,7 @@ def detect_changes_func(
                 # missing the change-frequency term.
                 "churn_status": analysis.get("churn_status", "off"),
             }
-        elif page is not None and page.offset > 0:
+        elif later_page:
             result = {
                 "status": "ok",
                 "summary": (
@@ -1381,7 +1420,11 @@ def detect_changes_func(
                 **page.fields(),
             }
         if pr_info is not None:
-            result["pull_request"] = _pull_request_section(pr_info, detail_level)
+            result["pull_request"] = _pull_request_section(pr_info, detail_level, rows_page)
+            if rows_page is not None and rows_page.total:
+                result["summary"] += (
+                    f"\n  - Pull request symbol(s): {rows_page.total}{shown_range(rows_page)}"
+                )
         if notes:
             # Said once, first: the review covers different files than the
             # base the caller asked for would have.

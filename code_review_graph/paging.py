@@ -59,6 +59,10 @@ class Page:
     offset: int
     #: Opaque cursor for the next page, ``None`` on the last one.
     next_cursor: Optional[str]
+    #: Set by :func:`paginate_groups` only: this page's rows of each group, and the index
+    #: in each group where they start. ``items`` holds the same rows, flattened.
+    groups: tuple[list[Any], ...] = ()
+    group_offsets: tuple[int, ...] = ()
 
     @property
     def truncated(self) -> bool:
@@ -212,11 +216,13 @@ def paginate_groups(
     size = min(limit, hard_cap)
     items: list[Any] = []
     advanced = list(offsets)
+    by_group: list[list[Any]] = [[] for _ in groups]
     for index, group in enumerate(groups):
         room = size - len(items)
         if room <= 0:
             break
         taken = group[offsets[index]:offsets[index] + per_group][:room]
+        by_group[index] = taken
         items.extend(taken)
         advanced[index] += len(taken)
     more = any(done < len(group) for done, group in zip(advanced, groups))
@@ -227,6 +233,8 @@ def paginate_groups(
         next_cursor=_encode(
             {str(i): done for i, done in enumerate(advanced) if done}, scope, stamp,
         ) if more else None,
+        groups=tuple(by_group),
+        group_offsets=tuple(offsets),
     )
 
 

@@ -836,7 +836,8 @@ cursor: str | None           # `next_cursor` of the previous reply
 pr: int = None               # Score a pull request's files (read from refs/pull/<pr>/head), new files included
 head: str = None             # Or a ref/commit to read the changed files from; base then names the target branch
                              # Reply gains `pull_request`: commits, symbol totals, and (not in minimal) the added and
-                             # removed names, cut at 25 per file and 50 files with `symbols_truncated` set
+                             # removed names, `max_results` rows a page (max 100), with `symbols_truncated` set
+                             # while rows remain. The same `cursor` reads the next page of functions and symbols
 ```
 Main tool for code review. Maps changed files to affected functions, YAML and JSON
 paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and
