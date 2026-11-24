@@ -543,6 +543,7 @@ async def get_minimal_context_tool(
     changed_files: Optional[list[str]] = None,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
+    detail_level: str = "standard",
 ) -> dict:
     """Get ultra-compact context for any task (~100 tokens). Always call this first.
 
@@ -557,6 +558,9 @@ async def get_minimal_context_tool(
         changed_files: Explicit list of changed files. Auto-detected if omitted.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for diff comparison. Default: HEAD~1.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -870,6 +874,7 @@ async def embed_graph_tool(
 @mcp.tool(annotations={"readOnlyHint": True})
 async def list_graph_stats_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Get aggregate statistics about the code knowledge graph.
 
@@ -878,6 +883,9 @@ async def list_graph_stats_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -891,6 +899,7 @@ async def list_graph_stats_tool(
 def get_docs_section_tool(
     section_name: str,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Get a specific section from the LLM-optimized documentation reference.
 
@@ -910,6 +919,9 @@ def get_docs_section_tool(
         repo_root: Repository root path. Optional: the reference is bundled
             with the server, so a ``--multi-repo`` server answers without one.
             A repo's own copy of the docs is preferred when one is named.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     # The section is bundled Markdown, so a multi-repo server has no repository to
     # choose and must not demand one; a named repo is still checked against the registry.
@@ -1010,6 +1022,7 @@ async def get_flow_tool(
     max_steps: int = 50,
     max_source_lines: int = 400,
     cursor: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Get detailed information about a single execution flow.
 
@@ -1029,6 +1042,9 @@ async def get_flow_tool(
             include_source is set. Default: 400.
         cursor: The ``next_cursor`` of a previous reply, to read the next
             steps of the same flow. Omit it for the first page.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
 
     Returns:
         The flow with its steps. When more steps remain the reply carries
@@ -1140,6 +1156,7 @@ async def get_community_tool(
     repo_root: Optional[str] = None,
     max_members: int = 25,
     cursor: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Get detailed information about a single code community.
 
@@ -1159,6 +1176,9 @@ async def get_community_tool(
             members_truncated marks the cut. Default: 25.
         cursor: The ``next_cursor`` of a previous reply, to read the next
             members of the same community. Omit it for the first page.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
 
     Returns:
         The community. When more members remain the reply carries
@@ -1438,6 +1458,7 @@ async def get_wiki_page_tool(
     community_name: str,
     repo_root: Optional[str] = None,
     max_chars: int = 20000,
+    detail_level: str = "standard",
 ) -> dict:
     """Retrieve a specific wiki page by community name.
 
@@ -1449,6 +1470,9 @@ async def get_wiki_page_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         max_chars: Maximum characters of page content to return;
             total_chars reports the real length. Default: 20000.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1646,6 +1670,7 @@ async def get_surprising_connections_tool(
 async def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
     include_tests: bool = False,
+    detail_level: str = "standard",
 ) -> dict:
     """Auto-generate review questions from graph analysis.
 
@@ -1657,6 +1682,9 @@ async def get_suggested_questions_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         include_tests: Include test nodes. Default: false, so the questions
             are about production code.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1676,6 +1704,7 @@ async def traverse_graph_tool(
     token_budget: int = 2000,
     repo_root: Optional[str] = None,
     cursor: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """BFS/DFS traversal from best-matching node with token budget.
 
@@ -1693,6 +1722,9 @@ async def traverse_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         cursor: The ``next_cursor`` of a previous reply, to read the next
             ``token_budget`` of the same walk. Omit it for the first page.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
 
     Returns the traversal; ``next_cursor`` is present when the walk was cut.
     """
@@ -1709,13 +1741,18 @@ async def traverse_graph_tool(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_repos_tool() -> dict:
+def list_repos_tool(detail_level: str = "standard") -> dict:
     """List all registered repositories in the multi-repo registry.
 
     Returns the list of repos registered at ~/.code-review-graph/registry.json.
     Use the CLI 'register' command to add repos.
 
     Stays synchronous: one small JSON read, no graph database and no Git.
+
+    Args:
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     return _resolve_attr("list_repos_func")()
 
@@ -1728,6 +1765,7 @@ async def cross_repo_search_tool(
     max_results: int = 50,
     repos: Optional[list[str]] = None,
     cursor: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Search for code entities across registered repositories.
 
@@ -1759,6 +1797,9 @@ async def cross_repo_search_tool(
         cursor: The ``next_cursor`` of a previous reply, to read the next merged
             results. Omit it for the first page. Only valid for the same query,
             kind, limit and repos while the merged results are unchanged.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
 
     Returns:
         Merged results. When more remain the reply carries ``next_cursor``; a
@@ -1786,6 +1827,7 @@ async def cross_repo_requests_tool(
     origin: Optional[str] = None,
     cursor: Optional[str] = None,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
 
@@ -1852,6 +1894,9 @@ async def cross_repo_requests_tool(
             the same query. Omit it for the first page.
         repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as
             every other tool takes ``repo_root``. Names the calling repo.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     if repo_root and not repos:
         repos = [Path(repo_root).name]
@@ -1874,6 +1919,7 @@ async def pr_blast_radius_tool(
     depth: int = 3,
     include_external: bool = True,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Blast radius of a pull request, read from its changed files and the base graph.
 
@@ -1896,6 +1942,9 @@ async def pr_blast_radius_tool(
         include_external: Join the affected endpoints to the client calls of the other
             registered repos. Default: True.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: Accepted for parity with the other read tools. "minimal" has no
+            smaller form here yet, so every value returns the same payload.
+            Default: standard.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
