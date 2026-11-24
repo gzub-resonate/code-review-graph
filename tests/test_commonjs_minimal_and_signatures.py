@@ -1,6 +1,6 @@
 """CommonJS default exports in imported files, minimal import rows, and signatures.
 
-Three small behaviours found while reading ``services-print`` through the tools:
+Three small behaviours found while reading a Node.js service through the tools:
 ``module.exports`` was reported dead although another file requires its file,
 ``imports_of`` and ``importers_of`` came back as ``{}`` rows at minimal detail, and a
 JavaScript function got a Python-style ``def name((a, b))`` signature.
