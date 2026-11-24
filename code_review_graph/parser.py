@@ -14316,7 +14316,8 @@ class CodeParser:
 
         * ``state_machine_file``: the in-repository Step Functions definition that
           ``step_function_file_path`` names (relative to the repository root, else to the
-          unit).
+          unit), and ``state_machine_name``: the deployed name its ``name`` input
+          evaluates to (read only for such a unit).
         * ``replacement_vars``: ``{key, service, kind, name}`` per replacement-map entry
           that names an AWS resource (``reduce_replacement_var``).
         * ``handler``, ``function_name`` and ``source_dir`` of a Lambda unit: the handler
@@ -14345,6 +14346,11 @@ class CodeParser:
             machine = self._terragrunt_repo_path(value, file_path, want_dir=False)
             if machine:
                 info["state_machine_file"] = machine
+                value, reason, found = evaluator.input_value("name")
+                reasons.add(reason or "")
+                deployed = reduce_lambda_name(value) if found else None
+                if deployed is not None:
+                    info["state_machine_name"] = deployed
 
         reduced: dict[tuple[str, str, str], dict[str, str]] = {}
         for map_name in REPLACEMENT_VAR_MAPS:

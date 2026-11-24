@@ -243,3 +243,35 @@ def test_unchanged_tracked_file_named_by_the_caller_stays_line_level(two_commits
     names = {func["name"] for func in result["changed_functions"]}
     assert "other" in names
     assert "handler" not in names
+
+
+# --- files without changed symbols say why the risk is 0 -----------------------
+
+
+def test_files_without_a_diff_say_why_risk_is_zero(two_commits: Path) -> None:
+    (two_commits / "consts.py").write_text("LIMIT = 4\n", encoding="utf-8")
+    _git(two_commits, "add", "consts.py")
+    _git(two_commits, "commit", "-q", "-m", "third")
+    with GraphStore(two_commits / ".code-review-graph" / "graph.db") as store:
+        full_build(two_commits, store)
+
+    result = detect_changes_func(
+        base="HEAD", changed_files=["consts.py"], repo_root=str(two_commits),
+        detail_level="minimal",
+    )
+
+    assert result["changed_symbols_found"] is False
+    assert f"risk {result['risk_score']:.2f} reflects changed symbols only" in result["summary"]
+    assert "No changed symbols were found in 1 file(s)" in result["summary"]
+    assert "get_impact_radius_tool" in result["summary"]
+    assert result["_hints"]["warnings"][0].startswith("No changed symbols were found")
+
+
+def test_real_changes_do_not_get_the_no_symbols_note(two_commits: Path) -> None:
+    with GraphStore(two_commits / ".code-review-graph" / "graph.db") as store:
+        full_build(two_commits, store)
+
+    result = detect_changes_func(base="HEAD~1", repo_root=str(two_commits))
+
+    assert "changed_symbols_found" not in result
+    assert "No changed symbols" not in result["summary"]

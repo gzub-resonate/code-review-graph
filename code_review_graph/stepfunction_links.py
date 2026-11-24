@@ -15,7 +15,10 @@ what each registered repo defines, by the rules the in-repo links use:
   and ``_`` (``aws_lambda_function``, ``aws_ecs_task_definition``, ``aws_sns_topic``,
   ``aws_sfn_state_machine`` and the other types in :data:`RESOURCE_TYPES`), the naming
   convention of ``asl_name_convention``;
-* for a state machine, a Step Functions definition file of that name (same spelling rule).
+* for a state machine, a Step Functions definition file of that name (same spelling rule),
+  or a Step Functions Terragrunt unit whose ``name`` input (the deployed name, which need not
+  be the file's: ``flash-1-train-cmd-prep`` deploys ``train_cmd_prep.asl.json``) is that name,
+  same spelling rule.
 
 A link is ``matched`` when exactly one registered repo defines the name, ``ambiguous`` when
 several do, and ``not_found`` otherwise (the owner is not registered, or names it another
@@ -128,6 +131,17 @@ class Definitions:
             found.setdefault(
                 ("states", "state-machine", "~" + _fold(row[0])), "state_machine_file",
             )
+        # The deployed name of a Step Functions Terragrunt unit (its ``name`` input), which
+        # need not be the definition file's name (``flash-1-train-cmd-prep`` deploys
+        # ``train_cmd_prep.asl.json``).
+        for row in store._conn.execute(
+            "SELECT json_extract(extra, '$.terragrunt_inputs.state_machine_name') FROM nodes "
+            "WHERE kind = 'File' AND language = 'hcl' AND json_valid(extra) "
+            "AND json_extract(extra, '$.terragrunt_inputs.state_machine_name') IS NOT NULL"
+        ):
+            if isinstance(row[0], str) and row[0]:
+                key = ("states", "state-machine", "~" + _fold(row[0]))
+                found.setdefault(key, "terragrunt_unit")
         for unit in lambda_units(store):
             found[("lambda", "function", unit["name"])] = "lambda_unit"
         return found
