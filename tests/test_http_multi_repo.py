@@ -518,3 +518,29 @@ async def test_the_handshake_tells_the_client_to_name_a_repo(http_server) -> Non
     assert init.instructions == (
         crg_main.SERVER_INSTRUCTIONS + crg_main.MULTI_REPO_INSTRUCTIONS
     )
+
+
+class TestDetectChangesNeedsANamedChange:
+    """A shared server has no working tree, so a call naming no change is refused."""
+
+    def test_a_plain_call_is_refused_with_what_to_pass(self, multi_repo_mode, tmp_path):
+        repo = _project(tmp_path, "a")
+        multi_repo_mode.register(str(repo))
+        with pytest.raises(ToolError, match=r"pr=<number>.*changed_files"):
+            asyncio.run(crg_main.detect_changes_tool(repo_root=str(repo)))
+
+    def test_the_minimal_level_is_refused_too(self, multi_repo_mode, tmp_path):
+        repo = _project(tmp_path, "a")
+        multi_repo_mode.register(str(repo))
+        with pytest.raises(ToolError, match="default branch"):
+            asyncio.run(crg_main.detect_changes_tool(repo_root=str(repo), detail_level="minimal"))
+
+    @pytest.mark.parametrize("named", [{"pr": 7}, {"head": "feature"}, {"changed_files": []}])
+    def test_a_named_change_gets_past_the_guard(self, named):
+        crg_main._require_a_named_change(
+            named.get("changed_files"), named.get("pr"), named.get("head"),
+        )
+
+    def test_the_local_server_still_diffs_its_working_tree(self, monkeypatch):
+        monkeypatch.setattr(crg_main, "_multi_repo", False)
+        crg_main._require_a_named_change(None, None, None)

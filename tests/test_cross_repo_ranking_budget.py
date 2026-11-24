@@ -1,0 +1,269 @@
+"""``cross_repo_search_tool`` ranks exact names first; both cross-repo tools have a time budget."""
+
+from __future__ import annotations
+
+import pytest
+
+from code_review_graph import constants
+from code_review_graph.graph import GraphStore
+from code_review_graph.parser import NodeInfo
+from code_review_graph.registry import Registry
+from code_review_graph.tools import registry_tools
+from code_review_graph.tools.registry_tools import (
+    _match_tier,
+    cross_repo_requests_func,
+    cross_repo_search_func,
+)
+
+from .test_cross_repo_requests_paging import SERVER, client_file, make_repo
+
+
+@pytest.fixture
+def registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("CRG_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    monkeypatch.delenv(constants.CROSS_REPO_BUDGET_ENV, raising=False)
+    return Registry()
+
+
+def named_repo(tmp_path, registry, alias, names, kind="Function"):
+    root = (tmp_path / alias).resolve()
+    directory = root / ".code-review-graph"
+    directory.mkdir(parents=True)
+    with GraphStore(directory / "graph.db") as store:
+        store.store_file_nodes_edges(
+            str(root / "src.py"),
+            [
+                NodeInfo(
+                    kind=kind, name=name, file_path=str(root / "src.py"),
+                    line_start=i + 1, line_end=i + 1, language="python",
+                )
+                for i, name in enumerate(names)
+            ],
+            [],
+        )
+    registry.register(str(root), alias=alias)
+    return root
+
+
+def search(**args):
+    args.setdefault("max_results", 100)
+    reply = cross_repo_search_func(**args)
+    assert reply["status"] == "ok", reply
+    return reply
+
+
+WEAK = ["getMetricsBatchV1", "getMetricsBatchV2", "getMetricsBatchV3"]
+
+
+def test_exact_match_in_a_late_repo_ranks_first(tmp_path, registry):
+    for alias in ("a", "b", "c"):
+        named_repo(tmp_path, registry, alias, WEAK)
+    named_repo(tmp_path, registry, "late", [*WEAK, "getMetricsBatch"])
+    rows = search(query="getMetricsBatch")["results"]
+    assert rows[0]["name"] == "getMetricsBatch"
+    assert rows[0]["repo"] == "late"
+    assert rows[0]["match"] == "exact"
+    assert all(row["match"] != "exact" for row in rows[1:])
+
+
+def test_same_exact_name_in_several_repos_precedes_fuzzy_hits(tmp_path, registry):
+    named_repo(tmp_path, registry, "a", WEAK)
+    named_repo(tmp_path, registry, "b", ["getMetricsBatch", *WEAK])
+    named_repo(tmp_path, registry, "c", WEAK)
+    named_repo(tmp_path, registry, "d", ["getMetricsBatch"])
+    rows = search(query="getMetricsBatch")["results"]
+    exact = [i for i, row in enumerate(rows) if row["match"] == "exact"]
+    assert [rows[i]["repo"] for i in exact] == ["b", "d"]
+    assert exact == [0, 1]
+
+
+def test_limit_does_not_starve_an_exact_match(tmp_path, registry):
+    # Many prefix hits outrank the exact name in the repo's own search; limit=1 cuts there.
+    named_repo(tmp_path, registry, "a", [f"getMetricsBatch{i}" for i in range(30)]
+               + ["getMetricsBatch"])
+    rows = search(query="getMetricsBatch", limit=1)["results"]
+    assert [row["name"] for row in rows] == ["getMetricsBatch"]
+    assert rows[0]["match"] == "exact"
+
+
+def test_kind_filter_applies_to_the_exact_lookup(tmp_path, registry):
+    named_repo(tmp_path, registry, "a", ["Widget"], kind="Class")
+    named_repo(tmp_path, registry, "b", ["Widget"], kind="Function")
+    rows = search(query="Widget", kind="Class", limit=1)["results"]
+    assert [(row["repo"], row["kind"]) for row in rows] == [("a", "Class")]
+
+
+def test_paging_walk_returns_each_row_once_in_ranked_order(tmp_path, registry):
+    named_repo(tmp_path, registry, "a", WEAK)
+    named_repo(tmp_path, registry, "b", ["getMetricsBatch", *WEAK])
+    named_repo(tmp_path, registry, "c", ["GETMETRICSBATCH", "batchGetMetricsBatch"])
+    whole = search(query="getMetricsBatch")["results"]
+    assert len(whole) > 4
+    walked, cursor = [], None
+    for _ in range(50):
+        reply = search(query="getMetricsBatch", max_results=2, cursor=cursor)
+        walked.extend(reply["results"])
+        cursor = reply.get("next_cursor")
+        if not cursor:
+            break
+    assert [(r["repo"], r["qualified_name"]) for r in walked] == [
+        (r["repo"], r["qualified_name"]) for r in whole
+    ]
+    assert len({(r["repo"], r["qualified_name"]) for r in walked}) == len(walked)
+    order = [registry_tools._TIER_ORDER[r["match"]] for r in walked]
+    assert order == sorted(order)
+
+
+@pytest.mark.parametrize(
+    ("query", "name", "qualified", "tier"),
+    [
+        ("getMetricsBatch", "getMetricsBatch", "f.py::getMetricsBatch", "exact"),
+        ("getMetricsBatch", "GETMETRICSBATCH", "f.py::GETMETRICSBATCH", "exact_ci"),
+        ("Class.method", "method", "f.py::pkg.Class.method", "qualified"),
+        ("Class.method", "method", "f.py::Class.method", "qualified"),
+        ("Class.method", "method", "f.py::OtherClass.method", "fuzzy"),
+        ("getMetrics", "getMetricsBatch", "f.py::getMetricsBatch", "prefix"),
+        ("metrics batch", "getMetricsBatchV2", "f.py::getMetricsBatchV2", "tokens"),
+        ("get_metrics", "fetchGetMetrics", "f.py::fetchGetMetrics", "tokens"),
+        ("getMetricsBatch", "batchMetrics", "f.py::batchMetrics", "fuzzy"),
+        ("getMetricsBatch", "unrelated", "f.py::unrelated", "fuzzy"),
+    ],
+)
+def test_match_tiers(query, name, qualified, tier):
+    assert _match_tier(query, {"name": name, "qualified_name": qualified}) == tier
+
+
+def test_every_row_names_its_tier(tmp_path, registry):
+    named_repo(tmp_path, registry, "a", ["getMetricsBatch", "getMetricsBatchV1"])
+    rows = search(query="getMetricsBatch")["results"]
+    assert {row["match"] for row in rows} <= set(registry_tools._MATCH_TIERS)
+    assert {r["name"]: r["match"] for r in rows} == {
+        "getMetricsBatch": "exact", "getMetricsBatchV1": "prefix",
+    }
+
+
+class Clock:
+    """A clock that moves ``step`` seconds on every read."""
+
+    def __init__(self, step):
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self):
+        value = self.now
+        self.now += self.step
+        return value
+
+
+@pytest.fixture
+def five_repos(tmp_path, registry):
+    for alias in "abcde":
+        named_repo(tmp_path, registry, alias, ["getMetricsBatch", *WEAK])
+
+
+def test_spent_budget_skips_and_reports_remaining_repos(five_repos, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == ["a", "b"]
+    assert reply["skipped_repos"] == ["c", "d", "e"]
+    assert reply["skipped_repos_total"] == 3
+    assert reply["truncated"] is True
+    assert "not searched" in reply["summary"]
+    assert "CRG_CROSS_REPO_BUDGET_SECONDS" in reply["summary"]
+
+
+def test_a_tiny_budget_still_searches_the_first_repo(five_repos, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "0.001")
+    monkeypatch.setattr(registry_tools, "_now", Clock(1))
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == ["a"]
+    assert reply["skipped_repos"] == ["b", "c", "d", "e"]
+    assert reply["results"]
+
+
+def test_budget_zero_is_unlimited(five_repos, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "0")
+    monkeypatch.setattr(registry_tools, "_now", Clock(1e9))
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == list("abcde")
+    assert reply["skipped_repos"] == []
+    assert reply["skipped_repos_total"] == 0
+    assert reply["truncated"] is False
+
+
+def test_default_budget_does_not_skip_on_a_fast_call(five_repos):
+    reply = search(query="getMetricsBatch")
+    assert reply["skipped_repos_total"] == 0
+    assert reply["truncated"] is False
+
+
+def test_cursor_from_a_partial_answer_is_tied_to_the_same_skipped_repos(five_repos, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    first = search(query="getMetricsBatch", max_results=1)
+    cursor = first["next_cursor"]
+    again = search(query="getMetricsBatch", max_results=1, cursor=cursor)
+    assert again["skipped_repos"] == first["skipped_repos"]
+    assert again["offset"] == 1
+    # The same cursor against a full (unbudgeted) answer is refused, not misread.
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "0")
+    refused = cross_repo_search_func(query="getMetricsBatch", max_results=1, cursor=cursor)
+    assert refused["status"] == "error"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 60.0), ("", 60.0), ("5", 5.0), ("2.5", 2.5), ("0", 0.0), (" 30 ", 30.0),
+        ("abc", 60.0), ("-1", 60.0), ("nan", 60.0), ("inf", 60.0),
+    ],
+)
+def test_budget_env_validation(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv(constants.CROSS_REPO_BUDGET_ENV, raising=False)
+    else:
+        monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, raw)
+    assert constants.cross_repo_budget_seconds() == expected
+
+
+@pytest.fixture
+def clients(tmp_path, registry):
+    for name in ("ui1", "ui2", "ui3"):
+        make_repo(tmp_path, registry, name, {"lib/a.ts": client_file(name, 3)})
+    make_repo(tmp_path, registry, "api", {"server.js": SERVER})
+
+
+def test_requests_tool_skips_client_repos_when_the_budget_is_spent(clients, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    reply = cross_repo_requests_func(origin="js", max_results=100)
+    assert reply["status"] == "ok"
+    assert reply["repos_searched"] == ["ui1", "ui2"]
+    assert reply["skipped_repos"] == ["ui3", "api"]
+    assert reply["skipped_repos_total"] == 2
+    assert reply["truncated"] is True
+    assert "not read" in reply["summary"]
+
+
+def test_requests_tool_budget_zero_reads_everything(clients, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "0")
+    monkeypatch.setattr(registry_tools, "_now", Clock(1e9))
+    reply = cross_repo_requests_func(origin="js", max_results=100)
+    assert reply["skipped_repos"] == []
+    assert reply["skipped_repos_total"] == 0
+    assert len(reply["repos_searched"]) == 4
+
+
+def test_requests_cursor_on_a_partial_answer_is_refused_for_a_full_one(clients, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    first = cross_repo_requests_func(origin="js", limit=1, max_results=1)
+    assert first["skipped_repos_total"] == 2
+    cursor = first["next_cursor"]
+    again = cross_repo_requests_func(origin="js", limit=1, max_results=1, cursor=cursor)
+    assert again["status"] == "ok"
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "0")
+    refused = cross_repo_requests_func(origin="js", limit=1, max_results=1, cursor=cursor)
+    assert refused["status"] == "error"

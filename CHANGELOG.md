@@ -10,6 +10,13 @@
   that it excludes is removed on the next update. A `!path` line in a repository's own
   `.code-review-graphignore` spares a path the setting would exclude. A bad value (over 200 patterns,
   a pattern over 256 characters, a control character, or a `!` entry) is reported as an error.
+- `cross_repo_search_tool` and `cross_repo_requests_tool` stop after
+  `CRG_CROSS_REPO_BUDGET_SECONDS` (default 60, `0` = no limit) instead of running for minutes over a
+  large registry. When the time is spent no new repo is started; the ones left come back in
+  `skipped_repos` (with `skipped_repos_total`), `truncated` is set and the summary says so. A cursor
+  made on such a partial answer is refused unless the same repos are skipped again.
+- Every `cross_repo_search_tool` row has a `match` field: `exact`, `exact_ci`, `qualified`, `prefix`,
+  `tokens` or `fuzzy`.
 - `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The
   files are read from Git and parsed in memory as `pr_blast_radius_tool` does, matched to the base
   graph, and scored by the same analysis as a working-tree diff (risk score, flows, test gaps,
@@ -256,6 +263,22 @@
 
 ### Changed
 
+- `cross_repo_search_tool` orders its merged results by match tier first (exact name, exact name
+  ignoring case, qualified-name suffix, prefix, every query word in the name, everything else), then
+  by each repo's rank, then registry order.
+- `get_hub_nodes_tool`, `get_bridge_nodes_tool`, `get_surprising_connections_tool`,
+  `get_suggested_questions_tool` and `get_knowledge_gaps_tool` now leave test code out by default, so
+  test methods no longer crowd the ranking. Pass `include_tests=true` to get the old output back.
+  Tests are removed before ranking, so `total`, `next_cursor` and the summaries describe the list
+  without them, and a paging cursor made with one `include_tests` value is refused for the other.
+  `get_knowledge_gaps_tool` also stops listing configuration keys (JSON and YAML paths, Liquid outputs,
+  Spring properties) as isolated nodes, whatever `include_tests` says.
+
+- `detect_changes_tool` on a `serve --multi-repo` server refuses a call that names no pull request,
+  head or changed files. The server holds each repository's default branch with no working tree, so
+  such a call used to review that branch's last commit as if it were the change. The error says to
+  pass `pr`, `head` or `changed_files`. The bundled `review-pr` reference now describes the
+  pull-request route (`pr` on `detect_changes_tool` and `pr_blast_radius_tool`) for a shared server.
 - Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
   `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
   is deleted when the call ends (leftovers of a killed call are swept on the next one). The
@@ -279,6 +302,9 @@
 ### Fixed
 
 - `refactor_tool(mode="dead_code")` no longer lists a Dockerfile build stage (`stage:0`, `stage:builder`) as dead code.
+- `cross_repo_search_tool` ranks an exact name first. Scores differ between repos, so ordering by
+  repo-local rank alone put other repos' weak first hits ahead of the exact match, and a repo's
+  `limit` could cut its own exact match behind fuzzier hits.
 - `detect_changes_tool` with `pr` or `head` no longer sends every added symbol name when
   `detail_level="minimal"`: the `pull_request` section then carries the two commits and the
   added and removed totals only. In the standard level the names are paged like the other lists:
@@ -435,6 +461,9 @@
 
 ### Internal
 
+- `tests/test_cross_repo_ranking_budget.py` covers the match tiers, the paging walk in ranked order,
+  the call budget (a monkeypatched clock through `registry_tools._now`) and the
+  `CRG_CROSS_REPO_BUDGET_SECONDS` validation in `constants.cross_repo_budget_seconds`.
 - `analyze_changes` accepts `changed_nodes`, for callers that already know the changed symbols.
 - `ember_extract.py`, `ember_template.py` and `ember_resolver.py` add the Ember
   support; tests are `test_ember_parser.py`, `test_ember_template.py` (including

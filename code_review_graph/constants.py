@@ -268,6 +268,30 @@ def discovery_timeout() -> float:
     return value
 
 
+#: Seconds one ``cross_repo_search_tool`` or ``cross_repo_requests_tool`` call may
+#: spend before it stops starting new repositories. ``0`` means no limit.
+CROSS_REPO_BUDGET_ENV = "CRG_CROSS_REPO_BUDGET_SECONDS"
+CROSS_REPO_BUDGET_DEFAULT = 60.0
+
+
+def cross_repo_budget_seconds() -> float:
+    """Return the per-call time budget of the cross-repo tools, ``0`` for none.
+
+    Resolved on every call, so a long-lived server sees a change made with the
+    variable. An unparseable, non-finite or negative value logs a warning and
+    falls back to :data:`CROSS_REPO_BUDGET_DEFAULT` rather than raising inside a
+    tool call or silently removing the bound.
+    """
+    value = env_float(CROSS_REPO_BUDGET_ENV, CROSS_REPO_BUDGET_DEFAULT)
+    if value < 0:
+        logger.warning(
+            "Ignoring invalid %s=%r (negative); using the default %s.",
+            CROSS_REPO_BUDGET_ENV, value, CROSS_REPO_BUDGET_DEFAULT,
+        )
+        return CROSS_REPO_BUDGET_DEFAULT
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Configurable limits (override via environment variables)
 # ---------------------------------------------------------------------------
