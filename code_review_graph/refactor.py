@@ -1949,7 +1949,7 @@ def _is_runtime_wired(node: Any) -> bool:
     if _RUNTIME_WIRED_NAMES.match(node.name or ""):
         return True
     if getattr(node, "language", None) == "hcl":
-        return (node.extra or {}).get("hcl_type") in ("local", "variable", "output")
+        return (node.extra or {}).get("hcl_type") == "local"
     return False
 
 
