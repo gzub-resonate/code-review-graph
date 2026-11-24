@@ -1576,7 +1576,10 @@ async def get_knowledge_gaps_tool(
 
         include_non_code: Also report documentation sections, lockfile entries,
             Dockerfile stages and .storybook/.github files as isolated nodes
-            and untested hotspots. Default: false.
+            and untested hotspots, and also config document keys and Step
+            Functions (ASL) states as untested hotspots and the dunder methods
+            of a class (``__init__``, ``__repr__``) as isolated nodes.
+            Default: false.
 
     Returns:
         Gaps by category. When any category has more rows the reply carries

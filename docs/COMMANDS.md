@@ -854,7 +854,10 @@ Documentation sections (`DocSection`), lockfile entries (`package-lock.json`,
 `.terraform.lock.hcl`, `uv.lock` and the like), Dockerfile stages and anything
 under `.storybook` or `.github` are expected to be isolated or unreferenced, so
 `isolated_nodes` and `untested_hotspots` leave them out unless `include_non_code`
-is set. So are constructors (a function named for the class that holds it): a
+is set. Config document keys and Step Functions (ASL) states and machines are left out of
+`untested_hotspots` too (no test covers them by design), and the dunder methods of a class
+(`__init__`, `__repr__`) out of `isolated_nodes`, the interpreter being what calls them. So are
+constructors (a function named for the class that holds it): a
 framework such as Guice or Spring calls them, so no call edge names them. A
 constructor with no `CONTAINS` edge is still reported. A hotspot's `degree` counts only edges that name a node, as hub nodes do.
 `summary` maps each category to its untruncated count. The categories are
