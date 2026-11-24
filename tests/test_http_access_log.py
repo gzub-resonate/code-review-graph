@@ -62,7 +62,7 @@ def test_xff_last_entry_used_behind_private_peer(records):
     _call(ClientAccessLog(_app), hdrs)
     (line,) = _lines(records)
     assert line.startswith(
-        "mcp_client peer=10.0.0.5 client=203.0.113.9 method=POST path=/mcp status=202"
+        'mcp_client peer=10.0.0.5 client=203.0.113.9 method=POST path="/mcp" status=202'
     )
     assert 'ua="cli/1"' in line and 'xff="1.1.1.1, 203.0.113.9"' in line
 
@@ -79,9 +79,50 @@ def test_malformed_xff_falls_back_to_peer():
 
 
 def test_health_checker_not_logged(records):
-    _, sent = _call(ClientAccessLog(_app), [("user-agent", "ELB-HealthChecker/2.0")])
+    _, sent = _call(
+        ClientAccessLog(_app), [("user-agent", "ELB-HealthChecker/2.0")], method="GET"
+    )
     assert _lines(records) == []
     assert sent[0]["status"] == 202
+
+
+def test_health_checker_user_agent_on_post_is_still_logged(records):
+    """A caller cannot drop its own requests by sending the health checker's name."""
+    _call(ClientAccessLog(_app), [("user-agent", "ELB-HealthChecker/2.0")], method="POST")
+    (line,) = _lines(records)
+    assert "method=POST" in line
+
+
+def test_health_checker_user_agent_from_public_peer_is_still_logged(records):
+    _call(
+        ClientAccessLog(_app),
+        [("user-agent", "ELB-HealthChecker/2.0")],
+        peer="8.8.4.4",
+        method="GET",
+    )
+    assert len(_lines(records)) == 1
+
+
+def test_path_is_quoted_so_it_cannot_forge_fields(records):
+    _call(ClientAccessLog(_app), [], path="/x status=200 client=1.2.3.4")
+    (line,) = _lines(records)
+    assert 'path="/x status=200 client=1.2.3.4" status=202' in line
+
+
+def test_trusted_proxies_env_limits_xff_trust(monkeypatch, records):
+    monkeypatch.setenv("CRG_TRUSTED_PROXIES", "10.1.0.0/16")
+    hdrs = [("x-forwarded-for", "203.0.113.9")]
+    _call(ClientAccessLog(_app), hdrs, peer="10.1.2.3")
+    _call(ClientAccessLog(_app), hdrs, peer="10.9.9.9")
+    inside, outside = _lines(records)
+    assert "peer=10.1.2.3 client=203.0.113.9" in inside
+    assert "peer=10.9.9.9 client=10.9.9.9" in outside
+
+
+def test_trusted_proxies_env_all_invalid_trusts_nobody(monkeypatch, records):
+    monkeypatch.setenv("CRG_TRUSTED_PROXIES", "not-a-cidr")
+    _call(ClientAccessLog(_app), [("x-forwarded-for", "203.0.113.9")], peer="10.1.2.3")
+    assert "client=10.1.2.3" in _lines(records)[0]
 
 
 def test_control_chars_stripped_and_truncated(records):
