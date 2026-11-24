@@ -177,7 +177,9 @@ def _require_a_named_change(
             "This server holds each repository's default branch, so there is no working tree "
             "to diff and a call without a change would review the last commit on that branch. "
             "Pass pr=<number> (or head=<ref or commit>, with base=<parent branch> for a "
-            "stacked pull request), or changed_files=[...]."
+            "stacked pull request), or changed_files=[...]. "
+            'Example: detect_changes_tool(repo_root="/data/repos/<repo>", pr=123) or '
+            'detect_changes_tool(repo_root="/data/repos/<repo>", changed_files=["src/app.py"]).'
         )
 
 
@@ -561,7 +563,7 @@ async def get_minimal_context_tool(
         "get_minimal_context_tool",
         lambda: get_minimal_context(
             task=task, changed_files=changed_files,
-            repo_root=root, base=base,
+            repo_root=root, base=base, skip_discovery=_multi_repo,
         ),
         root,
     )
@@ -636,6 +638,7 @@ async def query_graph_tool(
     resolution: str = "all",
     to: Optional[str] = None,
     cursor: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -688,6 +691,7 @@ async def query_graph_tool(
         to: For path_to, the node name, qualified name, or file path to reach.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             rows. Omit it for the first page. Not available for path_to.
+        limit: Alias of ``max_results`` (most other tools call it that); wins when both are given.
 
     Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
@@ -696,7 +700,8 @@ async def query_graph_tool(
         "query_graph_tool",
         lambda: query_graph(
             pattern=pattern, target=target, repo_root=root,
-            detail_level=detail_level, max_results=max_results,
+            detail_level=detail_level,
+            max_results=limit if limit is not None else max_results,
             resolution=resolution, to=to, cursor=cursor,
         ),
         root,
@@ -1772,6 +1777,7 @@ async def cross_repo_requests_tool(
     max_results: int = 50,
     origin: Optional[str] = None,
     cursor: Optional[str] = None,
+    repo_root: Optional[str] = None,
 ) -> dict:
     """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
 
@@ -1822,7 +1828,11 @@ async def cross_repo_requests_tool(
             stacks use a module.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
+        repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as
+            every other tool takes ``repo_root``. Names the calling repo.
     """
+    if repo_root and not repos:
+        repos = [Path(repo_root).name]
     return await _offload(
         "cross_repo_requests_tool",
         lambda: cross_repo_requests_func(

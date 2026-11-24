@@ -36,8 +36,13 @@ def get_minimal_context(
     changed_files: list[str] | None = None,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    skip_discovery: bool = False,
 ) -> dict[str, Any]:
     """Return minimum context an agent needs to start any task (~100 tokens).
+
+    ``skip_discovery`` leaves out the Git change lookup when no ``changed_files`` are given:
+    a server that holds each repository's default branch has no working tree to diff, so the
+    lookup could only time out on a busy host and report a degraded answer.
 
     Combines graph stats, top communities, top flows, risk score,
     and suggested next tools into an ultra-compact response.
@@ -104,6 +109,8 @@ def get_minimal_context(
             if changed_files:
                 files: list[str] | None = changed_files
                 base = resolve_review_base(root, base)
+            elif skip_discovery:
+                files = None
             else:
                 files, base = discover_review_changes(root, base)
         except ChangeDiscoveryError as exc:

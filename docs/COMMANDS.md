@@ -546,6 +546,7 @@ target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
+limit: int | None                # Alias of max_results; wins when both are given
 resolution: str = "all"          # "all", "direct", or "unresolved"
 to: str | None                   # path_to only: the node or file to reach
 cursor: str | None               # next_cursor of the previous reply (see Paging)
@@ -1067,6 +1068,7 @@ limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js | terraform; default: feign and js
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
+repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
 ```
 
 `origin="terraform"` lists the remote Terraform module sources (`git::...//modules/x`) the repos name and the
