@@ -9,8 +9,13 @@ This module reads those edges from every registered repo (read-only) and resolve
 name (the part after ``org/``) to a registered repo, the way ``cross_repo_requests`` resolves a
 service name. A link is ``matched`` when the repo is registered and the path is a file or
 folder in its graph, ``path_not_found`` when the repo is registered but the path is not,
-``ambiguous`` when several registered repos answer to the name, and ``repo_not_registered``
-otherwise. Local (``./``) and ``docker://`` references point at no other repo and never
+``ambiguous`` when several registered repos answer to the name, ``external_action`` when no
+registered repo answers and the owner is a third party (a well-known publisher such as
+``actions`` or ``aws-actions``, or an owner none of the resolved references share), and
+``repo_not_registered`` otherwise (same organisation, not indexed). The registry stores no
+owner, so the organisation is inferred from the owners of the references that did resolve.
+
+Local (``./``) and ``docker://`` references point at no other repo and never
 appear. The join is computed on every call; nothing is stored.
 
 An action at the root of its repo (``org/repo@v1``) has an empty path, so ``matched`` there
@@ -28,7 +33,15 @@ from .infra_references import DYNAMIC_GITHUB_ACTIONS_TARGET, EXTERNAL_GITHUB_ACT
 from .repo_aliases import RepoNameResolver
 from .terraform_links import _like_escape, open_store  # noqa: F401  (open_store re-exported)
 
-STATUSES = ("matched", "path_not_found", "ambiguous", "repo_not_registered")
+STATUSES = (
+    "matched", "path_not_found", "ambiguous", "repo_not_registered", "external_action",
+)
+
+#: Publishers whose actions are never this organisation's, even if a repo shares a name.
+THIRD_PARTY_OWNERS = frozenset({
+    "actions", "aws-actions", "docker", "hashicorp", "github", "azure",
+    "google-github-actions", "sonarsource", "peter-evans", "softprops",
+})
 
 
 def read_uses_edges(store: GraphStore) -> list[dict[str, Any]]:
@@ -74,6 +87,10 @@ def path_exists(store: GraphStore, repo_path: Path, path: Optional[str]) -> bool
     return row is not None
 
 
+def _owner_of(owner_repo: str) -> str:
+    return owner_repo.split("/", 1)[0].lower()
+
+
 def resolve_links(
     edges_by_repo: dict[int, list[dict[str, Any]]],
     all_repos: list[dict[str, Any]],
@@ -84,14 +101,26 @@ def resolve_links(
     *path_in_repo* is ``(target_index, path) -> bool``.
     """
     resolver = RepoNameResolver(all_repos)
+    # The organisation(s) of this registry: owners of references that resolve to a registered repo.
+    own_owners = {
+        owner
+        for edges in edges_by_repo.values()
+        for edge in edges
+        if (owner := _owner_of(edge["owner_repo"])) not in THIRD_PARTY_OWNERS
+        and resolver.lookup(edge["owner_repo"].rsplit("/", 1)[-1])
+    }
     rows: list[dict[str, Any]] = []
     for index, edges in edges_by_repo.items():
         source_path = Path(all_repos[index]["path"])
         for edge in edges:
             name = edge["owner_repo"].rsplit("/", 1)[-1]
             targets = resolver.lookup(name)
+            owner = _owner_of(edge["owner_repo"])
             if not targets:
-                status = "repo_not_registered"
+                external = owner in THIRD_PARTY_OWNERS or (
+                    bool(own_owners) and owner not in own_owners
+                )
+                status = "external_action" if external else "repo_not_registered"
             elif len(targets) > 1:
                 status = "ambiguous"
             elif path_in_repo(targets[0], edge["path"]):
@@ -107,6 +136,7 @@ def resolve_links(
                 "file": rel,
                 "line": edge["line"],
                 "target_repo": name,
+                "target_owner": owner,
                 "target_path": edge["path"],
                 "ref": edge["ref"],
                 "kind": edge["kind"],

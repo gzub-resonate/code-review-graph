@@ -291,7 +291,7 @@ class TestCrossRepoSearch:
             ]
             mock_store_cls.side_effect = [MagicMock(), MagicMock()]
 
-            result = cross_repo_search_func(query="splash", limit=2)
+            result = cross_repo_search_func(query="splash", limit=2, include_fuzzy=True)
 
         assert result["status"] == "ok"
         assert [item["repo"] for item in result["results"]] == [
@@ -438,7 +438,9 @@ class TestCrossRepoSearch:
             ]
             mock_store_cls.side_effect = [MagicMock(), MagicMock()]
 
-            result = cross_repo_search_func(query="splash", repos=["ios", "android"])
+            result = cross_repo_search_func(
+                query="splash", repos=["ios", "android"], include_fuzzy=True,
+            )
 
         assert [item["repo"] for item in result["results"]] == ["android", "ios"]
 

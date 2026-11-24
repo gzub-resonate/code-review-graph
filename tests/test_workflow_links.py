@@ -101,7 +101,7 @@ class TestWorkflowLinks:
         action = rows[("workflow-templates", ".github/actions/setup")]
         assert action["status"] == "matched"
         assert action["kind"] == "action"
-        assert rows[("checkout", "")]["status"] == "repo_not_registered"
+        assert rows[("checkout", "")]["status"] == "external_action"
 
     def test_local_and_docker_references_are_ignored(self, repos):
         reply = cross_repo_requests_func(origin="workflow", repos=["app"])
@@ -120,7 +120,8 @@ class TestWorkflowLinks:
         }
         only = cross_repo_requests_func(origin="workflow", status="matched")
         assert only["total"] == 2
-        assert only["counts"]["repo_not_registered"] == 2
+        assert only["counts"]["repo_not_registered"] == 1
+        assert only["counts"]["external_action"] == 1
 
     def test_ambiguous_names_are_reported(self, tmp_path, repos, registry):
         make_repo(tmp_path / "other", registry, "workflow-templates", {"x.txt": "x"})
