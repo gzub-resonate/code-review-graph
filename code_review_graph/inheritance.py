@@ -137,13 +137,20 @@ class InheritanceIndex:
         # ``<file>::<parent_name>.<name>``, so its class is everything before
         # the last dot.
         self._methods: dict[tuple[str, str], str] = {}
+        # Every declaration of a name in one class: an overloaded method has
+        # one node per signature, and a call may mean any of them.
+        self._overloads: dict[tuple[str, str], list[str]] = {}
         for row in conn.execute(
             "SELECT qualified_name, name FROM nodes "
-            "WHERE kind IN ('Function', 'Test') AND parent_name IS NOT NULL"
+            "WHERE kind IN ('Function', 'Test') AND parent_name IS NOT NULL "
+            "ORDER BY qualified_name"
         ):
             owner = row["qualified_name"].rpartition(".")[0]
             if owner in self._classes:
                 self._methods.setdefault((owner, row["name"]), row["qualified_name"])
+                self._overloads.setdefault((owner, row["name"]), []).append(
+                    row["qualified_name"],
+                )
 
         self._raw_parents: dict[str, list[tuple[str, dict]]] = {}
         for row in conn.execute(
@@ -173,6 +180,27 @@ class InheritanceIndex:
     def method_of(self, class_name: str, method: str) -> Optional[str]:
         """The method *class_name* declares itself, if any."""
         return self._methods.get((class_name, method))
+
+    def overloads_of(self, class_name: str, method: str) -> list[str]:
+        """Every method named *method* that *class_name* declares itself."""
+        return list(self._overloads.get((class_name, method), ()))
+
+    def scope_methods(self, class_name: str, method: str) -> list[str]:
+        """The methods a bare ``method()`` call inside *class_name* can mean.
+
+        Java looks a plain call up in the class that makes it and then in what
+        that class inherits. The nearest class holding the name answers, with
+        every overload it declares. Empty when no class the graph holds the name
+        in a chain it fully knows: the call may then be a static import, an
+        enclosing class's method, or inherited from outside the graph.
+        """
+        own = self.overloads_of(class_name, method)
+        if own:
+            return own
+        inherited = self.inherited_method(class_name, method)
+        if inherited is None:
+            return []
+        return self.overloads_of(inherited.rpartition(".")[0], method) or [inherited]
 
     def resolve_type(
         self, raw: str, context_file: str, language: str,

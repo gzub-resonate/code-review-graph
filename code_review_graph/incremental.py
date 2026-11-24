@@ -29,6 +29,7 @@ from . import install_plan
 from .build_state import advance_to_postprocess_pending
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
 from .constants import (
+    default_ignore_patterns,
     discovery_timeout,
     env_float,
     env_int,
@@ -856,6 +857,39 @@ def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
     return "created"
 
 
+class _DefaultIgnore(str):
+    """A pattern from ``CRG_DEFAULT_IGNORE``; a repository ``!`` line can spare a path."""
+
+    __slots__ = ()
+
+
+class _SpareDefault(str):
+    """A ``!`` line of ``.code-review-graphignore``; spares paths a default excludes.
+
+    Only added when ``CRG_DEFAULT_IGNORE`` is set, and it only overrides
+    :class:`_DefaultIgnore` patterns, never the built-in or the repository's own.
+    """
+
+    __slots__ = ()
+
+
+def _normalize_ignore_line(line: str) -> str:
+    """Expand the directory shorthands of one ignore line into explicit globs."""
+    # Directory names without a slash match at any depth, as in .gitignore.
+    # A leading slash remains an explicit root anchor.
+    if line.endswith("/"):
+        prefix = line[:-1]
+        if prefix.startswith("/") or "/" in prefix:
+            return f"{prefix}/**"
+        return f"**/{prefix}/**"
+    if line.endswith("/**") and not line.startswith(("/", "**/")):
+        prefix = line[:-3]
+        if "/" in prefix:
+            return f"/{line}"
+        return f"**/{line}"
+    return line
+
+
 def _load_ignore_patterns(repo_root: Path) -> list[str]:
     """Load ignore patterns from .code-review-graphignore file.
 
@@ -865,6 +899,12 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     The default vendor exclusion applies to Composer, Go, Ruby and Cargo projects
     identified by root manifests. Nested manifests exclude their sibling
     vendor/ directory; other repositories can explicitly ignore vendor/.
+
+    Patterns in ``CRG_DEFAULT_IGNORE`` apply to every repository in addition to
+    the repository's own file. Precedence: a ``!`` line in the repository's file
+    spares a path that a ``CRG_DEFAULT_IGNORE`` pattern excludes (the same line
+    also keeps its nested-output meaning). It does not spare a path the built-in
+    list or the repository's own patterns exclude.
     """
     vendor_dependencies = any(
         (repo_root / manifest).is_file() for manifest in NESTED_OUTPUT_DIR_MARKERS["vendor"]
@@ -873,6 +913,11 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
         pattern for pattern in DEFAULT_IGNORE_PATTERNS
         if pattern != "**/vendor/**" or vendor_dependencies
     ]
+    operator_patterns = [
+        _DefaultIgnore(_normalize_ignore_line(pattern))
+        for pattern in default_ignore_patterns()
+    ]
+    patterns.extend(operator_patterns)
     keep: list[str] = []
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():
@@ -880,26 +925,45 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
             line = line.strip()
             if line and not line.startswith("#"):
                 if line.startswith("!"):
-                    keep.append(line[1:].strip().strip("/"))
+                    spared = line[1:].strip().strip("/")
+                    keep.append(spared)
+                    if operator_patterns and spared:
+                        patterns.append(_SpareDefault(spared))
                     continue
-                # Directory names without a slash match at any depth, as in
-                # .gitignore. A leading slash remains an explicit root anchor.
-                if line.endswith("/"):
-                    prefix = line[:-1]
-                    if prefix.startswith("/") or "/" in prefix:
-                        line = f"{prefix}/**"
-                    else:
-                        line = f"**/{prefix}/**"
-                elif line.endswith("/**") and not line.startswith(("/", "**/")):
-                    prefix = line[:-3]
-                    if "/" in prefix:
-                        line = f"/{line}"
-                    else:
-                        line = f"**/{line}"
+                line = _normalize_ignore_line(line)
                 if line:
                     patterns.append(line)
     patterns.extend(_nested_output_ignore_patterns(repo_root, patterns, tuple(keep)))
     return patterns
+
+
+def _pattern_matches(normalized: str, parts: tuple[str, ...], pattern: str) -> bool:
+    """Whether one ignore pattern matches the normalised path."""
+    anchored = pattern.startswith("/")
+    candidate = pattern[1:] if anchored else pattern
+
+    if candidate.startswith("**/") and candidate.endswith("/**"):
+        segment = candidate[3:-3]
+        return bool(segment) and segment in parts
+
+    if candidate.endswith("/**"):
+        prefix = tuple(part for part in candidate[:-3].split("/") if part)
+        if not prefix:
+            return False
+        if anchored or len(prefix) > 1:
+            return parts[: len(prefix)] == prefix
+        return prefix[0] in parts
+
+    return fnmatch.fnmatch(normalized, candidate)
+
+
+def _spares(normalized: str, parts: tuple[str, ...], spared: str) -> bool:
+    """Whether a ``!`` line names this path or a folder above it."""
+    spared = spared.replace("\\", "/").strip("/")
+    if not spared:
+        return False
+    folder = f"/{spared}/**" if "/" in spared else f"**/{spared}/**"
+    return _pattern_matches(normalized, parts, folder) or fnmatch.fnmatch(normalized, spared)
 
 
 def _should_ignore(path: str, patterns: list[str]) -> bool:
@@ -907,33 +971,27 @@ def _should_ignore(path: str, patterns: list[str]) -> bool:
 
     ``**/<dir>/**`` and unanchored single-directory patterns match at any
     depth. A leading slash anchors a pattern to the repository root.
+
+    A path matched only by ``CRG_DEFAULT_IGNORE`` patterns is kept when a
+    ``!`` line from the repository's ignore file names it or a folder above it.
     """
     normalized = path.replace("\\", "/").lstrip("/")
     parts = PurePosixPath(normalized).parts
+    operator_hit = False
     for pattern in patterns:
-        anchored = pattern.startswith("/")
-        candidate = pattern[1:] if anchored else pattern
-
-        if candidate.startswith("**/") and candidate.endswith("/**"):
-            segment = candidate[3:-3]
-            if segment and segment in parts:
-                return True
+        if isinstance(pattern, _SpareDefault):
             continue
-
-        if candidate.endswith("/**"):
-            prefix = tuple(part for part in candidate[:-3].split("/") if part)
-            if not prefix:
-                continue
-            if anchored or len(prefix) > 1:
-                if parts[: len(prefix)] == prefix:
-                    return True
-            elif prefix[0] in parts:
-                return True
+        if not _pattern_matches(normalized, parts, pattern):
             continue
-
-        if fnmatch.fnmatch(normalized, candidate):
+        if not isinstance(pattern, _DefaultIgnore):
             return True
-    return False
+        operator_hit = True
+    if not operator_hit:
+        return False
+    return not any(
+        isinstance(pattern, _SpareDefault) and _spares(normalized, parts, pattern)
+        for pattern in patterns
+    )
 
 
 def _child_directories(directory: Path) -> list[tuple[str, bool]]:

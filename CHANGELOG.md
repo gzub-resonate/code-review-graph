@@ -4,6 +4,22 @@
 
 ### Added
 
+- `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has
+  no callers in the graph, so it used to look safe: a pull request adding 75 production symbols
+  reported one changed function. `pull_request.new_code` gives the totals (symbols added, tests
+  added, symbols no test in the pull request calls, the highest score) and, beyond `minimal`, one
+  page of scored symbols, riskiest first, each with how a test was tied to it (`coverage`: `linked`,
+  `name_only`, `unit_only` or `none`), the tests, and the reasons: no test, a new endpoint, a
+  security-looking name, size and branching. The overall `risk_score` is now the higher of that and
+  the changed symbols' score, and `risk_breakdown` shows both. The score is a heuristic: a test
+  is tied to a symbol by the names the parser reads, not by a resolved call. The same `cursor` pages
+  the scored symbols with the changed functions and the symbol names.
+- `CRG_DEFAULT_IGNORE` sets ignore patterns for every repository without editing each one, for
+  example `src/generated/**,.claude/**` (comma or newline separated, same syntax as
+  `.code-review-graphignore`). Full builds and updates honour it, and a file already in the graph
+  that it excludes is removed on the next update. A `!path` line in a repository's own
+  `.code-review-graphignore` spares a path the setting would exclude. A bad value (over 200 patterns,
+  a pattern over 256 characters, a control character, or a `!` entry) is reported as an error.
 - `cross_repo_search_tool` and `cross_repo_requests_tool` stop after
   `CRG_CROSS_REPO_BUDGET_SECONDS` (default 300, `0` = no limit) instead of running for minutes over a
   large registry. When the time is spent no new repo is started; the ones left come back in
@@ -298,6 +314,14 @@
 
 ### Fixed
 
+- A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
+  declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
+  unresolved unless the base class was imported, so `callers_of` and impact radius missed every
+  test or subclass that used an inherited helper. On a 935-file Java service this linked 693
+  more calls (15,908 to 16,601 resolved Java calls). A call whose class extends a type outside
+  the repository, or whose method name is overloaded, is still left unresolved or marked
+  ambiguous rather than guessed.
+- `refactor_tool(mode="dead_code")` no longer lists a Dockerfile build stage (`stage:0`, `stage:builder`) as dead code.
 - `cross_repo_search_tool` ranks an exact name first. Scores differ between repos, so ordering by
   repo-local rank alone put other repos' weak first hits ahead of the exact match, and a repo's
   `limit` could cut its own exact match behind fuzzier hits.
@@ -457,6 +481,9 @@
 
 ### Internal
 
+- `new_code.py` scores a pull request's added symbols; `pr_blast_radius.analyse` keeps each file's
+  added production symbols and test symbols (`FileReport.new_symbols`) for it. Tests are
+  `test_new_code.py`.
 - `tests/test_cross_repo_ranking_budget.py` covers the match tiers, the paging walk in ranked order,
   the call budget (a monkeypatched clock through `registry_tools._now`) and the
   `CRG_CROSS_REPO_BUDGET_SECONDS` validation in `constants.cross_repo_budget_seconds`.

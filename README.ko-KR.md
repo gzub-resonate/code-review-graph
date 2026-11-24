@@ -676,6 +676,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 작업의 제한 시간(초, build / update / watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | 리뷰 도구나 명령에 파일 목록이 주어지지 않았을 때 변경 내용을 찾는 각 Git 명령의 제한 시간(초). 초과하면 오류를 반환하며 '변경 없음'으로 보고하지 않음 | `5`(`CRG_GIT_TIMEOUT`을 직접 설정하면 그 값) |
+| `CRG_DEFAULT_IGNORE` | 모든 저장소에 적용되는 추가 제외 패턴으로, 각 저장소의 `.code-review-graphignore`에 더해 쓰입니다(문법 동일, 쉼표 또는 줄바꿈으로 구분). 예: `src/generated/**,.claude/**`. 저장소의 `.code-review-graphignore`에 `!path` 줄을 쓰면 이 패턴이 제외하는 경로를 살릴 수 있습니다. 패턴이 200개를 넘거나 하나가 256자를 넘거나 제어 문자가 있거나 `!`로 시작하면 오류입니다 | - |
 | `CRG_DATA_DIR` | 그래프 데이터베이스와 생성물이 놓이는 디렉터리. `install`이 쓴 파일의 기록은 저장소의 `.code-review-graph/`에 남습니다 | - |
 | `CRG_HOME` | 사용자별 상태를 두는 폴더: 다중 저장소 등록부(`registry.json`), 데몬의 `watch.toml`, 데몬의 pid와 상태 파일, `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1`로 두면 생성된 git 훅이 연결된 git worktree에서도 실행 | - |
