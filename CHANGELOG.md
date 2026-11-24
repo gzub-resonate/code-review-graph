@@ -37,6 +37,22 @@
 
 ### Changed
 
+- `get_hub_nodes_tool`, `get_bridge_nodes_tool`, `get_surprising_connections_tool`,
+  `get_suggested_questions_tool` and `get_knowledge_gaps_tool` now leave test code out by default, so
+  test methods no longer crowd the ranking. Pass `include_tests=true` to get the old output back.
+  Tests are removed before ranking, so `total`, `next_cursor` and the summaries describe the list
+  without them, and a paging cursor made with one `include_tests` value is refused for the other.
+  `get_knowledge_gaps_tool` also stops listing configuration keys (JSON and YAML paths, Liquid outputs,
+  Spring properties) as isolated nodes, whatever `include_tests` says.
+
+- Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
+  `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
+  is deleted when the call ends (leftovers of a killed call are swept on the next one). The
+  checkout gains no refs and no objects, so repeated calls cannot fill the disk, and `refs/crg/*`
+  refs an earlier version left are removed.
+- Feign client methods are no longer listed as served routes by `endpoints_for`
+  or `handlers_of`. Run `code-review-graph build` once to re-index existing
+  Feign interfaces.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers

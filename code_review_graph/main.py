@@ -1316,6 +1316,7 @@ async def get_hub_nodes_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1329,12 +1330,16 @@ async def get_hub_nodes_tool(
             kind, and total_degree only. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_tests: Include test methods and test files. Default: false,
+            so tests are left out before ranking, totals and paging. A cursor
+            made with one value is refused for the other.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_hub_nodes_tool",
         lambda: get_hub_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1346,6 +1351,7 @@ async def get_bridge_nodes_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -1360,6 +1366,9 @@ async def get_bridge_nodes_tool(
             kind, and betweenness only. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_tests: Include test methods and test files. Default: false,
+            so tests are left out before ranking, totals and paging. A cursor
+            made with one value is refused for the other.
 
     Returns:
         Ranked bridges. When more remain the reply carries ``next_cursor``.
@@ -1369,6 +1378,7 @@ async def get_bridge_nodes_tool(
         "get_bridge_nodes_tool",
         lambda: get_bridge_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1380,6 +1390,7 @@ async def get_knowledge_gaps_tool(
     max_per_category: int = 15,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1396,6 +1407,11 @@ async def get_knowledge_gaps_tool(
             file paths. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next rows
             of every category together. Omit it for the first page.
+        include_tests: Include test nodes. Default: false, so tests are left
+            out of every category before totals and paging. Config-document
+            nodes (JsonPath, YamlPath, Output, ConfigProperty) are never
+            listed as isolated. A cursor made with one value is refused for
+            the other.
 
     Returns:
         Gaps by category. When any category has more rows the reply carries
@@ -1407,6 +1423,7 @@ async def get_knowledge_gaps_tool(
         lambda: get_knowledge_gaps_func(
             repo_root=root, max_per_category=max_per_category,
             detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1418,6 +1435,7 @@ async def get_surprising_connections_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Find unexpected architectural coupling via composite surprise scoring.
 
@@ -1432,6 +1450,9 @@ async def get_surprising_connections_tool(
             source, target, kind, and score only. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_tests: Include test methods and test files. Default: false,
+            so tests are left out before ranking, totals and paging. A cursor
+            made with one value is refused for the other.
 
     Returns:
         Ranked surprising edges. When more remain the reply carries
@@ -1442,6 +1463,7 @@ async def get_surprising_connections_tool(
         "get_surprising_connections_tool",
         lambda: get_surprising_connections_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1450,6 +1472,7 @@ async def get_surprising_connections_tool(
 @mcp.tool(annotations={"readOnlyHint": True})
 async def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Auto-generate review questions from graph analysis.
 
@@ -1459,12 +1482,14 @@ async def get_suggested_questions_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        include_tests: Include test nodes. Default: false, so the questions
+            are about production code.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_suggested_questions_tool",
         lambda: get_suggested_questions_func(
-            repo_root=root,
+            repo_root=root, include_tests=include_tests,
         ),
         root,
     )
