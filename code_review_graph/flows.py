@@ -666,18 +666,28 @@ def _not_a_flow_root(node: GraphNode) -> bool:
     )
 
 
+#: ``extra.resolution`` of the derived ``REFERENCES`` edges a flow follows out of a state.
+_ASL_FLOW_RESOLUTIONS = ("asl_name_convention", "asl_replacement_vars", "asl_lambda_handler")
+
+
 def _add_asl_edges(store: GraphStore, adj: FlowAdjacency) -> None:
     """Let a flow follow a Step Functions state to the next state and to what a Task runs.
 
-    ``TRANSITIONS_TO`` (next, choice, catch, Parallel branch, Map processor) and the inferred
-    ``REFERENCES`` from a Task state to its Terraform Lambda or ECS task definition are added
-    to the adjacency as call edges, for ``asl`` sources only. They are not ``CALLS`` in the
-    store, so every other consumer of ``CALLS`` is unaffected.
+    ``TRANSITIONS_TO`` (next, choice, catch, Parallel branch, Map processor) and the derived
+    ``REFERENCES`` of a Task state are added to the adjacency as call edges, for ``asl``
+    sources only: to its Terraform Lambda or ECS task definition (``asl_name_convention``),
+    to the Lambda handler function it runs (``asl_lambda_handler``), whose own calls the
+    flow then follows, and to what a ``${placeholder}`` stands for
+    (``asl_replacement_vars``; an external target is not a node, so a flow stops there).
+    They are not ``CALLS`` in the store, so every other consumer of ``CALLS`` is unaffected.
     """
+    labels = _ASL_FLOW_RESOLUTIONS
     rows = store._conn.execute(
         "SELECT source_qualified, target_qualified FROM edges WHERE kind = 'TRANSITIONS_TO' "
         "OR (kind = 'REFERENCES' AND json_valid(extra) "
-        "AND json_extract(extra, '$.resolution') = 'asl_name_convention') ORDER BY id"
+        f"AND json_extract(extra, '$.resolution') IN ({','.join('?' * len(labels))})) "  # nosec B608
+        "ORDER BY id",
+        labels,
     ).fetchall()
     for row in rows:
         source = adj.nodes_by_qn.get(row[0])
