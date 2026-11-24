@@ -132,3 +132,28 @@ def test_endpoint_queries_follow_addressable_handles_edges(tmp_path: Path) -> No
     assert len(routes["edges"]) == 2
     assert {result["kind"] for result in routes["results"]} == {"Endpoint"}
     assert {edge["kind"] for edge in routes["edges"]} == {"HANDLES"}
+
+
+def test_mapping_paths_that_join_to_one_route_give_one_endpoint(tmp_path: Path) -> None:
+    source = """
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/v2/audiencedelivery")
+class ScheduleController {
+    @PostMapping(path = {"", "/"})
+    Object createSchedule() { return null; }
+}
+"""
+    nodes, edges = CodeParser().parse_bytes(
+        tmp_path / "ScheduleController.java", source.encode(),
+    )
+
+    endpoints = [n for n in nodes if n.kind == "Endpoint"]
+    handles = [e for e in edges if e.kind == "HANDLES"]
+    assert [n.name for n in endpoints] == [
+        "createSchedule@PostMapping[0:0] POST /v2/audiencedelivery",
+    ]
+    assert endpoints[0].extra["path_variants"] == ["", "/"]
+    assert handles[0].extra["path_variants"] == ["", "/"]
+    assert len(handles) == 1
