@@ -10,13 +10,17 @@ segment of ``<base>`` to a registered repo, the way ``cross_repo_requests`` reso
 service name. A link is ``matched`` when the repo is registered and the ``subdir`` holds
 files in its graph, ``module_not_found`` when the repo is registered but the folder is not
 in its graph, ``ambiguous`` when several registered repos answer to the name, and
-``repo_not_registered`` otherwise. The join is computed on every call; nothing is stored.
+``repo_not_registered`` otherwise. A Terraform registry address (``namespace/name/provider``,
+``registry.terraform.io/...`` or ``tfr://...``) names a published module, not a git repo, so it
+is ``registry_module`` and is never matched against registered repos. The join is computed on
+every call; nothing is stored.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Optional
@@ -28,7 +32,12 @@ from .repo_aliases import RepoNameResolver
 
 logger = logging.getLogger(__name__)
 
-STATUSES = ("matched", "module_not_found", "ambiguous", "repo_not_registered")
+STATUSES = (
+    "matched", "module_not_found", "ambiguous", "repo_not_registered", "registry_module",
+)
+
+_REGISTRY_HOST = "registry.terraform.io/"
+_REGISTRY_ADDRESS = re.compile(r"\w[\w-]*/[\w.-]+/[\w.-]+")
 
 
 def _like_escape(text: str) -> str:
@@ -38,6 +47,31 @@ def _like_escape(text: str) -> str:
 def repo_name_of(base: str) -> str:
     """The repository name a module address ends in (``.../org/repo`` gives ``repo``)."""
     return base.rstrip("/").rsplit("/", 1)[-1]
+
+
+def registry_module_name(base: str, source_kind: Optional[str] = None) -> Optional[str]:
+    """The module name when *base* is a Terraform registry address, else ``None``.
+
+    Registry addresses are ``namespace/name/provider``, optionally behind
+    ``registry.terraform.io/`` or ``tfr://``. A git source (``git::``, ``github.com/...``,
+    another ``://`` scheme) is never one.
+    """
+    text = base
+    if text.startswith("tfr://"):
+        text = text[len("tfr://"):].lstrip("/")
+        source_kind = "registry"
+    elif "://" in text:
+        return None
+    if text.startswith(_REGISTRY_HOST):
+        text = text[len(_REGISTRY_HOST):]
+        source_kind = "registry"
+    elif source_kind in ("git", "archive", "local"):
+        return None
+    elif text.split("/", 1)[0].lower() == "github.com":
+        return None
+    if not _REGISTRY_ADDRESS.fullmatch(text):
+        return None
+    return text.split("/")[1]
 
 
 def read_module_edges(store: GraphStore) -> list[dict[str, Any]]:
@@ -61,6 +95,7 @@ def read_module_edges(store: GraphStore) -> list[dict[str, Any]]:
             "base": target[len(EXTERNAL_TERRAFORM_MODULE_PREFIX):],
             "subdir": info.get("subdir"),
             "ref": info.get("ref"),
+            "source_kind": info.get("source_kind"),
         })
     return out
 
@@ -90,9 +125,12 @@ def resolve_links(
     for index, edges in edges_by_repo.items():
         source_path = Path(all_repos[index]["path"])
         for edge in edges:
-            name = repo_name_of(edge["base"])
-            targets = resolver.lookup(name)
-            if not targets:
+            registry_name = registry_module_name(edge["base"], edge.get("source_kind"))
+            name = registry_name or repo_name_of(edge["base"])
+            targets = [] if registry_name else resolver.lookup(name)
+            if registry_name:
+                status = "registry_module"
+            elif not targets:
                 status = "repo_not_registered"
             elif len(targets) > 1:
                 status = "ambiguous"

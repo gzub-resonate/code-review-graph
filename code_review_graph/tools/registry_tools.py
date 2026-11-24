@@ -149,6 +149,9 @@ def _echoed(names: list[str]) -> tuple[list[str], int, bool]:
 #: weak rank-1 hit.
 _MATCH_TIERS = ("exact", "exact_ci", "qualified", "prefix", "tokens", "fuzzy")
 _TIER_ORDER = {name: rank for rank, name in enumerate(_MATCH_TIERS)}
+#: Tiers that make weaker rows noise, and the rows hidden then (see ``include_fuzzy``).
+_STRONG_TIERS = frozenset({"exact", "exact_ci", "qualified"})
+_WEAK_TIERS = frozenset({"tokens", "fuzzy"})
 _QUALIFIED_SEPARATORS = (".", "::")
 #: Kind the hybrid search leaves out unless asked for; the exact lookup does too.
 _UNSEARCHED_KIND = "Output"
@@ -346,6 +349,7 @@ def cross_repo_search_func(
     max_results: int = 50,
     repos: list[str] | None = None,
     cursor: str | None = None,
+    include_fuzzy: bool = False,
 ) -> dict[str, Any]:
     """Search across registered repositories.
 
@@ -513,6 +517,11 @@ def cross_repo_search_func(
         # stable tie-breaker.
         ranked_results.sort(key=lambda item: item[:3])
         merged = [item[3] for item in ranked_results]
+        fuzzy_dropped = 0
+        if not include_fuzzy and any(r.get("match") in _STRONG_TIERS for r in merged):
+            kept = [r for r in merged if r.get("match") not in _WEAK_TIERS]
+            fuzzy_dropped = len(merged) - len(kept)
+            merged = kept
         skipped_shown, skipped_total, skipped_truncated = _echoed(skipped)
         # The rows come from several graph databases and are searched afresh on every
         # call, so the stamp is a digest of the rows themselves, and of the repos left
@@ -521,7 +530,7 @@ def cross_repo_search_func(
             merged, max_results, _MAX_CROSS_REPO_RESULTS, cursor,
             scope=make_scope(
                 "cross_repo_search_tool", query=query, kind=kind, limit=limit,
-                repos=sorted(set(repos)) if repos else None,
+                repos=sorted(set(repos)) if repos else None, include_fuzzy=include_fuzzy,
             ),
             stamp=make_scope("cross_repo_search_rows", rows=merged, skipped=skipped),
         )
@@ -536,6 +545,11 @@ def cross_repo_search_func(
             notes += f"; {unknown_total} name(s) matched no repository"
         if ambiguous_total:
             notes += f"; {ambiguous_total} name(s) matched several"
+        if fuzzy_dropped:
+            notes += (
+                f"; {fuzzy_dropped} fuzzy/tokens row(s) hidden because exact matches exist "
+                "(pass include_fuzzy=True to see them)"
+            )
         if skipped_total:
             notes += (
                 f"; time budget of {budget:g}s spent, {skipped_total} repo(s) not searched "
@@ -553,6 +567,7 @@ def cross_repo_search_func(
             ),
             "results": all_results,
             "total": total,
+            "fuzzy_dropped": fuzzy_dropped,
             "truncated": truncated,
             "repos_searched": searched_repos,
             "skipped_repos": skipped_shown,
@@ -873,11 +888,13 @@ def cross_repo_requests_func(
             lists the remote Terraform module sources the repos name instead (see
             below); ``service`` then filters by module repo name, ``route`` by
             module folder prefix, and ``status`` is one of ``matched``,
-            ``module_not_found``, ``ambiguous`` or ``repo_not_registered``. ``workflow``
+            ``module_not_found``, ``ambiguous``, ``repo_not_registered`` or ``registry_module``
+            (a Terraform registry address, never matched to a repo). ``workflow``
             lists the GitHub Actions ``uses`` references (reusable workflows and actions)
             that point at another repo; ``service`` then filters by the target repo name,
             ``route`` by path prefix inside it, and ``status`` is one of ``matched``,
-            ``path_not_found``, ``ambiguous`` or ``repo_not_registered``. Local
+            ``path_not_found``, ``ambiguous``, ``repo_not_registered`` (same org, not
+            indexed) or ``external_action`` (third-party owner). Local
             (``./``) and ``docker://`` references are not listed. ``stepfunction``
             lists what the Step Functions Task states call (a Lambda, an ECS task
             definition, an SNS topic, another state machine, ...) and the registered

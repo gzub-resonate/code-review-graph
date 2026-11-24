@@ -1766,6 +1766,7 @@ async def cross_repo_search_tool(
     repos: Optional[list[str]] = None,
     cursor: Optional[str] = None,
     detail_level: str = "standard",
+    include_fuzzy: bool = False,
 ) -> dict:
     """Search for code entities across registered repositories.
 
@@ -1800,6 +1801,9 @@ async def cross_repo_search_tool(
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
+        include_fuzzy: When an ``exact``, ``exact_ci`` or ``qualified`` match exists,
+            ``fuzzy`` and ``tokens`` rows are hidden and counted in ``fuzzy_dropped``.
+            Pass True to keep them. Default: False.
 
     Returns:
         Merged results. When more remain the reply carries ``next_cursor``; a
@@ -1809,7 +1813,7 @@ async def cross_repo_search_tool(
         "cross_repo_search_tool",
         lambda: cross_repo_search_func(
             query=query, kind=kind, limit=limit, max_results=max_results,
-            repos=repos, cursor=cursor,
+            repos=repos, cursor=cursor, include_fuzzy=include_fuzzy,
         ),
         None,
         provenance=False,
@@ -1873,13 +1877,15 @@ async def cross_repo_requests_tool(
             lists the remote Terraform module sources (``git::...//modules/x``)
             the repos name and the registered repo and folder each resolves to:
             ``service`` filters by module repo name, ``route`` by module folder
-            prefix, ``status`` is ``matched``, ``module_not_found``, ``ambiguous``
-            or ``repo_not_registered``. Use it from a module repo to see which
+            prefix, ``status`` is ``matched``, ``module_not_found``, ``ambiguous``,
+            ``repo_not_registered`` or ``registry_module`` (a Terraform registry
+            address such as ``cloudposse/x/aws``). Use it from a module repo to see which
             stacks use a module. ``workflow`` lists the GitHub Actions ``uses``
             references (reusable workflows and actions) that point at another repo
             and the registered repo and path each resolves to: ``service`` filters
             by target repo name, ``route`` by path prefix, ``status`` is ``matched``,
-            ``path_not_found``, ``ambiguous`` or ``repo_not_registered``. Local
+            ``path_not_found``, ``ambiguous``, ``repo_not_registered`` (same org, not
+            indexed) or ``external_action`` (third-party owner). Local
             ``./`` and ``docker://`` references are not listed. Use it from a
             workflow-templates repo to see which repos call a workflow.
             ``stepfunction`` lists what the Step Functions Task states of the repos
