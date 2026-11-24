@@ -233,6 +233,119 @@ def _traced_edges(
     return traced, bare
 
 
+_PY_ENUM_BASES = frozenset({"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum"})
+_PY_DATA_BASES = {"NamedTuple": "namedtuple", "TypedDict": "typeddict", "BaseModel": "pydantic"}
+_LOMBOK_DATA_ANNOTATIONS = frozenset({
+    "Data", "Value", "Getter", "Setter", "Builder", "SuperBuilder", "AllArgsConstructor",
+    "NoArgsConstructor", "RequiredArgsConstructor", "ToString", "EqualsAndHashCode",
+    "With", "Jacksonized",
+})
+_VALUE_METHODS = frozenset({"equals", "hashCode", "toString", "canEqual", "builder", "toBuilder"})
+_ACCESSOR_RE = re.compile(r"^(get|set|is)[A-Z0-9_]")
+
+
+def _annotation_name(text: str) -> str:
+    """``@lombok.Data(x=1)`` -> ``Data``."""
+    return text.lstrip("@").split("(", 1)[0].rsplit(".", 1)[-1].strip()
+
+
+def _arity(params: str | None) -> int:
+    """Number of parameters in a ``(T a, Map<K, V> b)`` signature text."""
+    inner = (params or "").strip().strip("()").strip()
+    if not inner:
+        return 0
+    depth = 0
+    count = 1
+    for ch in inner:
+        if ch in "<[(":
+            depth += 1
+        elif ch in ">])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            count += 1
+    return count
+
+
+def _is_accessor(method: tuple[str, str | None]) -> bool:
+    """A value method, a no-argument ``get``/``is`` or a one-argument ``set``.
+
+    The argument count keeps a static ``isStreamTag(type)`` helper from passing as one.
+    """
+    name, params = method
+    if name in _VALUE_METHODS:
+        return True
+    if not _ACCESSOR_RE.match(name):
+        return False
+    return _arity(params) == (1 if name.startswith("set") else 0)
+
+
+def data_type_label(
+    node: GraphNode,
+    methods: list[tuple[str, str | None]] | None = None,
+    bases: set[str] | None = None,
+) -> str | None:
+    """Why *node* is a data carrier, or None when it is not one (or cannot be told).
+
+    Decided from what the parser recorded (``extra['type_form']``, ``decorators``,
+    ``java_kind``, ``ts_data_shape``), the base names of its INHERITS edges and the
+    names of its methods, never from the class name. A class with a method other than
+    an accessor (Java) or a non-dunder method (Python, Kotlin, C#) is never a data type,
+    so Lombok annotations alone do not decide it. *methods* are ``(name, params)`` pairs.
+    A Java class with neither Lombok annotations nor an accessor (an exception, a constants
+    holder) is not one. Enums always are. Labels: ``enum``,
+    ``record``, ``data_class``, ``lombok_data``, ``pojo``, ``dataclass``, ``namedtuple``,
+    ``typeddict``, ``pydantic``, ``interface``, ``type_alias``.
+    """
+    if node.kind != "Class":
+        return None
+    extra = node.extra or {}
+    methods = methods or []
+    bases = bases or set()
+    form = extra.get("type_form")
+    if form == "enum" or (node.language == "python" and bases & _PY_ENUM_BASES):
+        return "enum"
+    if node.language in ("typescript", "tsx"):
+        if extra.get("ts_data_shape"):
+            return "interface" if extra.get("typescript_kind") == "interface_declaration" \
+                else "type_alias"
+        return None
+    if form in ("record", "data_class"):
+        return form if all(_is_accessor(m) for m in methods) else None
+    if node.language == "python":
+        if any(not (m[0].startswith("__") and m[0].endswith("__")) for m in methods):
+            return None
+        decorators = {_annotation_name(d) for d in extra.get("decorators") or []}
+        if "dataclass" in decorators:
+            return "dataclass"
+        return next((label for b, label in _PY_DATA_BASES.items() if b in bases), None)
+    if node.language == "java" and extra.get("java_kind") == "concrete":
+        if extra.get("spring_stereotype"):
+            return None
+        members = [m for m in methods if m[0] != node.name]
+        behavior = [m for m in members if not _is_accessor(m)]
+        annotations = {_annotation_name(a) for a in extra.get("decorators") or []}
+        lombok = bool(annotations & _LOMBOK_DATA_ANNOTATIONS)
+        if behavior or not (lombok or members):
+            return None
+        return "lombok_data" if lombok else "pojo"
+    return None
+
+
+def _class_members(nodes: list[GraphNode], raw_edges: list[GraphEdge]) -> tuple[
+    dict[tuple[str, str], list[tuple[str, str | None]]], dict[str, set[str]],
+]:
+    """Method (name, params) pairs per (file, class scope) and INHERITS base names per class."""
+    methods: dict[tuple[str, str], list[tuple[str, str | None]]] = defaultdict(list)
+    for n in nodes:
+        if n.kind == "Function" and n.parent_name:
+            methods[(n.file_path, n.parent_name)].append((n.name, n.params))
+    bases: dict[str, set[str]] = defaultdict(set)
+    for e in raw_edges:
+        if e.kind == "INHERITS":
+            bases[e.source_qualified].add(re.split(r"[.:]", e.target_qualified)[-1])
+    return methods, bases
+
+
 def find_hub_nodes(
     store: GraphStore,
     top_n: int = 10,
@@ -244,6 +357,7 @@ def find_hub_nodes(
     edges: list[GraphEdge] | None = None,
     include_generated: bool = True,
     stats: dict[str, int] | None = None,
+    exclude_data_types: bool = False,
 ) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
 
@@ -270,17 +384,23 @@ def find_hub_nodes(
     Generated code (see ``is_generated_file``) is left out unless *include_generated* is true;
     a *stats* dict receives ``generated_excluded``, the number of nodes that cost.
 
+    With *exclude_data_types*, data carriers (see ``data_type_label``: enums, records,
+    Lombok or accessor-only Java classes, dataclasses, TS interfaces and type aliases
+    with no methods) are left out before ranking and counted in ``stats['data_types_excluded']``.
+    Every row carries ``data_type``, the label or None, whether or not they are left out.
+
     Returns list of dicts with: name, qualified_name, kind, file,
-    in_degree, out_degree, total_degree, ranking_degree, community_id, resolution_split
+    in_degree, out_degree, total_degree, ranking_degree, community_id, data_type,
+    resolution_split
     (``direct``: edges counted, ``bare_name``: edges left out)
     """
     # Get all non-File nodes
     if nodes is None:
         nodes = store.get_all_nodes(exclude_files=True)
     node_map = {n.qualified_name: n for n in nodes}
-    edges, bare = _traced_edges(
-        store.get_all_edges() if edges is None else edges, set(node_map),
-    )
+    raw_edges = store.get_all_edges() if edges is None else edges
+    edges, bare = _traced_edges(raw_edges, set(node_map))
+    methods_of, bases_of = _class_members(nodes, raw_edges)
     in_degree: dict[str, int] = Counter()
     out_degree: dict[str, int] = Counter()
     weighted: dict[str, float] = Counter()
@@ -302,6 +422,7 @@ def find_hub_nodes(
     repo = store.get_repo_root() if not (include_tests and include_generated) else None
     root = None if include_tests else repo
     generated_excluded = 0
+    data_types_excluded = 0
 
     scored: list[dict[str, Any]] = []
     for n in nodes:
@@ -320,6 +441,15 @@ def find_hub_nodes(
         if not include_generated and is_generated_file(n.file_path, repo):
             generated_excluded += 1
             continue
+        data_type = None
+        if n.kind == "Class":
+            scope = f"{n.parent_name}.{n.name}" if n.parent_name else n.name
+            data_type = data_type_label(
+                n, methods_of.get((n.file_path, scope)), bases_of.get(qn),
+            )
+        if exclude_data_types and data_type:
+            data_types_excluded += 1
+            continue
         scored.append({
             "name": _sanitize_name(n.name),
             "qualified_name": n.qualified_name,
@@ -330,6 +460,7 @@ def find_hub_nodes(
             "total_degree": total,
             "ranking_degree": round(weighted.get(qn, 0.0), 2),
             "community_id": community_map.get(qn),
+            "data_type": data_type,
             "resolution_split": {"direct": total, "bare_name": bare.get(qn, 0)},
         })
 
@@ -338,6 +469,7 @@ def find_hub_nodes(
     scored.sort(key=lambda x: (-x["ranking_degree"], x["qualified_name"]))
     if stats is not None:
         stats["generated_excluded"] = generated_excluded
+        stats["data_types_excluded"] = data_types_excluded
     return scored[:top_n]
 
 
