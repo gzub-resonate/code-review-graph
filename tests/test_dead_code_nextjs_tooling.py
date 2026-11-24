@@ -79,7 +79,7 @@ def test_scripts_dir_not_reported(tmp_path):
 
 def test_global_setup_default_export_not_reported(tmp_path):
     setup = "export default async function globalSetup() {}\nexport function helperX() {}\n"
-    dead = _dead(tmp_path, {"e2e/global-setup.ts": setup})
+    dead = _dead(tmp_path, {"config/global-setup.ts": setup})
     assert "globalSetup" not in dead and "helperX" in dead
 
 
@@ -131,7 +131,7 @@ def test_declared_and_exported_only_still_reported(tmp_path):
 
 def test_test_support_flag_and_total(tmp_path):
     entries = _entries(tmp_path, {
-        "e2e/pages/login.ts": "export function loginHelperZ() {}\n",
+        "cypress/support/login.ts": "export function loginHelperZ() {}\n",
         "src/stories/Foo.ts": "export function storyHelperZ() {}\n",
         "lib/real.ts": UTIL,
     })
