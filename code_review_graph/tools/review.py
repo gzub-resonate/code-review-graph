@@ -1054,6 +1054,7 @@ def _new_code_section(
         "tests_added": new_code["tests_added"],
         "untested": new_code["untested"],
         "score": new_code["score"],
+        "capped": bool(new_code.get("capped")),
     }
     if page is None:
         return section
@@ -1129,7 +1130,12 @@ def _fold_in_new_code(
     rows = new_code["rows"]
     if rows and rows[0]["score"] > 0:
         top = rows[0]
-        line += f"; riskiest {top['name']} ({top['score']:.2f}: {'; '.join(top['reasons'])})"
+        line += (
+            f"; riskiest {' '.join(_sanitize_name(str(top['name'])).split())} "
+            f"({top['score']:.2f}: {'; '.join(top['reasons'])})"
+        )
+    if new_code.get("capped"):
+        line += "; the pull request holds more symbols than are scored (capped)"
     if page is not None and page.total > len(page.items) and page.offset == 0:
         line += f"; {len(page.items)} of {page.total} scored rows shown"
     result["summary"] = str(result.get("summary") or "") + line

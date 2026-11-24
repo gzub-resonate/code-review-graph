@@ -23,6 +23,10 @@ __all__ = ["NewSymbol", "collect", "score_new_code"]
 
 #: Symbols kept per file, so a generated file cannot grow a request without bound.
 MAX_SYMBOLS_PER_FILE = 400
+#: Symbols scored and tests searched across a whole pull request. Past them the rest are left
+#: out and the result says so (``capped``).
+MAX_PRODUCTION_SYMBOLS = 3000
+MAX_TEST_SYMBOLS = 5000
 
 #: Weights, as in ``changes.compute_risk_score``: the untested and security terms are the same,
 #: a new endpoint counts like a flow entry point, and size and branching share a small term.
@@ -87,7 +91,11 @@ def _stem(path: str) -> str:
 def _unit(path: str, *, test: bool) -> str:
     """The thing a file is about: ``FooServiceIT.java`` and ``test_foo.py`` name ``fooservice``
     and ``foo``; a production file names itself."""
-    stem = _stem(path)
+    return _unit_of_name(_stem(path), test=test)
+
+
+def _unit_of_name(stem: str, *, test: bool) -> str:
+    """:func:`_unit` for a bare file or class name."""
     if not test:
         return stem.lower()
     lowered = stem.lower()
@@ -121,6 +129,11 @@ def collect(
             )
     lines = text.splitlines()
     in_test_file = is_test_file(path)
+    # Branch points per line, summed over a symbol's lines with prefix sums, so a class that
+    # holds many methods does not have its whole body scanned again for each of them.
+    prefix = [0]
+    for line in lines:
+        prefix.append(prefix[-1] + len(_BRANCH.findall(line)))
     out: list[NewSymbol] = []
     for node in nodes:
         if node.kind not in ("Function", "Test", "Class"):
@@ -133,17 +146,35 @@ def collect(
             break
         local = f"{node.parent_name}.{node.name}" if node.parent_name else node.name
         start, end = node.line_start or 0, node.line_end or 0
-        body = "\n".join(lines[max(0, start - 1):end]) if end >= start > 0 else ""
+        first, last = max(0, start - 1), min(end, len(lines))
+        branches = prefix[last] - prefix[first] if last > first else 0
         out.append(NewSymbol(
             file=path, name=node.name, kind=node.kind, parent=node.parent_name,
             line_start=start, line_end=end, is_test=is_test, handler=local in handlers,
-            branches=0 if is_test else len(_BRANCH.findall(body)),
+            branches=0 if is_test else branches,
             calls=frozenset(calls.get(local, ())), added=key in added,
         ))
     return out
 
 
-def _coverage(symbol: NewSymbol, tests: list[NewSymbol]) -> tuple[str, list[str]]:
+class _TestIndex:
+    """The tests of a pull request by the names they call and the unit they are about, so
+    each production symbol is matched by lookup, not by a scan of every test."""
+
+    def __init__(self, tests: list[NewSymbol]) -> None:
+        self.by_call: dict[str, list[NewSymbol]] = {}
+        self.by_unit: dict[str, list[NewSymbol]] = {}
+        for test in tests:
+            for name in test.calls:
+                self.by_call.setdefault(name, []).append(test)
+            units = {_unit(test.file, test=True)}
+            if test.parent:
+                units.add(_unit_of_name(test.parent, test=True))
+            for unit in units:
+                self.by_unit.setdefault(unit, []).append(test)
+
+
+def _coverage(symbol: NewSymbol, index: _TestIndex) -> tuple[str, list[str]]:
     """How a test tied to *symbol* was found.
 
     ``linked``: a test of the symbol's class (or module) calls it, or a test file for the class
@@ -156,20 +187,19 @@ def _coverage(symbol: NewSymbol, tests: list[NewSymbol]) -> tuple[str, list[str]
     owner = symbol.name if symbol.kind == "Class" else symbol.parent
     unit = (owner or _stem(symbol.file)).lower()
     file_unit = _stem(symbol.file).lower()
-    unit_tests = [
-        t for t in tests
-        if _unit(t.file, test=True) in {unit, file_unit}
-        or (owner and (t.parent or "").lower().startswith(owner.lower()))
-    ]
-    calling_all = [t for t in tests if symbol.name in t.calls]
+    unit_tests: dict[int, NewSymbol] = {}
+    for key in {unit, file_unit}:
+        for test in index.by_unit.get(key, ()):
+            unit_tests[id(test)] = test
+    calling_all = index.by_call.get(symbol.name, [])
     linked = [
         t for t in calling_all
-        if t in unit_tests or (owner is not None and owner in t.calls)
+        if id(t) in unit_tests or (owner is not None and owner in t.calls)
     ]
     if linked:
         return "linked", [t.name for t in linked[:3]]
     if symbol.kind == "Class" and unit_tests:
-        return "linked", [t.name for t in unit_tests[:3]]
+        return "linked", [t.name for t in list(unit_tests.values())[:3]]
     # A name like ``get`` is in every codebase, so it can tie a test to a symbol only
     # together with the symbol's class or file, never alone.
     too_common = len(symbol.name) < _MIN_NAME or symbol.name.lower() in _GENERIC
@@ -181,8 +211,8 @@ def _coverage(symbol: NewSymbol, tests: list[NewSymbol]) -> tuple[str, list[str]
     return "none", []
 
 
-def _row(symbol: NewSymbol, tests: list[NewSymbol]) -> dict[str, Any]:
-    coverage, test_names = _coverage(symbol, tests)
+def _row(symbol: NewSymbol, index: _TestIndex) -> dict[str, Any]:
+    coverage, test_names = _coverage(symbol, index)
     score = 0.0
     reasons: list[str] = []
     # A class is exercised through its methods, which are scored on their own, so its own
@@ -233,12 +263,16 @@ def score_new_code(symbols: Iterable[NewSymbol]) -> dict[str, Any]:
     line), ``production_added``, ``tests_added`` (test symbols in the files read),
     ``untested`` (functions whose coverage is ``none``; a class is exercised through its
     methods) and ``score``, the highest row score, as the overall risk of a change is its
-    riskiest symbol.
+    riskiest symbol. ``capped`` is true when the pull request holds more symbols than
+    ``MAX_PRODUCTION_SYMBOLS`` or ``MAX_TEST_SYMBOLS``, and the rest were left out.
     """
     everything = list(symbols)
     tests = [s for s in everything if s.is_test]
     production = [s for s in everything if not s.is_test]
-    rows = [_row(s, tests) for s in production]
+    capped = len(production) > MAX_PRODUCTION_SYMBOLS or len(tests) > MAX_TEST_SYMBOLS
+    production, tests = production[:MAX_PRODUCTION_SYMBOLS], tests[:MAX_TEST_SYMBOLS]
+    index = _TestIndex(tests)
+    rows = [_row(s, index) for s in production]
     rows.sort(key=lambda r: (-r["score"], r["file"], r["line"], r["name"]))
     return {
         "rows": rows,
@@ -246,4 +280,5 @@ def score_new_code(symbols: Iterable[NewSymbol]) -> dict[str, Any]:
         "tests_added": sum(1 for s in tests if s.added and s.kind in ("Test", "Function")),
         "untested": sum(1 for r in rows if r["coverage"] == "none" and r["kind"] != "Class"),
         "score": rows[0]["score"] if rows else 0.0,
+        "capped": capped,
     }
