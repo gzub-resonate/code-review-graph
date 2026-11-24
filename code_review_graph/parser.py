@@ -136,6 +136,13 @@ _PYTHON_MODULE_CLASS_IDENTITY_CACHE: dict[
     tuple[str, int, int], dict[str, tuple[str, str]],
 ] = {}
 _PYTHON_MODULE_CLASS_IDENTITY_CACHE_LOCK = threading.RLock()
+# ``{module file: (class fields, module-level instances)}``, read once per
+# module version. See :meth:`CodeParser._python_module_members`.
+_PYTHON_MODULE_MEMBERS_CACHE: dict[
+    tuple[str, int, int],
+    tuple[dict[tuple[str, str], str], dict[str, str]],
+] = {}
+_PYTHON_MODULE_MEMBERS_CACHE_LOCK = threading.RLock()
 
 # Marker separating expression-receiver evidence from name-receiver evidence
 # in the receiver-evidence map. ``\x00`` cannot occur in a Python identifier,
@@ -187,6 +194,9 @@ class _PyReceiverContext(NamedTuple):
     symbol_names: dict[str, str]
     local_returns: dict[str, str]
     property_returns: dict[tuple[str, str], str]
+    # Fields of each class this file defines once, filled after the context is
+    # built because reading them needs the context.
+    file_class_fields: dict[str, dict[str, tuple[str, str]]] = {}
 
 
 class _NodeGroup(NamedTuple):
@@ -9122,6 +9132,13 @@ class CodeParser:
                         ):
                             type_name = receiver
                             evidence = "class_receiver"
+                            if language == "python" and self._python_is_module_instance(
+                                import_map.get(receiver), receiver,
+                            ):
+                                # ``SPEC = BotSpec(...)`` imported by name is an
+                                # instance, not a class spelled in capitals;
+                                # the receiver-evidence reader types it.
+                                type_name = None
                     if type_name:
                         target = self._resolve_typed_method_target(
                             type_name,
@@ -9758,7 +9775,25 @@ class CodeParser:
             symbol_names=symbol_names,
             local_returns=local_returns,
             property_returns=property_returns,
+            file_class_fields={},
         )
+        # Fields of every class this file defines exactly once, so
+        # ``clients.jira.get_issue()`` can read ``Clients`` wherever it sits.
+        def collect_file_class_fields(node, depth: int = 0) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    class_name = name_node.text.decode("utf-8", errors="replace")
+                    if class_name not in ambiguous_property_classes:
+                        context.file_class_fields[class_name] = (
+                            self._collect_python_class_fields(node, context)
+                        )
+            for child in node.children:
+                collect_file_class_fields(child, depth + 1)
+
+        collect_file_class_fields(root)
 
         module_env: dict[str, tuple[str, str]] = {}
         # A name imported as a symbol is most often a class used as
@@ -9772,6 +9807,16 @@ class CodeParser:
                 ("module", next(iter(files))) if len(files) == 1
                 else ("unknown", "")
             )
+        # ``from specs import SPEC`` where ``specs`` binds ``SPEC = BotSpec(...)``
+        # once at top level: the name is an instance of that class.
+        for name, origin in symbol_origins.items():
+            if name in class_names:
+                continue
+            instance = self._python_module_members(origin)[1].get(
+                symbol_names.get(name, name),
+            )
+            if instance is not None:
+                module_env[name] = ("class", instance)
 
         evidence: dict[tuple[int, str], tuple[str, str]] = {}
         expression_evidence: dict[tuple[int, str], list[tuple[str, str]]] = {}
@@ -10298,6 +10343,193 @@ class CodeParser:
             _PYTHON_MODULE_CLASS_IDENTITY_CACHE[cache_key] = identities
         return identities
 
+    def _python_module_members(
+        self, module_file: str,
+    ) -> tuple[dict[tuple[str, str], str], dict[str, str]]:
+        """What one module declares about its classes' fields and its instances.
+
+        Returns ``(fields, instances)``. ``fields`` maps ``(class, field)`` to
+        the class identity the module itself writes for that field: a
+        class-body annotation (``jira: JiraClient``), ``self.x: T = ...`` or
+        ``self.x = T(...)`` inside a method. ``instances`` maps a module-level
+        name bound once to ``T(...)`` or annotated ``NAME: T`` to ``T``'s
+        identity. A name the module binds two ways, or a type it does not
+        define or import by name, is left out: no guess is recorded.
+        """
+        empty: tuple[dict[tuple[str, str], str], dict[str, str]] = ({}, {})
+        if not module_file.endswith(".py"):
+            return empty
+        try:
+            module_path = Path(module_file).resolve()
+            file_stat = module_path.stat()
+            source = module_path.read_bytes()
+        except (OSError, RuntimeError, ValueError):
+            return empty
+        resolved = normalize_file_path(module_path)
+        if self._excluded_files and resolved in self._excluded_files:
+            return empty
+        cache_key = (resolved, file_stat.st_mtime_ns, file_stat.st_size)
+        with _PYTHON_MODULE_MEMBERS_CACHE_LOCK:
+            cached = _PYTHON_MODULE_MEMBERS_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+        parser = self._get_parser("python")
+        if not parser:
+            return empty
+        try:
+            tree = parser.parse(source)  # type: ignore[union-attr]
+        except (RecursionError, ValueError):  # pragma: no cover
+            return empty
+        identities = self._python_module_class_identities(resolved)
+
+        def identity_of(type_name: Optional[str]) -> Optional[str]:
+            found = identities.get(type_name) if type_name else None
+            return _python_qualified_class_identity(*found) if found else None
+
+        def constructed(value) -> Optional[str]:
+            if value is None or value.type != "call":
+                return None
+            callee = self._python_unwrap_callee(value.child_by_field_name("function"))
+            if callee is None or callee.type != "identifier":
+                return None
+            return identity_of(callee.text.decode("utf-8", errors="replace"))
+
+        def annotated(type_node) -> Optional[str]:
+            if type_node is None:
+                return None
+            return identity_of(self._base_type_name(
+                type_node.text.decode("utf-8", errors="replace"),
+            ))
+
+        field_bindings: dict[tuple[str, str], list[Optional[str]]] = {}
+        instance_bindings: dict[str, list[Optional[str]]] = {}
+        class_counts: dict[str, int] = {}
+
+        def record_field(owner: str, left, value, type_node, in_method: bool) -> None:
+            if left is None:
+                return
+            if left.type == "identifier" and not in_method:
+                field = left.text.decode("utf-8", errors="replace")
+            elif left.type == "attribute" and in_method:
+                target_object = left.child_by_field_name("object")
+                target_name = left.child_by_field_name("attribute")
+                if (
+                    target_object is None
+                    or target_name is None
+                    or target_object.text not in (b"self", b"cls")
+                ):
+                    return
+                field = target_name.text.decode("utf-8", errors="replace")
+            else:
+                return
+            bound = annotated(type_node) if type_node is not None else constructed(value)
+            field_bindings.setdefault((owner, field), []).append(bound)
+
+        def visit_class(node, owner: str, in_method: bool, depth: int) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node.type == "class_definition" and depth > 0:
+                return
+            if node.type == "function_definition":
+                in_method = True
+            if node.type == "assignment":
+                record_field(
+                    owner, node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                    node.child_by_field_name("type"), in_method,
+                )
+            for child in node.children:
+                visit_class(child, owner, in_method, depth + 1)
+
+        for top in tree.root_node.children:
+            node = top
+            if node.type == "decorated_definition":
+                node = node.child_by_field_name("definition") or node
+            if node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                if name_node is None:
+                    continue
+                name = name_node.text.decode("utf-8", errors="replace")
+                class_counts[name] = class_counts.get(name, 0) + 1
+                visit_class(node, name, False, 0)
+            elif node.type in ("expression_statement", "assignment"):
+                for child in (node.children if node.type != "assignment" else [node]):
+                    if child.type != "assignment":
+                        continue
+                    left = child.child_by_field_name("left")
+                    if left is None or left.type != "identifier":
+                        continue
+                    type_node = child.child_by_field_name("type")
+                    bound = (
+                        annotated(type_node) if type_node is not None
+                        else constructed(child.child_by_field_name("right"))
+                    )
+                    instance_bindings.setdefault(
+                        left.text.decode("utf-8", errors="replace"), [],
+                    ).append(bound)
+
+        fields: dict[tuple[str, str], str] = {}
+        for (owner, field_name), bound_to in field_bindings.items():
+            # A class defined twice, or a field bound to two different things
+            # (or to something unreadable), says nothing reliable.
+            distinct = set(bound_to)
+            if class_counts.get(owner) == 1 and len(distinct) == 1:
+                only = next(iter(distinct))
+                if only is not None:
+                    fields[(owner, field_name)] = only
+        instances: dict[str, str] = {}
+        for name, bound_to in instance_bindings.items():
+            distinct = set(bound_to)
+            if len(distinct) == 1 and name not in class_counts:
+                only = next(iter(distinct))
+                if only is not None:
+                    instances[name] = only
+
+        members = (fields, instances)
+        with _PYTHON_MODULE_MEMBERS_CACHE_LOCK:
+            for stale in [
+                key for key in _PYTHON_MODULE_MEMBERS_CACHE
+                if key[0] == resolved and key != cache_key
+            ]:
+                _PYTHON_MODULE_MEMBERS_CACHE.pop(stale, None)
+            if len(_PYTHON_MODULE_MEMBERS_CACHE) >= _PYTHON_STAR_CACHE_MAX:
+                for oldest in list(_PYTHON_MODULE_MEMBERS_CACHE)[
+                    : _PYTHON_STAR_CACHE_MAX // 2
+                ]:
+                    _PYTHON_MODULE_MEMBERS_CACHE.pop(oldest, None)
+            _PYTHON_MODULE_MEMBERS_CACHE[cache_key] = members
+        return members
+
+    def _python_is_module_instance(self, module_file: Optional[str], name: str) -> bool:
+        """Whether *module_file* binds *name* once, to an instance of a known class."""
+        return bool(module_file) and name in self._python_module_members(module_file)[1]
+
+    def _python_class_field_evidence(
+        self,
+        owner_type: str,
+        member: str,
+        context: _PyReceiverContext,
+    ) -> Optional[tuple[str, str]]:
+        """Class a field of *owner_type* holds, as its declaring module writes it.
+
+        *owner_type* is a bare class name (a class this file defines, or one
+        it imported by name) or a full class identity. Anything else, an
+        ambiguous class name included, returns None.
+        """
+        identity = _python_split_class_identity(owner_type)
+        if identity is not None:
+            origin, actual = identity
+        elif owner_type in context.class_names and owner_type not in context.symbol_origins:
+            local = context.file_class_fields.get(owner_type, {}).get(member)
+            return local if local is not None and local[0] == "class" else None
+        else:
+            origin = context.symbol_origins.get(owner_type, "")
+            actual = context.symbol_names.get(owner_type, owner_type)
+        if not origin:
+            return None
+        bound = self._python_module_members(origin)[0].get((actual, member))
+        return ("class", bound) if bound else None
+
     def _read_python_property_return_annotations(
         self, module_path: Path,
     ) -> dict[tuple[str, str], str]:
@@ -10391,7 +10623,16 @@ class CodeParser:
                 return ("class", current_class) if current_class else None
             if name in context.class_names or name in context.imported_names:
                 # A bare class symbol is a class receiver, not an instance on
-                # which Python invokes @property getters.
+                # which Python invokes @property getters. An imported
+                # module-level instance (``SPEC = BotSpec(...)`` elsewhere)
+                # is the exception: its binding carries the class identity.
+                bound = env.get(name)
+                if (
+                    bound is not None
+                    and bound[0] == "class"
+                    and _python_split_class_identity(bound[1]) is not None
+                ):
+                    return bound
                 return None
             return env.get(name)
         if expression.type != "attribute":
@@ -10425,6 +10666,14 @@ class CodeParser:
             field_evidence = class_fields.get(member)
             if field_evidence is not None and field_evidence[0] == "class":
                 return field_evidence
+        else:
+            # ``clients.jira``: a field of some other class, typed by the
+            # module that declares that class.
+            declared = self._python_class_field_evidence(
+                owner_evidence[1], member, context,
+            )
+            if declared is not None:
+                return declared
         definition = self._python_property_definition(
             owner_evidence[1], member, context,
         )
@@ -10748,8 +10997,10 @@ class CodeParser:
             inner = obj.child_by_field_name("function")
             if inner is None:
                 return None
-            constructed = self._python_constructor_class(inner, context)
-            return ("class", constructed) if constructed else None
+            # A constructor names its class outright; a call to a function
+            # with a written return annotation names what that says.
+            returned = self._python_call_evidence(obj, (), context)
+            return returned if returned[0] in ("class", "builtin") else None
         module_file = self._python_dotted_module_file(obj, context)
         return ("module", module_file) if module_file else None
 

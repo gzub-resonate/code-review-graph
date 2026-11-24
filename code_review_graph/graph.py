@@ -8,6 +8,7 @@ Supports impact-radius queries and subgraph extraction.
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import logging
@@ -3581,6 +3582,49 @@ class GraphStore:
             ):
                 if resolution in split:
                     split[resolution] += count
+        return split
+
+    # Names Python itself provides. A bare call to one of these, with no node of
+    # the same name anywhere in the graph, cannot be a call into the repository.
+    _PYTHON_BUILTIN_NAMES = tuple(sorted(
+        name for name in dir(builtins) if not name.startswith("_")
+    ))
+
+    def count_calls_by_classification(self) -> dict[str, int]:
+        """``count_edges_by_resolution`` with the unresolved CALLS split in two.
+
+        ``external`` are Python call sites whose own extra proves the target
+        can never be a repository node: a builtin function or exception named
+        with no receiver, a method on a receiver the parser bound to a builtin
+        container, string, number or file, or a method on a receiver bound to
+        an imported name that no repository class carries. They stay stored as
+        ``unresolved``; only this read-time count separates them, so no other
+        reader of ``target_resolution`` changes. ``unresolved`` here is what
+        is left, and the three counts add up to every CALLS edge.
+        """
+        split = self.count_edges_by_resolution("CALLS")
+        marks = ",".join("?" for _ in self._PYTHON_BUILTIN_NAMES)
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM edges e "  # noqa: S608
+            f"WHERE e.kind = 'CALLS' AND COALESCE(e.target_resolution, "
+            f"{target_resolution_expr('e')}) = 'unresolved' "
+            "AND e.file_path LIKE '%.py' AND ("
+            " json_extract(e.extra, '$.receiver_binding') = 'builtin'"
+            " OR (json_extract(e.extra, '$.receiver_binding') = 'class'"
+            "  AND json_extract(e.extra, '$.receiver_class_file') IS NULL"
+            "  AND json_extract(e.extra, '$.receiver_class') IS NOT NULL"
+            "  AND NOT EXISTS (SELECT 1 FROM nodes c "
+            "   WHERE c.name = json_extract(e.extra, '$.receiver_class')))"
+            " OR (json_extract(e.extra, '$.receiver') IS NULL"
+            "  AND json_extract(e.extra, '$.receiver_form') IS NULL"
+            f"  AND e.target_qualified IN ({marks})"
+            "  AND NOT EXISTS (SELECT 1 FROM nodes b"
+            "   WHERE b.name = e.target_qualified)))",
+            self._PYTHON_BUILTIN_NAMES,
+        ).fetchone()
+        external = row[0] if row else 0
+        split["unresolved"] -= external
+        split["external"] = external
         return split
 
     def resolve_cpp_scoped_call_targets(self) -> int:
