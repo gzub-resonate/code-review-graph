@@ -238,3 +238,10 @@ def test_a_merged_pull_request_is_not_a_bare_no_changes(config_pull_request):
     assert result["status"] == "ok"
     assert "already merged into main" in result["summary"]
     assert result["already_merged"] is True
+
+
+def test_minimal_removed_symbol_count_agrees_with_the_pull_request_total(pull_request):
+    result = detect(pull_request, head="pr", base="main", detail_level="minimal")
+    total = result["pull_request"]["removed_symbols_total"]
+    assert total > 0
+    assert result["removed_symbol_count"] == total
