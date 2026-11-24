@@ -2338,6 +2338,7 @@ class GraphStore:
         max_frontier: int | None = None,
         *,
         include_helper_routes: bool = True,
+        include_callee_routes: bool = True,
     ) -> list[dict]:
         """Find tests covering a node, including indirect (transitive) coverage.
 
@@ -2353,7 +2354,15 @@ class GraphStore:
            is a pointer to a test, not a record of coverage, so risk scoring
            must not count it.
 
-        Returns a list of dicts with node fields plus ``indirect: bool``.
+        Returns a list of dicts with node fields plus ``indirect: bool``, direct
+        tests first, then indirect ones by path length. An indirect row also
+        carries ``hops`` (CALLS hops on the route) and ``route``: ``"helper"``
+        (a test reaches the symbol through test helpers) or ``"callee"`` (the
+        test covers something the symbol calls, found by step 2; ``via`` names
+        that callee). A callee test shows the symbol runs code that is tested,
+        not that the symbol is: pass ``include_callee_routes=False`` for the
+        tests that do cover it. Only resolved edges are followed on either
+        route; a bare name no node answers to is never walked.
 
         ``max_frontier`` caps the CALLS fan-out per BFS hop to prevent O(N*M)
         query explosion on hub functions in large graphs. Defaults to
@@ -2394,7 +2403,7 @@ class GraphStore:
         target_file = row["file_path"] if row else ""
         target_parent = row["parent_name"] if row else None
 
-        def _node_dict(qn: str, indirect: bool) -> dict | None:
+        def _node_dict(qn: str, indirect: bool, **extra: Any) -> dict | None:
             row = conn.execute(
                 "SELECT * FROM nodes WHERE qualified_name = ?", (qn,)
             ).fetchone()
@@ -2406,6 +2415,7 @@ class GraphStore:
                 "file_path": row["file_path"],
                 "kind": row["kind"],
                 "indirect": indirect,
+                **extra,
             }
 
         # Direct TESTED_BY (source=production, target=test). See: #515
@@ -2508,7 +2518,7 @@ class GraphStore:
         # string hash seed, so cutting it unsorted kept different callees in
         # every new process. Callees with a node go first, since the rest are skipped.
         frontier = sorted(set(input_qns))
-        for _ in range(max_depth):
+        for hop in range(1, max_depth + 1 if include_callee_routes else 1):
             next_frontier: set[str] = set()
             for qn in frontier:
                 for row in conn.execute(
@@ -2540,7 +2550,9 @@ class GraphStore:
                     tgt = row["target_qualified"]
                     if tgt not in seen:
                         seen.add(tgt)
-                        d = _node_dict(tgt, indirect=True)
+                        d = _node_dict(
+                            tgt, indirect=True, hops=hop, route="callee", via=callee,
+                        )
                         if d:
                             results.append(d)
 
@@ -2551,10 +2563,17 @@ class GraphStore:
                 for test in route["tests"]:
                     if test not in seen:
                         seen.add(test)
-                        d = _node_dict(test, indirect=True)
+                        d = _node_dict(
+                            test, indirect=True, hops=route["depth"], route="helper",
+                        )
                         if d:
                             results.append(d)
 
+        # Direct first, then helper routes, then callee tests, each by path
+        # length. The sort is stable, so the order within a rank is unchanged.
+        results.sort(key=lambda r: (
+            r["indirect"], r.get("route") == "callee", r.get("hops", 0),
+        ))
         return results
 
     def get_ambiguous_call_tests(self, qualified_name: str) -> list[str]:

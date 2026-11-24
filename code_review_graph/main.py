@@ -1446,6 +1446,7 @@ async def get_hub_nodes_tool(
     detail_level: str = "standard",
     cursor: Optional[str] = None,
     include_tests: bool = False,
+    exclude_leaf_primitives: bool = False,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1462,6 +1463,9 @@ async def get_hub_nodes_tool(
         include_tests: Include test methods and test files. Default: false,
             so tests are left out before ranking, totals and paging. A cursor
             made with one value is refused for the other.
+        exclude_leaf_primitives: Skip nodes that call or reference no indexed
+            non-test node, such as design-system components that many files
+            use. Default: false.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1469,6 +1473,7 @@ async def get_hub_nodes_tool(
         lambda: get_hub_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
             include_tests=include_tests,
+            exclude_leaf_primitives=exclude_leaf_primitives,
         ),
         root,
     )
@@ -1520,6 +1525,7 @@ async def get_knowledge_gaps_tool(
     detail_level: str = "standard",
     cursor: Optional[str] = None,
     include_tests: bool = False,
+    include_non_code: bool = False,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1542,6 +1548,10 @@ async def get_knowledge_gaps_tool(
             listed as isolated. A cursor made with one value is refused for
             the other.
 
+        include_non_code: Also report documentation sections, lockfile entries,
+            Dockerfile stages and .storybook/.github files as isolated nodes
+            and untested hotspots. Default: false.
+
     Returns:
         Gaps by category. When any category has more rows the reply carries
         ``next_cursor``; a page after the first adds ``offset``.
@@ -1552,7 +1562,7 @@ async def get_knowledge_gaps_tool(
         lambda: get_knowledge_gaps_func(
             repo_root=root, max_per_category=max_per_category,
             detail_level=detail_level, cursor=cursor,
-            include_tests=include_tests,
+            include_tests=include_tests, include_non_code=include_non_code,
         ),
         root,
     )

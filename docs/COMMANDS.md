@@ -596,6 +596,14 @@ test whose call could mean this method or a same-named one in another class the
 test imports, as with `app(Service::class)->run()`. The summary says how many
 rows are guesses. A guess is never counted as coverage.
 
+`tests_for` lists direct tests first, then indirect ones by path length. Each
+indirect row carries `hops` (CALLS hops on the route), and a test of something
+the target merely calls carries `inferred_by: "callee_test"` and `via`, the callee
+it covers: that shows the target runs tested code, not that it is tested. A test
+that reaches the target through test helpers is not marked. Only resolved edges are
+followed; a bare name no node answers to is never walked, and the walk is at most
+one CALLS hop for callee tests.
+
 #### `get_review_context_tool`
 ```
 changed_files: list[str] | None
@@ -719,9 +727,11 @@ sort_by: str = "criticality"  # criticality, depth, node_count, file_count, name
 limit: int = 50               # Flows per page (max 200)
 kind: str | None              # Entry point kind (e.g. "Test", "Function")
 repo_root: str | None
-detail_level: str = "standard"
+detail_level: str = "standard"   # "minimal": name, qualified_name, file, criticality, node_count
 cursor: str | None            # next_cursor of the previous reply (see Result Bounds)
 ```
+Each flow row carries `qualified_name` and `file` of its entry point (relative to
+the repository root), so two flows with the same name can be told apart.
 
 #### `get_flow_tool`
 ```
@@ -790,16 +800,29 @@ repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
 cursor: str | None               # next_cursor of the previous reply (see Result Bounds)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
+exclude_leaf_primitives: bool = False  # skip nodes that build on no other node
 ```
+Degree counts only edges that name a node. A call or reference whose target is a
+bare name no node answers to (`get`, `parse`, `main`) is left out, as the
+`unresolved` calls of `query_graph_tool` are, so a symbol does not rank for the
+calls it makes to names it could not pin. Each row's `resolution_split` gives
+`direct` (the edges counted) and `bare_name` (the edges left out).
+
+`exclude_leaf_primitives` skips nodes with no outgoing `CALLS` or `REFERENCES` to
+an indexed non-test node. A design-system component that hundreds of files use
+resolves correctly and still tells a reviewer little; the default keeps it.
 
 #### `get_bridge_nodes_tool`
 ```
 top_n: int = 10                  # Bridges per page (max 100)
 repo_root: str | None
-detail_level: str = "standard"   # "minimal" returns name, kind, betweenness
+detail_level: str = "standard"   # "minimal": name, qualified_name, file, kind, betweenness
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
 ```
+Minimal rows give `qualified_name` and `file` relative to the repository root.
+Calls to a bare name no node answers to are not paths, so they do not carry
+betweenness.
 
 #### `get_knowledge_gaps_tool`
 ```
@@ -808,13 +831,27 @@ max_per_category: int = 15       # Entries per gap category per page (max 50)
 detail_level: str = "standard"   # "minimal" drops file paths
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
+include_non_code: bool = False   # also report docs, lockfiles, tooling as gaps
 ```
+Documentation sections (`DocSection`), lockfile entries (`package-lock.json`,
+`.terraform.lock.hcl`, `uv.lock` and the like), Dockerfile stages and anything
+under `.storybook` or `.github` are expected to be isolated or unreferenced, so
+`isolated_nodes` and `untested_hotspots` leave them out unless `include_non_code`
+is set. So are constructors (a function named for the class that holds it): a
+framework such as Guice or Spring calls them, so no call edge names them. A
+constructor with no `CONTAINS` edge is still reported. A hotspot's `degree` counts only edges that name a node, as hub nodes do.
 `summary` maps each category to its untruncated count. The categories are
 `isolated_nodes`, `thin_communities`, `untested_hotspots`,
 `single_file_communities` and `import_cycles`. Test nodes (kind `Test`, `is_test`, or
 a symbol in a test file) are left out of every category unless `include_tests=true`, and a
 community made only of tests is left out with them. Configuration-document nodes
 (`JsonPath`, `YamlPath`, `Output`, `ConfigProperty`) are never listed as isolated nodes.
+
+An `untested_hotspots` row is a node with at least 5 connections that `tests_for`
+shows no covering test for: no direct test and none reaching it through test
+helpers. A test of something it only calls does not count, so the two tools
+agree. A community made only of JSON or YAML paths is a config document and is
+not reported as `thin_communities` or `single_file_communities`.
 
 An `import_cycles` row is one group of files that import each other: `size` is
 how many files, `name` and `cycle` spell out one loop with its import lines, and
@@ -830,10 +867,16 @@ before this release need `code-review-graph build` to tell these imports apart.
 ```
 top_n: int = 15                  # Surprises per page (max 100)
 repo_root: str | None
-detail_level: str = "standard"   # "minimal" returns source, target, kind, score
+detail_level: str = "standard"   # "minimal": source and target (with qualified name and file), kind, score
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
 ```
+Structural containment is never a surprising connection: a CONTAINS edge, or any
+edge between a node and a node that contains it, is left out of the rows and of
+`total`. Rows carry `source_file` and `target_file`. A call made in several places
+is one row per (source, target, edge kind), and a call to a bare name no node
+answers to is not a connection. Degrees, which decide "peripheral-to-hub", count
+only edges that name a node.
 
 #### `get_suggested_questions_tool`
 ```

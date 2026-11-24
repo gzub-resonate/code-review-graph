@@ -307,6 +307,9 @@
   function in place of a name is recorded as dynamic, with the placeholder's
   key name and nothing else. A definition that is not valid JSON, or is over
   1 MiB, keeps only its file node.
+- `get_hub_nodes_tool` takes `exclude_leaf_primitives` (default false), which
+  skips nodes that call or reference no indexed non-test node, such as
+  design-system components. The default ranking is unchanged by it.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
@@ -365,6 +368,35 @@
 - Feign client methods are no longer listed as served routes by `endpoints_for`
   or `handlers_of`. Run `code-review-graph build` once to re-index existing
   Feign interfaces.
+- `get_knowledge_gaps_tool` leaves documentation sections, lockfile entries,
+  Dockerfile stages and files under `.storybook` or `.github` out of
+  `isolated_nodes` and `untested_hotspots`; the new `include_non_code` parameter
+  (default false) brings them back. Constructors held by their class (Guice and
+  Spring call them, so no edge names them) are left out too. A hotspot's `degree` counts only edges that
+  name a node, as hub nodes do.
+- `get_hub_nodes_tool`, `get_bridge_nodes_tool` and
+  `get_surprising_connections_tool` no longer count calls and references whose
+  target is only a bare name (`unresolved`, as in `query_graph_tool`): they
+  inflated whatever symbol made many calls to names such as `get`, `parse` or
+  `main`. Hub rows carry `resolution_split` (`direct` edges counted, `bare_name`
+  edges left out). `get_surprising_connections_tool` also shows a call made in
+  several places once per (source, target, edge kind), and counts it once in
+  `total`.
+- `get_surprising_connections_tool` no longer lists structural containment (a
+  class holding its method, a JSON key holding its child) and does not count it
+  in `total`. Its rows carry `source_file` and `target_file`.
+- Minimal rows of `get_bridge_nodes_tool`, `get_surprising_connections_tool` and
+  `list_flows_tool` carry `qualified_name` and `file` (relative to the repository
+  root), so rows that share a bare name can be told apart. A flow row gives its
+  entry point's.
+- `query_graph_tool` `tests_for` lists direct tests first, then indirect ones by
+  path length, each with `hops`. A test of something the target only calls is
+  labelled `inferred_by: "callee_test"` with the callee as `via`, and counted
+  among the guesses, instead of passing as coverage.
+- `get_knowledge_gaps_tool` reports an untested hotspot by the same rule as
+  `tests_for` (a direct test, or one reaching it through test helpers; a test of a
+  callee does not count), and no longer reports config documents (communities of
+  only JSON or YAML paths) as `thin_communities` or `single_file_communities`.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers

@@ -1662,6 +1662,16 @@ def query_graph(
                 if test:
                     result = node_to_dict(test)
                     result["indirect"] = bool(match.get("indirect", False))
+                    if result["indirect"]:
+                        result["hops"] = match.get("hops")
+                        if match.get("route") == "callee":
+                            # It tests something this node calls, which says
+                            # the node runs tested code, not that it is
+                            # tested. Labelled so it is not read as coverage.
+                            result["inferred_by"] = "callee_test"
+                            via = store.get_node(str(match.get("via")))
+                            if via:
+                                result["via"] = _sanitize_name(via.name)
                     add_result(result)
                     seen.add(test_qn)
             # A PHP test may reach this through the container, as in
@@ -1957,6 +1967,10 @@ def query_graph(
                 # Present only on the rows that are guesses, so a traced row
                 # pays nothing for it.
                 result_fields += ("inferred_by",)
+            if pattern == "tests_for":
+                # Only indirect rows carry the length of the route and, for a
+                # callee's test, the callee.
+                result_fields += ("hops", "via")
             if pattern in _CALL_SITE_PATTERNS:
                 # The line is what turns a name into a location, and it costs
                 # one integer. ``target_resolution`` appears only on the rows
