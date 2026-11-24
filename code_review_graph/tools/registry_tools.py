@@ -731,13 +731,12 @@ def _awssdk_links(
         repos, target_name, target, status, max_results,
     )
     for row in result["results"]:
-        for key in ("source", "target_kind", "operation", "target_repo", "placeholder"):
-            if isinstance(row.get(key), str):
-                row[key] = _sanitize_name(row[key])
-        if isinstance(row.get("candidates"), list):
-            row["candidates"] = [_sanitize_name(str(name)) for name in row["candidates"]]
-        if isinstance(row.get("notify_targets"), list):
-            row["notify_targets"] = [_sanitize_name(str(name)) for name in row["notify_targets"]]
+        # Every string here was read from a repository's files: none is passed on as written.
+        for key, value in list(row.items()):
+            if isinstance(value, str):
+                row[key] = _sanitize_name(value)
+            elif isinstance(value, list):
+                row[key] = [_sanitize_name(str(item)) for item in value]
     return result
 
 

@@ -28,6 +28,7 @@ Also here: S3 locations written as ``s3://``/``https://...amazonaws.com`` litera
 
 from __future__ import annotations
 
+import bisect
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -42,6 +43,10 @@ RESOLUTION = "aws_sdk"
 UNRESOLVED_NAME = "?"
 _DYN = "\x00"
 _MAX_EDGES_PER_FILE = 2000
+#: Longest line a pattern is run on, and the most text read from one file. Longer lines are
+#: cut, so no pattern can be made to run for long by a file's content.
+_MAX_LINE = 2000
+_MAX_TEXT = 1_000_000
 
 _LANG_BY_SUFFIX = {
     ".py": "python", ".java": "java", ".js": "javascript", ".jsx": "javascript",
@@ -195,6 +200,7 @@ _OWN_ARN = {
     "stream": ("kinesis", "stream/"), "delivery-stream": ("firehose", "deliverystream/"),
     "event-bus": ("events", "event-bus/"),
 }
+_PLACEHOLDER_OK = re.compile(r"[A-Za-z0-9_.\-\[\]]{1,128}")
 _PROP_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z0-9_.\-]+)(?::[^}]*)?\}$")
 
 
@@ -295,6 +301,8 @@ class _Out:
             return
         kind = kind or SERVICES[service].kind
         name, placeholder = resolve_name(kind, value)
+        if placeholder is not None and not _PLACEHOLDER_OK.fullmatch(placeholder):
+            placeholder = None
         src = source or self.scopes.source(line)
         key = (src, service, operation, name, line)
         if key in self.seen:
@@ -1100,8 +1108,9 @@ def _uri_access(line_text: str) -> str:
 
 
 def _scan_uris(text: str, out: _Out) -> None:
-    lines = text.splitlines()
+    lines = text[:_MAX_TEXT].splitlines()
     for number, line_text in enumerate(lines, 1):
+        line_text = line_text[:_MAX_LINE]
         if "s3" not in line_text:
             continue
         for rx in (_S3_URI, _S3_VHOST, _S3_PATHSTYLE):
@@ -1124,9 +1133,11 @@ def _scan_uris(text: str, out: _Out) -> None:
 
 # -- Shell and workflow files --------------------------------------------------------------------
 
-_AWS_S3_CMD = re.compile(r"\baws\s+(?:--?\S+(?:[ =]\S+)?\s+)*?s3(?P<api>api)?\s+(?P<sub>[a-z0-9\-]+)(?P<rest>[^\n;|&]*)")  # noqa: E501
-_S3_ARG_URI = re.compile(rf"s3://(?:(?P<b>{_BUCKET_DNS})|(?P<d>{_DYNAMIC_AFTER}))(?P<k>/[^\s'\"]*)?")  # noqa: E501
-_BUCKET_FLAG = re.compile(r"--bucket[ =]['\"]?(?P<v>[^\s'\"]+)")
+_S3_ARG_URI = re.compile(
+    rf"s3://(?:(?P<b>{_BUCKET_DNS})(?![A-Za-z0-9._\-])|(?P<d>{_DYNAMIC_AFTER}))"
+    r"(?P<k>/[A-Za-z0-9._\-/=]*)?"
+)
+_BUCKET_FLAG = re.compile(r"--bucket[ =]['\"]?(?P<v>[A-Za-z0-9._\-${}]{1,255})")
 _CMD_ACCESS_SRC = {"cp": "read", "sync": "read", "mv": "write", "ls": "read", "rm": "write",
                    "presign": "read", "mb": "write", "rb": "write", "website": "write"}
 _CMD_ACCESS_DST = {"cp": "write", "sync": "write", "mv": "write"}
@@ -1143,6 +1154,9 @@ def _shell_value(raw: str) -> Val:
     return Val(_DYN, m.group(1)) if m else Val(_DYN)
 
 
+_AWS_WORD = re.compile(r"\baws\s")
+_COMMAND_END = re.compile(r"[;|&]")
+_SUBCOMMAND = re.compile(r"[a-z0-9\-]{1,40}")
 _VALUED_FLAGS = frozenset({
     "--exclude", "--include", "--profile", "--region", "--acl", "--sse", "--storage-class",
     "--content-type", "--cache-control", "--metadata", "--endpoint-url", "--expires",
@@ -1163,28 +1177,45 @@ def _words_before(rest: str) -> list[str]:
     return words
 
 
+def _aws_s3_commands(line: str) -> Iterator[tuple[bool, str, str]]:
+    """``(is s3api, subcommand, arguments)`` of each ``aws [flags] s3|s3api <sub> ...`` in a line.
+
+    Read by splitting into words, never by a pattern over the flags, so the cost is linear.
+    """
+    for match in _AWS_WORD.finditer(line):
+        segment = _COMMAND_END.split(line[match.end():], maxsplit=1)[0]
+        words = segment.split()
+        i = 0
+        while i < len(words) and words[i].startswith("-"):
+            i += 2 if words[i] in _VALUED_FLAGS else 1
+        if i + 1 < len(words) and words[i] in ("s3", "s3api") \
+                and _SUBCOMMAND.fullmatch(words[i + 1]):
+            yield words[i] == "s3api", words[i + 1], " ".join(words[i + 2:])
+
+
 def _scan_shell(text: str, out: _Out) -> None:
     joined: list[tuple[int, str]] = []
     buffer, start = "", 0
-    for number, raw in enumerate(text.splitlines(), 1):
+    for number, raw in enumerate(text[:_MAX_TEXT].splitlines(), 1):
+        raw = raw[:_MAX_LINE]
         if not buffer:
             start = number
         if raw.rstrip().endswith("\\"):
-            buffer += raw.rstrip()[:-1] + " "
+            buffer = (buffer + raw.rstrip()[:-1] + " ")[:_MAX_LINE]
             continue
         joined.append((start, buffer + raw))
         buffer = ""
     if buffer:
         joined.append((start, buffer))
     for number, line_text in joined:
+        line_text = line_text[:_MAX_LINE]
         if "s3" not in line_text:
             continue
         stripped = line_text.lstrip()
         if stripped.startswith("#"):
             continue
-        for cmd in _AWS_S3_CMD.finditer(line_text):
-            sub, rest = cmd.group("sub"), cmd.group("rest")
-            if cmd.group("api"):
+        for api, sub, rest in _aws_s3_commands(line_text):
+            if api:
                 flag = _BUCKET_FLAG.search(rest)
                 if flag:
                     op = sub.replace("-", "_")
@@ -1211,10 +1242,12 @@ def _scan_shell(text: str, out: _Out) -> None:
 
 # -- Terraform ---------------------------------------------------------------------------------
 
-_TF_RESOURCE = re.compile(r'^\s*resource\s+"(aws_s3_bucket|aws_s3_bucket_notification)"\s+"([^"]+)"\s*\{', re.M)  # noqa: E501
-_TF_ATTR = re.compile(r'^\s*(\w+)\s*=\s*(?:"([^"\n]*)"|(aws_s3_bucket\.[A-Za-z0-9_\-]+)\.\w+)', re.M)  # noqa: E501
+_TF_ANY_RESOURCE = re.compile(
+    r'^[ \t]*resource[ \t]+"([A-Za-z0-9_]+)"[ \t]+"([A-Za-z0-9_\-]+)"[ \t]*\{', re.M,
+)
+_TF_ATTR = re.compile(r'^[ \t]*(\w+)[ \t]*=[ \t]*(?:"([^"\n]*)"|(aws_s3_bucket\.[A-Za-z0-9_\-]+)\.\w+)', re.M)  # noqa: E501
 _TF_NOTIFY = re.compile(
-    r"^\s*(lambda_function_arn|topic_arn|queue_arn)\s*=\s*"
+    r"^[ \t]*(lambda_function_arn|topic_arn|queue_arn)[ \t]*=[ \t]*"
     r'(?:"([^"\n]*)"|aws_(lambda_function|sns_topic|sqs_queue)\.([A-Za-z0-9_\-]+)\.\w+)', re.M,
 )
 _TF_BUCKET_ARN = re.compile(rf'"arn:aws[a-z\-]*:s3:::(?P<b>{_BUCKET_DNS})(?:/[^"\s]*)?"')
@@ -1235,19 +1268,51 @@ def _block(text: str, open_at: int) -> str:
     return text[open_at:]
 
 
+def _line_starts(text: str) -> list[int]:
+    starts = [0]
+    starts.extend(m.end() for m in re.finditer("\n", text))
+    return starts
+
+
+def _resource_blocks(text: str) -> list[tuple[int, int, str, str, str]]:
+    """``(first offset, end offset, type, label, body)`` of each resource block, in one pass.
+
+    A match inside the previous block is skipped, so an unbalanced brace cannot make the
+    scan start over: the cost stays linear in the size of the file.
+    """
+    blocks: list[tuple[int, int, str, str, str]] = []
+    end = 0
+    for m in _TF_ANY_RESOURCE.finditer(text):
+        if m.start() < end:
+            continue
+        body = _block(text, m.end() - 1)
+        end = m.end() - 1 + len(body)
+        blocks.append((m.start(), end, m.group(1), m.group(2), body))
+    return blocks
+
+
 def _scan_terraform(text: str, out: _Out) -> None:
+    text = text[:_MAX_TEXT]
     if "aws_s3_bucket" not in text and ":s3:::" not in text:
         return
+    starts = _line_starts(text)
+
+    def line_of(offset: int) -> int:
+        return bisect.bisect_right(starts, offset)
+
+    blocks = _resource_blocks(text)
     labels: dict[str, str] = {}
-    blocks: list[tuple[str, str, int, str]] = []
-    for m in _TF_RESOURCE.finditer(text):
-        body = _block(text, m.end() - 1)
-        blocks.append((m.group(1), m.group(2), text.count("\n", 0, m.start()) + 1, body))
-        if m.group(1) == "aws_s3_bucket":
+    for _start, _end, rtype, label, body in blocks:
+        if rtype == "aws_s3_bucket":
             for a in _TF_ATTR.finditer(body):
                 if a.group(1) == "bucket" and a.group(2) and "${" not in a.group(2):
-                    labels[m.group(2)] = a.group(2)
-    for rtype, label, line, body in blocks:
+                    labels[label] = a.group(2)
+    for start, _end, rtype, label, body in blocks:
+        if len(out.edges) >= _MAX_EDGES_PER_FILE:
+            return
+        if rtype not in ("aws_s3_bucket", "aws_s3_bucket_notification"):
+            continue
+        line = line_of(start)
         source = out.scopes.resource(rtype, label)
         if rtype == "aws_s3_bucket":
             name = labels.get(label)
@@ -1271,21 +1336,16 @@ def _scan_terraform(text: str, out: _Out) -> None:
                     targets.append(f"{reduced[0]}/{reduced[2]}")
         out.add("s3", "notification", Val(bucket), line, "terraform", kind="bucket",
                 access="notify", source=source, extra={"notify_targets": targets[:20]})
-    for number, line_text in enumerate(text.splitlines(), 1):
-        for m in _TF_BUCKET_ARN.finditer(line_text):
-            owner = _tf_owner(text, number, out)
-            out.add("s3", "policy", Val(m.group("b")), number, "terraform", kind="bucket",
-                    access="policy", source=owner)
-
-
-def _tf_owner(text: str, line: int, out: _Out) -> str:
-    owner = out.scopes.file_path
-    for m in re.finditer(r'^\s*resource\s+"([A-Za-z0-9_]+)"\s+"([^"]+)"\s*\{', text, re.M):
-        start = text.count("\n", 0, m.start()) + 1
-        body = _block(text, m.end() - 1)
-        if start <= line <= start + body.count("\n"):
-            owner = out.scopes.resource(m.group(1), m.group(2))
-    return owner
+    block_starts = [b[0] for b in blocks]
+    for m in _TF_BUCKET_ARN.finditer(text):
+        if len(out.edges) >= _MAX_EDGES_PER_FILE:
+            return
+        owner = out.scopes.file_path
+        i = bisect.bisect_right(block_starts, m.start()) - 1
+        if i >= 0 and m.start() < blocks[i][1]:
+            owner = out.scopes.resource(blocks[i][2], blocks[i][3])
+        out.add("s3", "policy", Val(m.group("b")), line_of(m.start()), "terraform",
+                kind="bucket", access="policy", source=owner)
 
 
 # -- Entry point -------------------------------------------------------------------------------
