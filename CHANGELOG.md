@@ -4,6 +4,15 @@
 
 ### Added
 
+- Step Functions state machines now start flows. The `StartAt` state of each machine is a flow entry
+  point, and the flow follows `TRANSITIONS_TO` (next, choice, catch, Parallel branch, Map
+  processor) and the inferred link from a Task state to its Terraform Lambda or ECS task
+  definition. The flow is named by the machine. Machine and state nodes keep their kinds (`Class`
+  and `Function`: no new kind, no schema change) but now record `asl_role`, `state_machine`,
+  `state_path`, `is_machine_start`, `display_name` (`orders/Notify Failure`, `statemachine orders`)
+  and an indexed `docstring` naming the machine, so identical state names from different machines
+  can be told apart in search. Responses carry `display_name` for ASL nodes.
+
 - `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has
   no callers in the graph, so it used to look safe: a pull request adding 75 production symbols
   reported one changed function. `pull_request.new_code` gives the totals (symbols added, tests
@@ -318,6 +327,8 @@
 
 ### Fixed
 
+- Dunder methods (`__init__`, `__repr__`) are no longer flow entry points just because nothing calls
+  them by name. A framework decorator or an entry name such as `__main__` still makes one.
 - A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
   declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
   unresolved unless the base class was imported, so `callers_of` and impact radius missed every
