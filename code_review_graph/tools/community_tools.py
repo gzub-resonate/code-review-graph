@@ -126,14 +126,25 @@ def list_communities_func(
 
     store, root = _get_store(repo_root)
     try:
+        items = get_communities(
+            store, sort_by=sort_by, min_size=min_size, include_config=include_config,
+        )
+        # A repository of data files has no code communities. Hiding config would
+        # leave an empty list, so the config ones are listed instead and the reply says so.
+        config_only = False
+        if not include_config and not items and count_hidden_config_communities(
+            store, min_size,
+        ):
+            items = get_communities(
+                store, sort_by=sort_by, min_size=min_size, include_config=True,
+            )
+            config_only = True
         page = paginate(
-            get_communities(
-                store, sort_by=sort_by, min_size=min_size, include_config=include_config,
-            ),
+            items,
             max_results, _MAX_COMMUNITIES, cursor,
             scope=make_scope(
                 "list_communities_tool", sort_by=sort_by, min_size=min_size,
-                include_config=include_config,
+                include_config=include_config or config_only,
             ),
             stamp=graph_stamp(store),
         )
@@ -156,7 +167,9 @@ def list_communities_func(
             "truncated": page.truncated,
             **page.fields(),
         }
-        if not include_config:
+        if config_only:
+            result["note"] = _CONFIG_ONLY_NOTE
+        elif not include_config:
             hidden = count_hidden_config_communities(store, min_size)
             if hidden:
                 result["config_communities_hidden"] = hidden
@@ -276,6 +289,12 @@ def get_community_func(
 # ---------------------------------------------------------------------------
 
 
+#: Said when a repository has only config communities, so hiding them would leave nothing.
+_CONFIG_ONLY_NOTE = (
+    "This repository has no code communities, so the communities made of JSON and YAML "
+    "documents are shown. Pass include_config=true to ask for them explicitly."
+)
+
 _MINIMAL_COMMUNITY_FIELDS = ("id", "name", "size", "cohesion", "dominant_language")
 
 
@@ -371,6 +390,14 @@ def get_architecture_overview_func(
     store, root = _get_store(repo_root)
     try:
         full_overview = get_architecture_overview(store, include_config=include_config)
+        config_only = False
+        if (
+            not include_config
+            and not full_overview["communities"]
+            and count_hidden_config_communities(store)
+        ):
+            full_overview = get_architecture_overview(store, include_config=True)
+            config_only = True
         overview = full_overview
         if detail_level == "minimal":
             overview = _minimal_overview(full_overview)
@@ -390,7 +417,7 @@ def get_architecture_overview_func(
             max_results, _MAX_CROSS_EDGES, cursor,
             scope=make_scope(
                 "get_architecture_overview_tool", detail_level=detail_level,
-                include_config=include_config,
+                include_config=include_config or config_only,
             ),
             stamp=graph_stamp(store),
         )
@@ -418,7 +445,9 @@ def get_architecture_overview_func(
             "truncated": truncated,
             **page.fields(),
         }
-        if not include_config:
+        if config_only:
+            result["note"] = _CONFIG_ONLY_NOTE
+        elif not include_config:
             hidden = count_hidden_config_communities(store)
             if hidden:
                 result["config_communities_hidden"] = hidden

@@ -178,3 +178,52 @@ class TestHubsLeaveConfigOut:
             assert find_hub_nodes(store, top_n=1, include_config=False)[0]["kind"] == "Function"
         finally:
             store.close()
+
+
+class TestARepoOfOnlyConfigIsNotEmpty:
+    """Hiding config must not leave a repository of data files with nothing to show."""
+
+    @pytest.fixture()
+    def repo(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        data = tmp_path / ".code-review-graph"
+        data.mkdir()
+        store = GraphStore(str(data / "graph.db"))
+        for path in ("data/votes.json", "data/other.json"):
+            names = [_add(store, "JsonPath", f"$.k{i}", path, i + 1, "json") for i in range(30)]
+            _chain(store, path, names)
+            root = _add(store, "JsonPath", "$", path, 0, "json")
+            for qn in names:
+                store.upsert_edge(EdgeInfo(
+                    kind="CONTAINS", source=root, target=qn, file_path=path, line=1,
+                ))
+        store.commit()
+        cm.store_communities(store, cm.detect_communities(store, min_size=2))
+        store.commit()
+        store.close()
+        return tmp_path
+
+    def test_communities_are_listed_with_a_note(self, repo):
+        result = list_communities_func(repo_root=str(repo))
+        assert result["total"] >= 1 and "json" in result["communities"][0]["name"]
+        assert "no code communities" in result["note"]
+        assert "config_communities_hidden" not in result
+
+    def test_the_overview_shows_them_with_a_note(self, repo):
+        result = get_architecture_overview_func(repo_root=str(repo))
+        assert result["communities"] and "no code communities" in result["note"]
+
+    def test_hubs_are_ranked_with_a_note(self, repo):
+        result = get_hub_nodes_func(repo_root=str(repo), top_n=3)
+        assert result["hub_nodes"] and result["hub_nodes"][0]["name"] == "$"
+        assert "no hub but config" in result["note"]
+
+    def test_asking_for_config_adds_no_note(self, repo):
+        assert "note" not in list_communities_func(repo_root=str(repo), include_config=True)
+        assert "note" not in get_hub_nodes_func(repo_root=str(repo), include_config=True)
+
+    def test_a_repo_with_code_gets_no_note(self, tmp_path):
+        repo = _repo(tmp_path, {"data/votes.json": 30})
+        assert "note" not in list_communities_func(repo_root=str(repo))
+        assert "note" not in get_hub_nodes_func(repo_root=str(repo))
+        assert "note" not in get_architecture_overview_func(repo_root=str(repo))

@@ -109,24 +109,34 @@ def get_hub_nodes_func(
 
     store, _root = _get_store(repo_root or None)
     try:
-        page = paginate(
-            find_hub_nodes(
+        ranked = find_hub_nodes(
+            store, top_n=_FETCH_ALL, include_tests=include_tests,
+            exclude_leaf_primitives=exclude_leaf_primitives,
+            include_config=include_config,
+        )
+        # A repository of data files has no hub but its config nodes. Hiding them
+        # would leave an empty ranking, so they are ranked instead and the reply says so.
+        config_only = False
+        if not include_config and not ranked:
+            with_config = find_hub_nodes(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
-                exclude_leaf_primitives=exclude_leaf_primitives,
-                include_config=include_config,
-            ),
-            top_n, _MAX_HUB_NODES, cursor,
+                exclude_leaf_primitives=exclude_leaf_primitives, include_config=True,
+            )
+            if with_config:
+                ranked, config_only = with_config, True
+        page = paginate(
+            ranked, top_n, _MAX_HUB_NODES, cursor,
             scope=make_scope(
                 "get_hub_nodes_tool", include_tests=include_tests,
                 exclude_leaf_primitives=exclude_leaf_primitives,
-                include_config=include_config,
+                include_config=include_config or config_only,
             ),
             stamp=graph_stamp(store),
         )
         hubs, total = page.items, page.total
         if detail_level == "minimal":
             hubs = _project(hubs, _MINIMAL_HUB_FIELDS)
-        return {
+        result: dict[str, Any] = {
             "status": "ok",
             "summary": (
                 f"{total} hub node(s) ranked by degree"
@@ -143,6 +153,12 @@ def get_hub_nodes_func(
                 "get_bridge_nodes_tool -- find architectural chokepoints",
             ],
         }
+        if config_only:
+            result["note"] = (
+                "This repository has no hub but config document nodes, so they are "
+                "ranked. Pass include_config=true to ask for them explicitly."
+            )
+        return result
     finally:
         store.close()
 
