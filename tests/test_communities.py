@@ -1,5 +1,6 @@
 """Tests for community/cluster detection."""
 
+import dataclasses
 import tempfile
 from pathlib import Path
 
@@ -1223,3 +1224,85 @@ def test_community_name_ties_do_not_depend_on_member_order() -> None:
     assert _extract_keywords(members) == _extract_keywords(list(reversed(members)))
     paths = ["/r/b/x.js", "/r/a/y.js"]
     assert _extract_file_prefix(paths) == _extract_file_prefix(list(reversed(paths))) == "a"
+
+
+def _config_rows(paths: dict[str, int], kind: str = "JsonPath") -> list[GraphNode]:
+    """Config document rows: ``{file path: rows}``."""
+    nodes: list[GraphNode] = []
+    for path, rows in paths.items():
+        for i in range(rows):
+            node = _community_node(
+                len(nodes) + 1, f"{path}::$.k{i}", kind=kind, file_path=path,
+            )
+            nodes.append(dataclasses.replace(node, line_start=i + 1, line_end=i + 1))
+    return nodes
+
+
+def _grouped_names(nodes: list[GraphNode]) -> list[str]:
+    result = communities_module._group_config_documents(nodes, [], 2)
+    communities_module._dedupe_community_names(result, nodes)
+    return sorted(c["name"] for c in result)
+
+
+class TestConfigCommunityNames:
+    def test_sibling_pipeline_config_dirs_get_distinct_readable_names(self) -> None:
+        pipelines = (
+            "datasci/flash/3-set-bits",
+            "engineering/wave/xwave/tlcm/1-etl/tlcm_etl",
+            "engineering/wave/xwave/tlcm/4-pruning",
+            "engineering/wave/models/1-models-training/1-prep",
+            "engineering/wave/audience-delivery/1-dam-traffic-generation",
+        )
+        layout: dict[str, int] = {}
+        for pipeline in pipelines:
+            layout[f"{pipeline}/config/emr.json"] = 60
+            layout[f"{pipeline}/config/steps.json"] = 50
+        names = _grouped_names(_config_rows(layout))
+
+        assert names == sorted([
+            "3-set-bits-config-json",
+            "tlcm-etl-config-json",
+            "4-pruning-config-json",
+            "1-prep-config-json",
+            "1-dam-traffic-generation-config-json",
+        ])
+
+    def test_non_config_directory_keeps_its_own_label(self) -> None:
+        names = _grouped_names(_config_rows({"ecspresso/taskdefs/taskdef-dev.json": 6}))
+        assert names == ["taskdefs-json"]
+
+    def test_bare_config_directory_stays_config(self) -> None:
+        assert _grouped_names(_config_rows({"config/a.json": 5})) == ["config-json"]
+
+    def test_collision_is_resolved_by_the_path_segment_that_differs(self) -> None:
+        # Same name after the first change (etl-config-json), different two levels up.
+        nodes = _config_rows({
+            "wave/tlcm/etl/config/a.json": 30,
+            "wave/models/etl/config/a.json": 20,
+            "wave/audience/etl/config/a.json": 10,
+        })
+        names = _grouped_names(nodes)
+        assert names == sorted([
+            "etl-config-json", "models-etl-config-json", "audience-etl-config-json",
+        ])
+
+    def test_collision_without_a_differing_segment_falls_back_to_numbers(self) -> None:
+        nodes = _config_rows({"a/etl/config/x.json": 4}) + _config_rows(
+            {"a/etl/config/y.yml": 3}, kind="YamlPath",
+        )
+        # Different kinds do not collide; force a collision between two JSON groups.
+        result = communities_module._group_config_documents(nodes, [], 2)
+        for community in result:
+            community["name"] = "etl-config-json"
+        communities_module._dedupe_community_names(result, nodes)
+        assert sorted(c["name"] for c in result) == ["etl-config-json", "etl-config-json-2"]
+
+    def test_named_slices_of_a_large_config_directory_still_work(self) -> None:
+        nodes = _config_rows({
+            "emr/emr-20m.json": 100,
+            "emr/emr-40m.json": 100,
+            "emr/emr-60m.json": 100,
+            "emr/emr-80m.json": 100,
+        })
+        names = _grouped_names(nodes)
+        assert names == ["emr-json-emr-20m-to-emr-40m", "emr-json-emr-60m-to-emr-80m"]
