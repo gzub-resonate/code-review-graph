@@ -1953,6 +1953,20 @@ def _is_runtime_wired(node: Any) -> bool:
     return False
 
 
+def _is_imported_commonjs_default_export(
+    node: Any, incoming_kinds: dict[str, set[str]],
+) -> bool:
+    """True for ``module.exports = function ...`` in a file some other file imports.
+
+    The default export has no name a caller could use, so no CALLS edge reaches it;
+    the file's own IMPORTS_FROM edges are the evidence that it is used. A named
+    export (``exports.foo``) is called by name and goes through the normal checks.
+    """
+    if node.name != "module.exports" or node.language not in ("javascript", "typescript"):
+        return False
+    return "IMPORTS_FROM" in incoming_kinds.get(node.file_path, ())
+
+
 #: Class annotations (as the parser stores them in ``extra["decorators"]``) whose
 #: members a framework invokes: Spring advice classes and picocli commands.
 _MANAGED_CLASS_ANNOTATION = re.compile(
@@ -2412,6 +2426,11 @@ def find_dead_code(
 
         # Skip entry points (by name pattern or decorator, not just "uncalled").
         if _is_entry_point(node):
+            continue
+
+        # A CommonJS default export is what a ``require`` of the file receives, and
+        # nothing calls it by that name, so a file that other files import keeps it.
+        if _is_imported_commonjs_default_export(node, incoming_kinds):
             continue
 
         # Members of a Spring advice class or a picocli @Command class are reached

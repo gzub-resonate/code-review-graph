@@ -32,6 +32,7 @@ from ..incremental import (
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
+from ..signatures import format_signature
 from ._common import _get_store, _resolve_root
 
 logger = logging.getLogger(__name__)
@@ -320,21 +321,8 @@ def _run_postprocess(
         rows = store.get_nodes_without_signature()
         signature_rows: list[tuple[str, int]] = []
         for row in rows:
-            node_id, name, kind, params, ret = (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-            )
-            if kind in ("Function", "Test"):
-                sig = f"def {name}({params or ''})"
-                if ret:
-                    sig += f" -> {ret}"
-            elif kind == "Class":
-                sig = f"class {name}"
-            else:
-                sig = name
+            node_id, name, kind, params, ret, language = tuple(row[:6])
+            sig = format_signature(name, kind, params, ret, language)
             signature_rows.append((sig[:512], node_id))
         # Single transaction via executemany instead of one autocommitted
         # UPDATE per node (issue #721).
@@ -937,21 +925,8 @@ def run_postprocess(
             rows = store.get_nodes_without_signature()
             signature_rows: list[tuple[str, int]] = []
             for row in rows:
-                node_id, name, kind, params, ret = (
-                    row[0],
-                    row[1],
-                    row[2],
-                    row[3],
-                    row[4],
-                )
-                if kind in ("Function", "Test"):
-                    sig = f"def {name}({params or ''})"
-                    if ret:
-                        sig += f" -> {ret}"
-                elif kind == "Class":
-                    sig = f"class {name}"
-                else:
-                    sig = name
+                node_id, name, kind, params, ret, language = tuple(row[:6])
+                sig = format_signature(name, kind, params, ret, language)
                 signature_rows.append((sig[:512], node_id))
             # Single transaction via executemany instead of one autocommitted
             # UPDATE per node (issue #721).

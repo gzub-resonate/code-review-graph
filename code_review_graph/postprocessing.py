@@ -25,6 +25,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .graph import GraphStore
+from .signatures import format_signature
 
 logger = logging.getLogger(__name__)
 
@@ -113,21 +114,8 @@ def _compute_signatures(
         rows = store.get_nodes_without_signature()
         signature_rows: list[tuple[str, int]] = []
         for row in rows:
-            node_id, name, kind, params, ret = (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-            )
-            if kind in ("Function", "Test"):
-                sig = f"def {name}({params or ''})"
-                if ret:
-                    sig += f" -> {ret}"
-            elif kind == "Class":
-                sig = f"class {name}"
-            else:
-                sig = name
+            node_id, name, kind, params, ret, language = tuple(row[:6])
+            sig = format_signature(name, kind, params, ret, language)
             signature_rows.append((sig[:512], node_id))
         # Single transaction via executemany instead of one autocommitted
         # UPDATE per node (issue #721).

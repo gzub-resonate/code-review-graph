@@ -1982,12 +1982,19 @@ def query_graph(
                 # one integer. ``target_resolution`` appears only on the rows
                 # that are guesses, so certain rows pay nothing for it.
                 result_fields += ("call_site", "target_resolution")
+            if pattern == "imports_of":
+                result_fields += ("import_target", "import_target_kind")
+            elif pattern == "importers_of":
+                result_fields += ("importer", "file")
             minimal_results = [
                 {
                     k: r[k]
                     for k in result_fields
                     if k in r
                 }
+                # A row none of the shared fields describe is kept whole, so a
+                # pattern with its own row shape never comes back as ``{}``.
+                or r
                 for r in results
             ]
             minimal_response: dict[str, Any] = {
