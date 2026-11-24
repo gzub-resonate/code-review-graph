@@ -331,6 +331,52 @@ def _compute_cohesion(
 # ---------------------------------------------------------------------------
 
 
+_TEST_CLASS_SUFFIX_RE = re.compile(r"^(.+?)(?:Tests?|Specs?|Suite|IT)$")
+_TEST_CLASS_PREFIX_RE = re.compile(r"^Test(.+)$")
+
+
+def _name_based_test_subjects(idx_to_node: dict[int, GraphNode]) -> dict[int, int]:
+    """Link a test class to the class it tests by name (``FooTest`` -> ``Foo``).
+
+    Covers ``FooTest``, ``FooTests``, ``FooSpec``, ``FooSuite``, ``FooIT`` and
+    ``TestFoo``, for languages (Scala, Java, Kotlin) where the graph has no
+    TESTED_BY edge from a test class. Only classes in a test file or flagged as
+    tests count, and the subject is a non-test class of that name; with several
+    candidates the one whose directory shares the longest prefix with the test
+    (``src/test`` read as ``src/main``) wins, then the lowest qualified name.
+    """
+    subjects: dict[str, list[tuple[int, GraphNode]]] = defaultdict(list)
+    for index, node in idx_to_node.items():
+        if node.kind == "Class" and not _is_test_node(node) and not _is_test_file(node.file_path):
+            subjects[node.name].append((index, node))
+
+    def mirrored_dir(path: str) -> list[str]:
+        segments = path.replace("\\", "/").split("/")[:-1]
+        return ["main" if s in ("test", "tests") else s for s in segments]
+
+    linked: dict[int, int] = {}
+    for index, node in idx_to_node.items():
+        if node.kind != "Class" or not (_is_test_node(node) or _is_test_file(node.file_path)):
+            continue
+        match = _TEST_CLASS_SUFFIX_RE.match(node.name) or _TEST_CLASS_PREFIX_RE.match(node.name)
+        candidates = subjects.get(match.group(1), []) if match else []
+        if not candidates:
+            continue
+        test_dir = mirrored_dir(node.file_path)
+
+        def shared(candidate: tuple[int, GraphNode], test_dir: list[str] = test_dir) -> int:
+            count = 0
+            for a, b in zip(test_dir, mirrored_dir(candidate[1].file_path)):
+                if a != b:
+                    break
+                count += 1
+            return count
+
+        best = min(candidates, key=lambda c: (-shared(c), c[1].qualified_name))
+        linked[index] = best[0]
+    return linked
+
+
 def _reassign_test_nodes(
     clusters: list[list[int]],
     idx_to_node: dict[int, GraphNode],
@@ -385,6 +431,9 @@ def _reassign_test_nodes(
         test_index, subject_index = (
             (source, target) if source_is_test else (target, source)
         )
+        subjects_by_test[test_index].add(subject_index)
+
+    for test_index, subject_index in _name_based_test_subjects(idx_to_node).items():
         subjects_by_test[test_index].add(subject_index)
 
     target_by_test: dict[int, int] = {}
@@ -1026,6 +1075,96 @@ def _dominant_language(members: Sequence[GraphNode]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tests with no subject
+# ---------------------------------------------------------------------------
+
+#: A cluster made only of test code, smaller than this, is not worth a
+#: community of its own when no subject pulled it into one.
+_SMALL_TEST_CLUSTER = 10
+
+
+def _group_orphan_tests(
+    communities: list[dict[str, Any]],
+    nodes: Sequence[GraphNode],
+    edges: Sequence[GraphEdge | _CommunityEdge],
+) -> list[dict[str, Any]]:
+    """Group small all-test communities into one ``tests`` community per module.
+
+    Tests that tie to a subject already moved to its community. What is left
+    are test classes with no subject (helpers, fixtures, suites named after
+    nothing), which clustered into pairs and triples. They are grouped by the
+    path before the first ``src``/``test``/``tests`` directory (the module root,
+    below the prefix every file shares); a module with a single such cluster
+    keeps it.
+    """
+    node_by_qn = {n.qualified_name: n for n in nodes}
+
+    def test_only(comm: dict[str, Any]) -> bool:
+        if comm.get("config_document") or len(comm["members"]) >= _SMALL_TEST_CLUSTER:
+            return False
+        found = [node_by_qn[q] for q in comm["members"] if q in node_by_qn]
+        return bool(found) and all(
+            _is_test_node(n) or _is_test_file(n.file_path) for n in found
+        )
+
+    candidates = [i for i, c in enumerate(communities) if test_only(c)]
+    if len(candidates) < 2:
+        return communities
+
+    dirs = [
+        [seg for seg in n.file_path.replace("\\", "/").split("/")[:-1] if seg] for n in nodes
+    ]
+    prefix_len = 0
+    if dirs:
+        for depth in range(min(len(d) for d in dirs)):
+            if len({d[depth] for d in dirs}) == 1:
+                prefix_len = depth + 1
+            else:
+                break
+
+    def module_key(comm: dict[str, Any]) -> str:
+        first = node_by_qn[comm["members"][0]]
+        segments = [
+            seg for seg in first.file_path.replace("\\", "/").split("/")[:-1] if seg
+        ][prefix_len:]
+        key: list[str] = []
+        for seg in segments:
+            if seg in ("src", "test", "tests", "__tests__"):
+                break
+            key.append(seg)
+        return "/".join(key)
+
+    groups: dict[str, list[int]] = defaultdict(list)
+    for i in candidates:
+        groups[module_key(communities[i])].append(i)
+
+    drop: set[int] = set()
+    created: list[dict[str, Any]] = []
+    for key in sorted(groups):
+        indices = groups[key]
+        if len(indices) < 2:
+            continue
+        members = [q for i in indices for q in communities[i]["members"]]
+        member_nodes = [node_by_qn[q] for q in members if q in node_by_qn]
+        label = _to_slug(key.rsplit("/", 1)[-1]) if key else ""
+        created.append({
+            "name": f"{label}-tests" if label else "tests",
+            "level": 0,
+            "size": len(members),
+            "cohesion": 0.0,
+            "dominant_language": _dominant_language(member_nodes),
+            "description": "",
+            "members": members,
+            "merged": True,
+            "keep_name": True,
+        })
+        drop.update(indices)
+    if not created:
+        return communities
+    return [c for i, c in enumerate(communities) if i not in drop] + created
+
+
+# ---------------------------------------------------------------------------
 # Thin community merging
 # ---------------------------------------------------------------------------
 
@@ -1192,7 +1331,7 @@ def _finalize_communities(
             member_nodes = [node_by_qn[q] for q in comm["members"] if q in node_by_qn]
             comm["cohesion"] = round(cohesion, 4)
             comm["dominant_language"] = _dominant_language(member_nodes)
-            if not comm.get("config_document"):
+            if not comm.get("config_document") and not comm.get("keep_name"):
                 generated = _generate_community_name(member_nodes)
                 if generated not in {"", "empty", "cluster"}:
                     comm["name"] = generated
@@ -1208,6 +1347,7 @@ def _finalize_communities(
             else details
         )
         comm.pop("merged", None)
+        comm.pop("keep_name", None)
 
 
 # ---------------------------------------------------------------------------
@@ -1269,6 +1409,7 @@ def detect_communities(
         results, code_nodes, all_edges,
     )
     results.extend(_group_config_documents(config_nodes, all_edges, min_size))
+    results = _group_orphan_tests(results, unique_nodes, all_edges)
     results = _merge_thin_communities(results, unique_nodes, all_edges)
     _finalize_communities(results, unique_nodes, all_edges)
     for comm in results:
