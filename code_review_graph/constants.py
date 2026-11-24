@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from pathlib import Path, PurePath
 
 logger = logging.getLogger(__name__)
@@ -567,3 +568,25 @@ QUERY_PATTERNS = {
     "file_summary": "Get a summary of all nodes in a file",
     "path_to": "Find how a given symbol or file reaches another",
 }
+
+
+# ---------------------------------------------------------------------------
+# End-to-end (e2e) test convention
+# ---------------------------------------------------------------------------
+#
+# In Resonate-style repositories ``e2e`` means end-to-end tests (Playwright,
+# Cypress, ...). Directory names are matched as WHOLE path segments, so a
+# directory called ``e2e-utils-lib`` is not claimed. Both are case-insensitive.
+# Shared by the parser (``is_test_file``) and the community naming heuristic.
+E2E_DIR_SEGMENT_PATTERN = r"(?:e2e(?:[_-]?tests?)?|end[_-]to[_-]end|end2end)"
+E2E_FILE_NAME_PATTERNS = (
+    r"\.e2e\.[^/\\]+$",  # *.e2e.*
+    r"\.e2e[_-](?:spec|test)\.[^/\\]+$",  # *.e2e-spec.*, *.e2e-test.*, *.e2e_spec.*
+    r"_e2e\.py$",  # *_e2e.py
+    r"_e2e_test\.[^/\\]+$",  # *_e2e_test.*
+    r"e2e[^/\\]*spec",  # *e2e*spec*
+)
+E2E_DIR_RE = re.compile(
+    r"(?:^|[\\/])" + E2E_DIR_SEGMENT_PATTERN + r"[\\/]", re.IGNORECASE
+)
+E2E_FILE_NAME_RES = tuple(re.compile(p, re.IGNORECASE) for p in E2E_FILE_NAME_PATTERNS)

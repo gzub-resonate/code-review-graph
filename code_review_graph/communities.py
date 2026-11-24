@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .constants import env_int
+from .constants import E2E_DIR_RE, E2E_FILE_NAME_RES, env_int
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
 
 _CommunityEdge = namedtuple(
@@ -134,7 +134,10 @@ _TEST_FILE_RE = re.compile(
 
 def _is_test_file(file_path: str) -> bool:
     """Return whether a path looks like a test file (``FooTest.java``, ``test_foo.py``)."""
-    return bool(_TEST_FILE_RE.search(file_path.replace("\\", "/")))
+    path = file_path.replace("\\", "/")
+    if _TEST_FILE_RE.search(path) or E2E_DIR_RE.search(path):
+        return True
+    return any(p.search(path.rsplit("/", 1)[-1]) for p in E2E_FILE_NAME_RES)
 
 
 def _top_by_count(counts: Counter[str]) -> tuple[str, int]:
