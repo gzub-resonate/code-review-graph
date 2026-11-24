@@ -416,3 +416,172 @@ def test_resolver_memoises_a_shared_parent():
     resolver = prefixes.PrefixResolver({"top.py": mid}, ["top.py"])
     assert resolver.prefixes("top.py", "mid") == ["/v1/a"]
     assert resolver.parents[("top.py", "mid")] == [("top.py", "top", "/a")]
+
+
+# ---------------------------------------------------------------------------
+# Router objects, handlers and the queries that name them
+# ---------------------------------------------------------------------------
+
+ROUTES_APP = {
+    "app/main.py": '''
+from fastapi import FastAPI
+from app.api import users
+from app.api.users import ws_router
+from app.core import api_router as core_router
+
+app = FastAPI()
+app.include_router(router=users.router, prefix="/v1")
+app.include_router(ws_router)
+app.include_router(core_router, prefix="/core")
+''',
+    "app/api/__init__.py": "",
+    "app/api/users.py": '''
+from fastapi import APIRouter, Depends, WebSocket
+router: APIRouter = APIRouter(prefix="/users")
+ws_router = APIRouter()
+
+@router.get(
+    "/{user_id}",
+    dependencies=[Depends(check)],
+    tags=["users"],
+)
+async def read_user(user_id: str): ...
+
+@router.api_route("/bulk", methods=["PUT", "POST"], dependencies=[Depends(check)])
+def bulk(): ...
+
+@ws_router.websocket("/ws/events")
+async def events(socket: WebSocket): ...
+
+def listing(): ...
+router.add_api_route("/", listing, methods=["GET"])
+''',
+    "app/core.py": '''
+from fastapi import APIRouter
+api_router = APIRouter(prefix="/api")
+
+@api_router.post("/login")
+def login(): ...
+''',
+}
+
+
+def _endpoint_rows(tmp_path, files):
+    """``{(method, route): handler name}`` for every file, plus HANDLES sources."""
+    parser = CodeParser(tmp_path)
+    rows, handles = {}, {}
+    for rel, text in files.items():
+        nodes, edges = parser.parse_file(write(tmp_path, rel, text))
+        for n in nodes:
+            if n.kind == "Endpoint" and n.extra.get("py_route"):
+                rows[(n.extra["http_method"], n.extra["route"])] = n.extra["handler"]
+        for e in edges:
+            if e.kind == "HANDLES":
+                handles[e.target] = e.source
+    return rows, handles
+
+
+def test_multiline_decorators_websockets_and_add_api_route(tmp_path):
+    rows, handles = _endpoint_rows(tmp_path, ROUTES_APP)
+    assert rows[("GET", "/users/{user_id}")] == "read_user"
+    assert rows[("PUT", "/users/bulk")] == "bulk"
+    assert rows[("POST", "/users/bulk")] == "bulk"
+    assert rows[("WEBSOCKET", "/ws/events")] == "events"
+    assert rows[("GET", "/users")] == "listing"
+    assert rows[("POST", "/api/login")] == "login"
+    sources = {s.split("::")[-1] for s in handles.values()}
+    assert {"read_user", "bulk", "events", "listing", "login"} <= sources
+
+
+def test_include_router_prefixes_reach_imported_routers(tmp_path, registry):
+    make_repo(tmp_path, registry, "svc", ROUTES_APP)
+    make_repo(tmp_path, registry, "ui", {
+        "a.ts": (
+            "import axios from 'axios';\n"
+            "export const a = (i: string) => axios.get(`/v1/users/${i}`);\n"
+            "export const b = () => axios.post('/core/api/login');\n"
+        ),
+    })
+    rows = {r["client_line"]: r for r in cross_repo_requests_func(repos=["ui"])["results"]}
+    assert rows[2]["status"] == "matched"
+    assert rows[2]["candidates"][0]["route"] == "/v1/users/{user_id}"
+    assert rows[3]["status"] == "matched"
+    assert rows[3]["candidates"][0]["route"] == "/core/api/login"
+
+
+def test_flask_add_url_rule_and_blueprint_methods(tmp_path):
+    rows, _ = _endpoint_rows(tmp_path, {"web/views.py": '''
+from flask import Blueprint, Flask
+bp = Blueprint("v", __name__, url_prefix="/bp")
+app = Flask(__name__)
+
+class Items: ...
+def health(): ...
+
+@bp.get("/ping")
+def ping(): ...
+
+bp.add_url_rule("/items", view_func=Items.as_view("items"))
+app.add_url_rule("/health", "health", health, methods=["GET", "HEAD"])
+'''})
+    assert rows[("GET", "/bp/ping")] == "ping"
+    assert rows[("GET", "/bp/items")] == "Items"
+    assert rows[("GET", "/health")] == "health"
+    assert rows[("HEAD", "/health")] == "health"
+
+
+def test_imported_non_router_objects_are_not_endpoints(tmp_path):
+    rows, handles = _endpoint_rows(tmp_path, {"svc/cached.py": '''
+from fastapi import APIRouter
+from app.cache import cache, session_store
+router = APIRouter()
+other = {}
+
+@cache.get("/nope")
+def cached(): ...
+
+@session_store.post("/nope2")
+def stored(): ...
+
+@other.get("/nope3")
+def local_dict(): ...
+
+@router.get("/yes")
+def real(): ...
+
+cache.add_url_rule("/nope4", view_func=real)
+'''})
+    assert rows == {("GET", "/yes"): "real"}
+    assert len(handles) == 1
+
+
+def _query(tmp_path, registry, pattern, target):
+    from code_review_graph.tools.query import query_graph
+    root = make_repo(tmp_path, registry, "q", ROUTES_APP | {
+        "app/plain.py": "def get_item(): ...\n",
+        "app/dyn.py": (
+            "from fastapi import APIRouter\n"
+            "r = build()\n"
+            "@r.get(PATH)\n"
+            "async def dynamic_handler(): ...\n"
+        ),
+    })
+    return query_graph(
+        pattern=pattern, target=f"{(root / target).as_posix()}", repo_root=str(root),
+    )
+
+
+def test_handlers_of_a_handler_returns_its_endpoints(tmp_path, registry):
+    result = _query(tmp_path, registry, "handlers_of", "app/core.py::login")
+    assert [r["name"].split("@")[0] for r in result["results"]] == ["login"]
+    assert result["results"][0]["name"].endswith("POST /api/login")
+    assert "real absence" not in result["confidence"]
+    assert "handler, not an endpoint" in result["confidence"]
+
+
+def test_empty_endpoints_for_a_route_like_function_is_not_a_real_absence(tmp_path, registry):
+    for target in ("app/dyn.py::dynamic_handler", "app/plain.py::get_item"):
+        result = _query(tmp_path, registry, "endpoints_for", target)
+        assert result["result_count"] == 0
+        assert "real absence" not in result["confidence"]
+        assert "may not be statically visible" in result["confidence"]

@@ -318,6 +318,16 @@
 
 ### Fixed
 
+- `query_graph_tool` `handlers_of` on a FastAPI handler (for example `token_endpoint`) returned 0
+  with "a real absence", because `handlers_of` takes an endpoint and HANDLES edges run from the
+  handler to it. Given a handler, it now returns the endpoints that handler serves and says so in
+  `confidence`. An empty `handlers_of` or `endpoints_for` for a decorated or handler-like function
+  no longer says "a real absence": it says the route may not be statically visible and names what
+  was checked.
+- Python route detection takes `@router.websocket(...)` (method `WEBSOCKET`), the decorator-free
+  `add_api_route`, `add_api_websocket_route` and `add_url_rule` registrations (including Flask
+  `View.as_view(...)`) and `include_router(router=...)`. A decorator on an imported object that does
+  not read as a router (`@cache.get(...)` with `from app.cache import cache`) is no longer a route.
 - A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
   declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
   unresolved unless the base class was imported, so `callers_of` and impact radius missed every
