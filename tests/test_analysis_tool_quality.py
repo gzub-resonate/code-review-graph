@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from code_review_graph.analysis import find_knowledge_gaps, find_surprising_connections
+from code_review_graph.analysis import (
+    find_bridge_nodes,
+    find_hub_nodes,
+    find_knowledge_gaps,
+    find_surprising_connections,
+)
 from code_review_graph.communities import store_communities
 from code_review_graph.flows import store_flows, trace_flows
 from code_review_graph.graph import GraphStore
@@ -307,3 +312,92 @@ def test_config_document_communities_are_not_gaps(tmp_path, store):
     summary = get_knowledge_gaps_func(repo_root=str(tmp_path))["summary"]
     assert summary["single_file_communities"] == 1
     assert summary["thin_communities"] == 1
+
+
+# ----------------------------------------------- repeated and bare-name edges
+
+
+def test_one_call_made_five_times_is_one_surprising_row(tmp_path, store):
+    a = _node(store, "main", "/r/a.py")
+    b = _node(store, "parse", "/r/b.js", language="js")
+    for line in range(5):
+        store.upsert_edge(EdgeInfo("CALLS", a, b, "/r/a.py", line + 1))
+    _edge(store, "REFERENCES", a, b)  # another kind is another row
+    store.commit()
+
+    rows = find_surprising_connections(store, top_n=100)
+
+    assert sorted((r["source"], r["target"], r["edge_kind"]) for r in rows) == [
+        ("main", "parse", "CALLS"), ("main", "parse", "REFERENCES"),
+    ]
+    assert get_surprising_connections_func(repo_root=str(tmp_path))["total"] == 2
+
+
+def _noisy_graph(store):
+    """``main`` makes 12 calls to bare names and 1 to a real helper."""
+    main = _node(store, "main", "/r/app.py")
+    helper = _node(store, "helper", "/r/lib.py")
+    real = _node(store, "real_hub", "/r/hub.py")
+    callers = [_node(store, f"user{i}", f"/r/u{i}.py") for i in range(4)]
+    _edge(store, "CALLS", main, helper)
+    for i in range(12):
+        _edge(store, "CALLS", main, f"generic{i}")
+    for c in callers:
+        _edge(store, "CALLS", c, real)
+    store.commit()
+    return main, helper, real
+
+
+def test_bare_name_edges_do_not_make_a_hub(store):
+    _noisy_graph(store)
+
+    hubs = find_hub_nodes(store, top_n=10)
+
+    by_name = {h["name"]: h for h in hubs}
+    assert hubs[0]["name"] == "real_hub"
+    assert by_name["main"]["total_degree"] == 1
+    assert by_name["main"]["resolution_split"] == {"direct": 1, "bare_name": 12}
+    assert by_name["real_hub"]["resolution_split"] == {"direct": 4, "bare_name": 0}
+
+
+def test_a_bare_name_is_no_path_between_bridges(store):
+    left = _node(store, "left", "/r/l.py")
+    mid = _node(store, "mid", "/r/m.py")
+    right = _node(store, "right", "/r/r.py")
+    _edge(store, "CALLS", left, mid)
+    _edge(store, "CALLS", mid, right)
+    # ``shared`` is no node: callers of the same bare name are not connected.
+    for name in ("a", "b", "c"):
+        n = _node(store, name, f"/r/{name}.py")
+        _edge(store, "CALLS", n, "shared")
+        _edge(store, "CALLS", "shared", n)
+    store.commit()
+
+    names = [b["name"] for b in find_bridge_nodes(store, top_n=10)]
+
+    assert names == ["mid"]
+
+
+def test_bare_name_edges_are_not_surprising(store):
+    a = _node(store, "caller", "/r/a.py")
+    _node(store, "other", "/r/b.js", language="js")
+    _edge(store, "CALLS", a, "other")  # a bare name that happens to match a node's name
+    store.commit()
+
+    assert find_surprising_connections(store, top_n=100) == []
+
+
+def test_leaf_primitives_are_opt_in(store):
+    page = _node(store, "Page", "/r/page.tsx", language="tsx")
+    box = _node(store, "FlexBox", "/r/box.tsx", language="tsx")
+    test = _node(store, "spec", "/r/box.spec.tsx", kind="Test", language="tsx", is_test=True)
+    for i in range(3):
+        _edge(store, "CALLS", _node(store, f"View{i}", f"/r/v{i}.tsx", language="tsx"), box)
+    _edge(store, "CALLS", page, box)
+    _edge(store, "CALLS", box, test)  # a call into test code is no building block
+    store.commit()
+
+    assert "FlexBox" in {h["name"] for h in find_hub_nodes(store)}
+    kept = {h["name"] for h in find_hub_nodes(store, exclude_leaf_primitives=True)}
+    assert "FlexBox" not in kept
+    assert {"Page", "View0"} <= kept

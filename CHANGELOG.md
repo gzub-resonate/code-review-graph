@@ -21,6 +21,14 @@
 
 ### Changed
 
+- `get_hub_nodes_tool`, `get_bridge_nodes_tool` and
+  `get_surprising_connections_tool` no longer count calls and references whose
+  target is only a bare name (`unresolved`, as in `query_graph_tool`): they
+  inflated whatever symbol made many calls to names such as `get`, `parse` or
+  `main`. Hub rows carry `resolution_split` (`direct` edges counted, `bare_name`
+  edges left out). `get_surprising_connections_tool` also shows a call made in
+  several places once per (source, target, edge kind), and counts it once in
+  `total`.
 - `get_surprising_connections_tool` no longer lists structural containment (a
   class holding its method, a JSON key holding its child) and does not count it
   in `total`. Its rows carry `source_file` and `target_file`.

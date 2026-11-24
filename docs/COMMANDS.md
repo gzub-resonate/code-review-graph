@@ -764,6 +764,11 @@ top_n: int = 10                  # Capped at 100
 repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
 ```
+Degree counts only edges that name a node. A call or reference whose target is a
+bare name no node answers to (`get`, `parse`, `main`) is left out, as the
+`unresolved` calls of `query_graph_tool` are, so a symbol does not rank for the
+calls it makes to names it could not pin. Each row's `resolution_split` gives
+`direct` (the edges counted) and `bare_name` (the edges left out).
 
 #### `get_bridge_nodes_tool`
 ```
@@ -772,6 +777,8 @@ repo_root: str | None
 detail_level: str = "standard"   # "minimal": name, qualified_name, file, kind, betweenness
 ```
 Minimal rows give `qualified_name` and `file` relative to the repository root.
+Calls to a bare name no node answers to are not paths, so they do not carry
+betweenness.
 
 #### `get_knowledge_gaps_tool`
 ```
@@ -807,7 +814,10 @@ detail_level: str = "standard"   # "minimal": source and target (with qualified 
 ```
 Structural containment is never a surprising connection: a CONTAINS edge, or any
 edge between a node and a node that contains it, is left out of the rows and of
-`total`. Rows carry `source_file` and `target_file`.
+`total`. Rows carry `source_file` and `target_file`. A call made in several places
+is one row per (source, target, edge kind), and a call to a bare name no node
+answers to is not a connection. Degrees, which decide "peripheral-to-hub", count
+only edges that name a node.
 
 #### `get_suggested_questions_tool`
 ```

@@ -13,7 +13,8 @@ from .constants import (
     IMPORT_CONTEXT_PARENT_PACKAGE,
     IMPORT_CONTEXT_TYPE_ONLY,
 )
-from .graph import GraphEdge, GraphStore, _sanitize_name
+from .graph import RESOLUTION_UNRESOLVED, GraphEdge, GraphStore, _sanitize_name
+from .migrations import TARGET_RESOLUTION_KINDS
 from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
@@ -26,24 +27,70 @@ _MAX_CYCLE_HOPS = 10
 _MAX_UNTESTED_HOTSPOTS = 20
 # Node kinds that make up a config document rather than code.
 _CONFIG_DOCUMENT_KINDS = frozenset({"JsonPath", "YamlPath"})
+# Edges that say a node builds on another one.
+_OUTGOING_USE_KINDS = frozenset({"CALLS", "REFERENCES"})
 
 
-def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
+def _is_bare_name_edge(edge: GraphEdge, known: set[str]) -> bool:
+    """Is this call or reference bound to nothing but a bare name?
+
+    ``unresolved`` is what ``query_graph_tool`` counts as a guess: no node answers
+    to the target, so it is a name like ``get`` or ``parse`` that says nothing
+    about which symbol was meant. A graph that stores no verdict falls back to the
+    same node-existence test.
+    """
+    if edge.target_resolution is not None:
+        return edge.target_resolution == RESOLUTION_UNRESOLVED
+    return edge.kind in TARGET_RESOLUTION_KINDS and edge.target_qualified not in known
+
+
+def _traced_edges(
+    edges: list[GraphEdge], known: set[str],
+) -> tuple[list[GraphEdge], dict[str, int]]:
+    """The edges that name a node, and how many bare-name edges touch each node."""
+    traced: list[GraphEdge] = []
+    bare: dict[str, int] = Counter()
+    for e in edges:
+        if _is_bare_name_edge(e, known):
+            bare[e.source_qualified] += 1
+            bare[e.target_qualified] += 1
+        else:
+            traced.append(e)
+    return traced, bare
+
+
+def find_hub_nodes(
+    store: GraphStore, top_n: int = 10, exclude_leaf_primitives: bool = False,
+) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
 
+    Edges that are only a bare-name match (an unresolved call target such as
+    ``get`` or ``parse``) are not counted: they inflate whichever symbol makes
+    many calls and say nothing about structure. ``resolution_split`` tells how
+    many edges of each kind touch the node.
+
+    With *exclude_leaf_primitives*, nodes that call or reference no indexed
+    non-test node are skipped: a design-system component resolves correctly and
+    still tells a reviewer nothing.
+
     Returns list of dicts with: name, qualified_name, kind, file,
-    in_degree, out_degree, total_degree, community_id
+    in_degree, out_degree, total_degree, community_id, resolution_split
+    (``direct``: edges counted, ``bare_name``: edges left out)
     """
-    # Build degree counts from all edges
-    edges = store.get_all_edges()
+    # Get all non-File nodes
+    nodes = store.get_all_nodes(exclude_files=True)
+    node_map = {n.qualified_name: n for n in nodes}
+    edges, bare = _traced_edges(store.get_all_edges(), set(node_map))
     in_degree: dict[str, int] = Counter()
     out_degree: dict[str, int] = Counter()
+    builds_on: set[str] = set()
     for e in edges:
         out_degree[e.source_qualified] += 1
         in_degree[e.target_qualified] += 1
-
-    # Get all non-File nodes
-    nodes = store.get_all_nodes(exclude_files=True)
+        if e.kind in _OUTGOING_USE_KINDS:
+            target = node_map.get(e.target_qualified)
+            if target is not None and not target.is_test:
+                builds_on.add(e.source_qualified)
     community_map = store.get_all_community_ids()
 
     scored = []
@@ -54,6 +101,8 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
         total = ind + outd
         if total == 0:
             continue
+        if exclude_leaf_primitives and qn not in builds_on:
+            continue
         scored.append({
             "name": _sanitize_name(n.name),
             "qualified_name": n.qualified_name,
@@ -63,6 +112,7 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
             "out_degree": outd,
             "total_degree": total,
             "community_id": community_map.get(qn),
+            "resolution_split": {"direct": total, "bare_name": bare.get(qn, 0)},
         })
 
     scored.sort(
@@ -86,8 +136,13 @@ def find_bridge_nodes(
     """
     import networkx as nx
 
-    # Build the graph — use cached version if available
-    nxg = store._build_networkx_graph()
+    # Build the graph — use cached version if available. A call to a bare name
+    # is no path: through it, every caller of ``get`` would sit next to every
+    # other, and the shortest paths between regions would run through names.
+    full = store._build_networkx_graph()
+    nxg = full.edge_subgraph(
+        (u, v) for u, v, d in full.edges(data=True) if not d.get("unresolved_target")
+    ).copy()
 
     # Compute betweenness centrality (approximate for large graphs)
     n_nodes = nxg.number_of_nodes()
@@ -126,7 +181,7 @@ def find_bridge_nodes(
         key=lambda x: float(x.get("betweenness", 0)),  # type: ignore[arg-type,return-value]
         reverse=True,
     )
-    del nxg, bc
+    del nxg, full, bc
     store.shrink_memory(clear_nx_cache=True)
     return results[:top_n]
 
@@ -370,11 +425,20 @@ def find_surprising_connections(
     - Cross-file-type: test calling production or vice versa
     - Non-standard edge kind for the node types
     """
-    edges = store.get_all_edges()
     nodes = store.get_all_nodes(exclude_files=True)
     community_map = store.get_all_community_ids()
 
     node_map = {n.qualified_name: n for n in nodes}
+    # A bare-name match is no coupling, and one call made in five places is one
+    # row, not five: rank each (source, target, kind) once.
+    edges: list[GraphEdge] = []
+    row_keys: set[tuple[str, str, str]] = set()
+    traced, _bare = _traced_edges(store.get_all_edges(), set(node_map))
+    for e in traced:
+        key = (e.source_qualified, e.target_qualified, e.kind)
+        if key not in row_keys:
+            row_keys.add(key)
+            edges.append(e)
 
     # A class holding its method, or a JSON key holding its child, is how the
     # code is laid out, never a coupling. Leave those edges out of the candidates
@@ -398,9 +462,9 @@ def find_surprising_connections(
                 return True
         return False
 
-    # Build degree map
+    # Build degree map from every traced edge, as the hub ranking counts them.
     degree: dict[str, int] = Counter()
-    for e in edges:
+    for e in traced:
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
 
