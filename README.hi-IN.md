@@ -692,6 +692,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | जब `tests_for` और `detect-changes` टेस्ट खोजते हैं, तब हर हॉप पर अधिकतम कितने कॉली देखे जाएँ। नाम के क्रम में पहले वाले रखे जाते हैं, इसलिए एक ग्राफ़ हमेशा एक ही उत्तर देता है | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | बिना टेस्ट वाले बदले हुए सिंबल का टेस्ट किया गया कॉलर खोजते समय आने वाले `CALLS` पर ऊपर की ओर कितने हॉप चलें। यह केवल सूचना है, कवरेज नहीं | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |
+| `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` या `cross_repo_requests_tool` की एक कॉल नए रेपो शुरू करना बंद करने और बाकी को `skipped_repos` में सूचीबद्ध करने से पहले कितने सेकंड चल सकती है। `0` का मतलब कोई सीमा नहीं | `60` |
 | `CRG_TOOL_TIMEOUT` | केवल-पठन MCP टूल की समय सीमा (सेकंड; `0` से बंद)। लिखने वाले टूल (build / postprocess / embed / wiki / apply-refactor) पर लागू नहीं | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` की कमिट गिनती की अवधि | `90` |
 | `CRG_CONTEXT_HISTORY` | `1` करने पर हर `context_savings` अनुमान `.code-review-graph/context-history.jsonl` नाम के स्थानीय लॉग में लिखा जाता है; इसे `code-review-graph context-history` से पढ़ें। इसमें टोकन संख्या, टूल के नाम, समय, विवरण स्तर और फ़ाइल व गहराई की संख्या होती है, फ़ाइल के नाम, पाथ या सोर्स कोड कभी नहीं, और यह कहीं भेजा नहीं जाता | - |

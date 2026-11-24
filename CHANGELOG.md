@@ -4,6 +4,13 @@
 
 ### Added
 
+- `cross_repo_search_tool` and `cross_repo_requests_tool` stop after
+  `CRG_CROSS_REPO_BUDGET_SECONDS` (default 60, `0` = no limit) instead of running for minutes over a
+  large registry. When the time is spent no new repo is started; the ones left come back in
+  `skipped_repos` (with `skipped_repos_total`), `truncated` is set and the summary says so. A cursor
+  made on such a partial answer is refused unless the same repos are skipped again.
+- Every `cross_repo_search_tool` row has a `match` field: `exact`, `exact_ci`, `qualified`, `prefix`,
+  `tokens` or `fuzzy`.
 - `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The
   files are read from Git and parsed in memory as `pr_blast_radius_tool` does, matched to the base
   graph, and scored by the same analysis as a working-tree diff (risk score, flows, test gaps,
@@ -250,6 +257,9 @@
 
 ### Changed
 
+- `cross_repo_search_tool` orders its merged results by match tier first (exact name, exact name
+  ignoring case, qualified-name suffix, prefix, every query word in the name, everything else), then
+  by each repo's rank, then registry order.
 - Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
   `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
   is deleted when the call ends (leftovers of a killed call are swept on the next one). The
@@ -272,6 +282,9 @@
 
 ### Fixed
 
+- `cross_repo_search_tool` ranks an exact name first. Scores differ between repos, so ordering by
+  repo-local rank alone put other repos' weak first hits ahead of the exact match, and a repo's
+  `limit` could cut its own exact match behind fuzzier hits.
 - `detect_changes_tool` with `pr` or `head` no longer sends every added symbol name when
   `detail_level="minimal"`: the `pull_request` section then carries the two commits and the
   added and removed totals only. In the standard level the names are paged like the other lists:
@@ -428,6 +441,9 @@
 
 ### Internal
 
+- `tests/test_cross_repo_ranking_budget.py` covers the match tiers, the paging walk in ranked order,
+  the call budget (a monkeypatched clock through `registry_tools._now`) and the
+  `CRG_CROSS_REPO_BUDGET_SECONDS` validation in `constants.cross_repo_budget_seconds`.
 - `analyze_changes` accepts `changed_nodes`, for callers that already know the changed symbols.
 - `ember_extract.py`, `ember_template.py` and `ember_resolver.py` add the Ember
   support; tests are `test_ember_parser.py`, `test_ember_template.py` (including
