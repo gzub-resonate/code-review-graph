@@ -1676,10 +1676,17 @@ async def cross_repo_search_tool(
 ) -> dict:
     """Search for code entities across registered repositories.
 
-    Runs hybrid search on each searched repo's graph database and interleaves
-    results by repository-local rank. Equal ranks follow registry order, and up
-    to ``limit`` results per searched repo may be returned. Register repos first
-    with the CLI 'register' command.
+    Runs hybrid search on each searched repo's graph database and merges the
+    results. Scores are not comparable between repos, so rows are ordered by
+    match tier first, then by repository-local rank, then registry order. Every
+    row has ``match``: ``exact`` (name equals the query), ``exact_ci`` (same
+    ignoring case), ``qualified`` (the qualified name ends with the query, as in
+    ``Class.method``), ``prefix``, ``tokens`` (every word of the query is in the
+    name) or ``fuzzy``. Up to ``limit`` results per searched repo may be
+    returned, and a repo's exact match is never cut by it. A call has a time
+    budget (``CRG_CROSS_REPO_BUDGET_SECONDS``, default 60, 0 = unlimited): when it
+    is spent no new repo is started, the ones left come back in ``skipped_repos``
+    and ``truncated`` is set. Register repos first with the CLI 'register' command.
 
     Args:
         query: Search string to match against node names.
@@ -1747,6 +1754,11 @@ async def cross_repo_requests_tool(
     ``feign`` or ``js``. A match through a catch-all route such as a Next.js
     ``[...path]`` proxy, or through a naming convention, has ``confidence``
     ``low``.
+
+    A call has a time budget (``CRG_CROSS_REPO_BUDGET_SECONDS``, default 60,
+    0 = unlimited). When it is spent no further client repo is started; those
+    left come back in ``skipped_repos``, ``truncated`` is set, and ``counts`` and
+    ``total`` leave them out.
 
     Args:
         repos: Optional aliases or folder names of the client repos to list

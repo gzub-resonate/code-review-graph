@@ -948,8 +948,23 @@ cursor: str | None           # next_cursor of the previous reply (see Paging)
 
 `repos` limits the search to named registry entries. Matching is exact and
 case-sensitive; paths are not accepted. An alias match wins over a folder-name
-match. Results merge by each repo's local rank, with registry order as the
-tie-breaker.
+match.
+
+Scores are not comparable between repos, so results are ordered by match tier first,
+then by each repo's local rank, with registry order as the tie-breaker. Every row has a
+`match` field: `exact` (the name equals the query, case-sensitive), `exact_ci` (equal
+ignoring case), `qualified` (the qualified name ends with the query, as in
+`Class.method`), `prefix` (the name starts with the query), `tokens` (every word of the
+query, split on non-alphanumerics and camelCase, is in the name) or `fuzzy`. A repo's
+exact-name nodes are always kept, whatever `limit` is; those the ranked search did not
+return carry `score` 0.
+
+The call has a time budget, `CRG_CROSS_REPO_BUDGET_SECONDS` (default 60, `0` = no limit).
+When it is spent no further repo is started: the ones not searched are listed in
+`skipped_repos` (capped at 20; `skipped_repos_total` and `skipped_repos_truncated` give
+the real count), `truncated` is set and the summary says so. The first repo always runs.
+A `cursor` made on such a partial answer is only accepted while the same repos are
+skipped; otherwise it is refused and the call must start over.
 
 Names that match no entry are returned in `unknown`. A name that matches
 several entries selects all of them and is listed in `ambiguous`. Both lists
@@ -1121,6 +1136,12 @@ capped by `limit` and `max_results`, and `truncated` says so. A repository whose
 graph is missing or unreadable is listed in `unreadable` (with its role,
 `client` or `target`, and a short reason) and does not stop the call.
 
+The call has the same time budget (`CRG_CROSS_REPO_BUDGET_SECONDS`, default 60, `0` = no
+limit). When it is spent no further client repo is read; those left are listed in
+`skipped_repos` / `skipped_repos_total`, `truncated` is set, and `counts` and `total` leave
+them out. A cursor made on such a partial answer is refused unless the same repos are
+skipped again.
+
 #### `pr_blast_radius_tool`
 ```
 pr: int | None               # Pull request number; the server fetches refs/pull/<pr>/head from origin
@@ -1230,6 +1251,8 @@ result key spelled in snake_case like the other keys here.
   `summary`; they used to be cut at 50 and 20 before counting.
 - `cross_repo_search_tool` searches the repos afresh on every call, so its cursor
   also holds a digest of the merged results and is refused once they change.
+  The merged order (match tier, local rank, registry order) is part of those rows, and the
+  repos skipped for time are part of the digest.
 - `get_bridge_nodes_tool` samples a fixed set of nodes on graphs over 5000 nodes, so
   its ranking is the same on every call.
 
