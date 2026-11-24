@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_review_graph.registry import ConnectionPool, Registry, resolve_repo
 from code_review_graph.tools.registry_tools import _echoed, _select_repos
 
@@ -223,6 +225,14 @@ class TestConnectionPool:
 
 
 class TestCrossRepoSearch:
+    @pytest.fixture(autouse=True)
+    def _one_search_at_a_time(self, monkeypatch):
+        # These tests hand ``get_db_path``, ``GraphStore`` and ``hybrid_search`` their
+        # values as ordered ``side_effect`` lists, one per repo, so the repos must be
+        # searched in registry order. They test how the rows merge, not concurrency
+        # (``test_cross_repo_ranking_budget.py`` covers that).
+        monkeypatch.setenv("CRG_CROSS_REPO_WORKERS", "1")
+
     def test_cross_repo_search_no_repos(self):
         """cross_repo_search with empty registry returns empty results."""
         from code_review_graph.tools import cross_repo_search_func
