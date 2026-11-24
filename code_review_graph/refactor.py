@@ -1953,6 +1953,45 @@ def _is_runtime_wired(node: Any) -> bool:
     return False
 
 
+#: Class annotations (as the parser stores them in ``extra["decorators"]``) whose
+#: members a framework invokes: Spring advice classes and picocli commands.
+_MANAGED_CLASS_ANNOTATION = re.compile(
+    r"^(?:[\w.]+\.)?(?:ControllerAdvice|RestControllerAdvice|Command)(?:\s*\(.*)?$",
+    re.DOTALL,
+)
+_MIGRATION_PATH = re.compile(r"(^|/)(db/)?migrations?/|(^|/)V\d+(_\d+)*__[^/]*\.sql$", re.I)
+
+
+def _framework_managed_classes(store: GraphStore) -> set[str]:
+    """Qualified names of Java classes whose members a framework invokes."""
+    managed: set[str] = set()
+    for cls in store.get_nodes_by_kind(kinds=["Class"]):
+        if cls.language != "java":
+            continue
+        decorators = cls.extra.get("decorators") or ()
+        if isinstance(decorators, str):
+            decorators = [decorators]
+        if any(_MANAGED_CLASS_ANNOTATION.match(d) for d in decorators):
+            managed.add(cls.qualified_name)
+    return managed
+
+
+def _is_framework_managed_member(node: Any, managed_classes: set[str]) -> bool:
+    """Is this a method of a class a framework drives (see ``_framework_managed_classes``)?"""
+    if node.kind != "Function" or not node.parent_name or not managed_classes:
+        return False
+    return f"{node.file_path}::{node.parent_name}" in managed_classes
+
+
+def _is_migration_table(node: Any) -> bool:
+    """Is this a table or view a SQL migration file creates? Nothing calls those."""
+    return (
+        node.kind == "Class"
+        and (node.extra or {}).get("sql_kind") in ("table", "view")
+        and bool(_MIGRATION_PATH.search(node.file_path.replace("\\", "/")))
+    )
+
+
 _MIN_PKG_SEGMENT_LEN = 4  # ignore short dirs like "src", "lib", "app"
 
 
@@ -2108,6 +2147,7 @@ def find_dead_code(
         List of dead-code dicts with name, qualified_name, kind, file_path,
         relative_path, line, and language fields.
     """
+    managed_classes = _framework_managed_classes(store)
     # Query candidate nodes.
     candidates = store.get_nodes_by_kind(
         kinds=[kind] if kind else ["Function", "Class"],
@@ -2372,6 +2412,11 @@ def find_dead_code(
 
         # Skip entry points (by name pattern or decorator, not just "uncalled").
         if _is_entry_point(node):
+            continue
+
+        # Members of a Spring advice class or a picocli @Command class are reached
+        # through the framework, and a table created by a migration is never "called".
+        if _is_framework_managed_member(node, managed_classes) or _is_migration_table(node):
             continue
 
         # A @FeignClient interface is instantiated by Spring and reached through

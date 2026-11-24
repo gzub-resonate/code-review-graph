@@ -377,7 +377,17 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     # Java Spring
     re.compile(r"(Get|Post|Put|Delete|Patch|RequestMapping)Mapping", re.IGNORECASE),
     re.compile(r"(Scheduled|EventListener|Bean|Configuration)", re.IGNORECASE),
-    re.compile(r"KafkaListener", re.IGNORECASE),
+    re.compile(r"(KafkaListener|RabbitListener|JmsListener)", re.IGNORECASE),
+    # Spring web error handlers, advice classes and bean lifecycle callbacks.
+    re.compile(
+        r"^(?:[\w.]+\.)?(?:ExceptionHandler|ControllerAdvice|RestControllerAdvice"
+        r"|PostConstruct|PreDestroy)(?:\s*\(.*)?$",
+        re.DOTALL,
+    ),
+    # picocli: a @Command class or method, and the fields/methods it binds.
+    re.compile(
+        r"^(?:[\w.]+\.)?(?:Command|Option|Parameters|ArgGroup)(?:\s*\(.*)?$", re.DOTALL,
+    ),
     # Temporal Java callbacks are invoked by the workflow runtime.
     re.compile(r"(WorkflowMethod|ActivityMethod)", re.IGNORECASE),
     # JS/TS frameworks
