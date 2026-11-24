@@ -131,10 +131,14 @@ def find_hub_nodes(
     top_n: int = 10,
     include_tests: bool = True,
     exclude_leaf_primitives: bool = False,
+    include_config: bool = True,
 ) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
 
     Test nodes are left out unless *include_tests* is true, before ranking.
+    Config document nodes (``$`` of a JSON file, YAML paths, outputs, properties) are
+    left out the same way unless *include_config* is true: one of them is touched by
+    every key beneath it and says nothing about structure.
 
     Edges that are only a bare-name match (an unresolved call target such as
     ``get`` or ``parse``) are not counted: they inflate whichever symbol makes
@@ -169,6 +173,8 @@ def find_hub_nodes(
     scored: list[dict[str, Any]] = []
     for n in nodes:
         if not include_tests and _is_test_node(n, root):
+            continue
+        if not include_config and n.kind in CONFIG_DOCUMENT_KINDS:
             continue
         qn = n.qualified_name
         ind = in_degree.get(qn, 0)

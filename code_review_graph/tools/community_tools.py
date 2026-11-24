@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from ..communities import get_architecture_overview, get_communities
+from ..communities import (
+    count_hidden_config_communities,
+    get_architecture_overview,
+    get_communities,
+)
 from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
@@ -82,6 +86,7 @@ def list_communities_func(
     max_results: int = 50,
     max_members: int = 10,
     cursor: str | None = None,
+    include_config: bool = False,
 ) -> dict[str, Any]:
     """List detected code communities in the codebase.
 
@@ -105,6 +110,11 @@ def list_communities_func(
         cursor: ``next_cursor`` from the previous reply, to read the next page
                 of the same list. Omit it for the first page. A cursor is opaque
                 and only valid for the same arguments on the same graph.
+        include_config: Also list the communities made only of JSON and YAML
+                        document nodes (default False). They are often hundreds
+                        of equal slices of data files and bury the code. Their
+                        number is reported as ``config_communities_hidden``.
+                        A cursor is only valid for the value it was made with.
 
     Returns:
         Communities with size and cohesion scores, plus ``total`` and
@@ -117,10 +127,13 @@ def list_communities_func(
     store, root = _get_store(repo_root)
     try:
         page = paginate(
-            get_communities(store, sort_by=sort_by, min_size=min_size),
+            get_communities(
+                store, sort_by=sort_by, min_size=min_size, include_config=include_config,
+            ),
             max_results, _MAX_COMMUNITIES, cursor,
             scope=make_scope(
                 "list_communities_tool", sort_by=sort_by, min_size=min_size,
+                include_config=include_config,
             ),
             stamp=graph_stamp(store),
         )
@@ -143,6 +156,10 @@ def list_communities_func(
             "truncated": page.truncated,
             **page.fields(),
         }
+        if not include_config:
+            hidden = count_hidden_config_communities(store, min_size)
+            if hidden:
+                result["config_communities_hidden"] = hidden
         result["_hints"] = generate_hints(
             "list_communities_tool", result, get_session()
         )
@@ -308,6 +325,7 @@ def get_architecture_overview_func(
     max_results: int = 100,
     max_members: int = 10,
     cursor: str | None = None,
+    include_config: bool = False,
 ) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
@@ -336,6 +354,11 @@ def get_architecture_overview_func(
                 together; the community list and each community's member
                 names are not paged (read a community's members with
                 ``get_community_tool``).
+        include_config: Also include the communities made only of JSON and YAML
+                document nodes, with the coupling rows and warnings about them
+                (default False). Their number is reported as
+                ``config_communities_hidden``. A cursor is only valid for the
+                value it was made with.
 
     Returns:
         Architecture overview with communities, cross-community edges,
@@ -347,7 +370,7 @@ def get_architecture_overview_func(
 
     store, root = _get_store(repo_root)
     try:
-        full_overview = get_architecture_overview(store)
+        full_overview = get_architecture_overview(store, include_config=include_config)
         overview = full_overview
         if detail_level == "minimal":
             overview = _minimal_overview(full_overview)
@@ -365,7 +388,10 @@ def get_architecture_overview_func(
         shown, page = _page_together(
             {"cross": overview["cross_community_edges"], "warnings": overview["warnings"]},
             max_results, _MAX_CROSS_EDGES, cursor,
-            scope=make_scope("get_architecture_overview_tool", detail_level=detail_level),
+            scope=make_scope(
+                "get_architecture_overview_tool", detail_level=detail_level,
+                include_config=include_config,
+            ),
             stamp=graph_stamp(store),
         )
         cross = shown["cross"]
@@ -392,6 +418,10 @@ def get_architecture_overview_func(
             "truncated": truncated,
             **page.fields(),
         }
+        if not include_config:
+            hidden = count_hidden_config_communities(store)
+            if hidden:
+                result["config_communities_hidden"] = hidden
         result["_hints"] = generate_hints(
             "get_architecture_overview_tool", result, get_session()
         )

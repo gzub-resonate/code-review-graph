@@ -204,7 +204,7 @@ class TestConfigDocumentsDoNotClone:
         assert sum(c["size"] for c in result) == rows
         assert max(c["size"] for c in result) <= cm._CONFIG_MAX_MEMBERS
         assert len(result) == 5
-        assert sorted(c["name"] for c in result)[0] == "data-json-1"
+        assert sorted(c["name"] for c in result)[0] == "data-json-early-vote-k0-to-k199"
 
     def test_no_two_communities_share_size_and_cohesion(self):
         layout = {

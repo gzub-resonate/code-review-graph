@@ -73,6 +73,7 @@ def get_hub_nodes_func(
     cursor: str | None = None,
     include_tests: bool = False,
     exclude_leaf_primitives: bool = False,
+    include_config: bool = False,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -95,6 +96,9 @@ def get_hub_nodes_func(
             to an indexed non-test node (a design-system component that many
             files use resolves correctly and tells a reviewer little). Default
             False.
+        include_config: Include JSON, YAML, output and property document nodes
+            (default False). Left out before ranking, like tests. A cursor is
+            only valid for the value it was made with.
 
     Returns:
         Ranked hubs. ``total`` reports the untruncated candidate count and
@@ -109,11 +113,13 @@ def get_hub_nodes_func(
             find_hub_nodes(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
                 exclude_leaf_primitives=exclude_leaf_primitives,
+                include_config=include_config,
             ),
             top_n, _MAX_HUB_NODES, cursor,
             scope=make_scope(
                 "get_hub_nodes_tool", include_tests=include_tests,
                 exclude_leaf_primitives=exclude_leaf_primitives,
+                include_config=include_config,
             ),
             stamp=graph_stamp(store),
         )
