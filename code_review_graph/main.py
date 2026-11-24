@@ -1890,6 +1890,15 @@ async def cross_repo_requests_tool(
             ``ecs``, ``sns``, ``states``) or ``kind/name``, ``status`` is
             ``matched``, ``not_found`` or ``ambiguous``. Use it with
             ``service=<function name>`` to see which state machines run a Lambda.
+            ``awssdk`` lists the AWS resources application code calls through the AWS SDK
+            (boto3, AWS SDK for Java v1/v2, ``@aws-sdk/client-*``), ``s3://`` locations and
+            ``aws s3`` commands: ``service`` filters by resource name, ``route`` by
+            ``<service>/<name>`` or ``<service>`` (``s3``, ``dynamodb``, ``lambda``, ``states``,
+            ``secretsmanager``, ``ssm``, ``kinesis``, ``firehose``, ``events``, ``ecs``,
+            ``glue``, ``batch``), ``status`` is ``matched``, ``not_found``, ``ambiguous``,
+            ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
+            (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
+            to see which services read or write a bucket and which repo defines it.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
         repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as
