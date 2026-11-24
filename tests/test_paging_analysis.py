@@ -514,7 +514,12 @@ def test_reads_are_the_same_every_time(repo):
 
 def test_large_graph_bridge_sampling_is_seeded(monkeypatch):
     seen = {}
+    import sqlite3
+
     import networkx as nx
+
+    # Pin networkx's own sampler (igraph, when installed, draws the same pivots).
+    monkeypatch.setenv("CRG_BETWEENNESS_ENGINE", "networkx")
 
     real = nx.betweenness_centrality
 
@@ -523,6 +528,21 @@ def test_large_graph_bridge_sampling_is_seeded(monkeypatch):
         return real(graph, *args, **kwargs)
 
     class FakeStore:
+        def __init__(self):
+            self._conn = sqlite3.connect(":memory:")
+            self._conn.execute("CREATE TABLE nodes (id, updated_at)")
+            self._conn.execute(
+                "CREATE TABLE edges (id, updated_at, target_resolution)"
+            )
+            self._conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+
+        def get_metadata(self, key):
+            row = self._conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            return row[0] if row else None
+
+        def set_metadata(self, key, value):
+            self._conn.execute("INSERT OR REPLACE INTO metadata VALUES (?, ?)", (key, value))
+
         def _build_networkx_graph(self):
             graph = nx.DiGraph()
             graph.add_edges_from((f"a{i}", f"a{i + 1}") for i in range(5100))

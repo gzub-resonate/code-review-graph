@@ -2722,11 +2722,14 @@ class GraphStore:
             for start in range(0, len(keys), 450):
                 batch = keys[start:start + 450]
                 placeholders = ",".join("?" for _ in batch)
+                # ``+e.kind`` keeps the planner on idx_edges_target_kind: without
+                # ANALYZE statistics it scans every CALLS edge through the composite
+                # index instead, once per batch.
                 rows = self._conn.execute(  # nosec B608
                     "SELECT e.source_qualified, e.target_qualified, e.extra, "
                     "n.kind, n.file_path, n.is_test FROM edges e "
                     "JOIN nodes n ON n.qualified_name = e.source_qualified "
-                    f"WHERE e.kind = 'CALLS' AND e.target_qualified IN ({placeholders}) "
+                    f"WHERE +e.kind = 'CALLS' AND e.target_qualified IN ({placeholders}) "
                     "ORDER BY e.source_qualified, e.target_qualified", batch,
                 ).fetchall()
                 for row in rows:
