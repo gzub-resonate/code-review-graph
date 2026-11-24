@@ -763,12 +763,17 @@ Minimal responses may include estimated `context_savings` metadata.
 top_n: int = 10                  # Capped at 100
 repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
+exclude_leaf_primitives: bool = False  # skip nodes that build on no other node
 ```
 Degree counts only edges that name a node. A call or reference whose target is a
 bare name no node answers to (`get`, `parse`, `main`) is left out, as the
 `unresolved` calls of `query_graph_tool` are, so a symbol does not rank for the
 calls it makes to names it could not pin. Each row's `resolution_split` gives
 `direct` (the edges counted) and `bare_name` (the edges left out).
+
+`exclude_leaf_primitives` skips nodes with no outgoing `CALLS` or `REFERENCES` to
+an indexed non-test node. A design-system component that hundreds of files use
+resolves correctly and still tells a reviewer little; the default keeps it.
 
 #### `get_bridge_nodes_tool`
 ```

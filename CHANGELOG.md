@@ -4,6 +4,9 @@
 
 ### Added
 
+- `get_hub_nodes_tool` takes `exclude_leaf_primitives` (default false), which
+  skips nodes that call or reference no indexed non-test node, such as
+  design-system components. The default ranking is unchanged by it.
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

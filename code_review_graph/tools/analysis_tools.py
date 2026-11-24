@@ -70,6 +70,7 @@ def get_hub_nodes_func(
     repo_root: str | None = None,
     top_n: int = 10,
     detail_level: str = "standard",
+    exclude_leaf_primitives: bool = False,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -82,6 +83,10 @@ def get_hub_nodes_func(
         top_n: Number of top hubs to return (default 10, capped at 100).
         detail_level: "standard" (default) returns full node data;
             "minimal" returns only name, kind, and total_degree.
+        exclude_leaf_primitives: Skip nodes with no outgoing CALLS or REFERENCES
+            to an indexed non-test node (a design-system component that many
+            files use resolves correctly and tells a reviewer little). Default
+            False.
 
     Returns:
         Ranked hubs. ``total`` reports the untruncated candidate count and
@@ -92,7 +97,11 @@ def get_hub_nodes_func(
     store, _root = _get_store(repo_root or None)
     try:
         hubs, total, truncated = _bounded(
-            find_hub_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_HUB_NODES,
+            find_hub_nodes(
+                store, top_n=_FETCH_ALL, exclude_leaf_primitives=exclude_leaf_primitives,
+            ),
+            top_n,
+            _MAX_HUB_NODES,
         )
         if detail_level == "minimal":
             hubs = _project(hubs, _MINIMAL_HUB_FIELDS)

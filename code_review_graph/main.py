@@ -1286,6 +1286,7 @@ async def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    exclude_leaf_primitives: bool = False,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1297,12 +1298,16 @@ async def get_hub_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and total_degree only. Default: standard.
+        exclude_leaf_primitives: Skip nodes that call or reference no indexed
+            non-test node, such as design-system components that many files
+            use. Default: false.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_hub_nodes_tool",
         lambda: get_hub_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level,
+            exclude_leaf_primitives=exclude_leaf_primitives,
         ),
         root,
     )

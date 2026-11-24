@@ -25,6 +25,7 @@ from code_review_graph.incremental import full_build, get_db_path
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
     get_bridge_nodes_func,
+    get_hub_nodes_func,
     get_knowledge_gaps_func,
     get_surprising_connections_func,
     list_flows,
@@ -472,3 +473,17 @@ def test_a_hotspot_is_ranked_by_edges_that_name_a_node(store):
 
     assert "solid" in names and "noisy_main" not in names
     assert solid
+
+
+def test_hub_tool_exposes_leaf_primitive_switch_and_keeps_default(tmp_path, store):
+    box = _node(store, "FlexBox", "/r/box.tsx", language="tsx")
+    for i in range(3):
+        _edge(store, "CALLS", _node(store, f"View{i}", f"/r/v{i}.tsx", language="tsx"), box)
+    store.commit()
+
+    default = get_hub_nodes_func(repo_root=str(tmp_path))
+    filtered = get_hub_nodes_func(repo_root=str(tmp_path), exclude_leaf_primitives=True)
+
+    assert default["hub_nodes"][0]["name"] == "FlexBox"
+    assert default["hub_nodes"][0]["resolution_split"] == {"direct": 3, "bare_name": 0}
+    assert "FlexBox" not in {h["name"] for h in filtered["hub_nodes"]}
