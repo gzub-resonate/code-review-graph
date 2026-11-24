@@ -169,6 +169,25 @@ class TestCommunities:
     def test_detect_finds_clusters(self):
         """With clear clusters and igraph, finds >= 2 communities."""
         self._seed_two_clusters()
+        # Communities under three members are folded into a neighbour, so give
+        # each side enough members to stand on its own.
+        for path, names, hub in (
+            ("auth.py", ("refresh", "rotate"), "check_token"),
+            ("db.py", ("commit", "rollback"), "connect"),
+        ):
+            for line, name in enumerate(names):
+                self.store.upsert_node(
+                    NodeInfo(
+                        kind="Function", name=name, file_path=path,
+                        line_start=70 + 10 * line, line_end=75 + 10 * line,
+                        language="python",
+                    ), file_hash="x",
+                )
+                self.store.upsert_edge(EdgeInfo(
+                    kind="CALLS", source=f"{path}::{name}",
+                    target=f"{path}::{hub}", file_path=path, line=70 + 10 * line,
+                ))
+        self.store.commit()
         result = detect_communities(self.store, min_size=2)
         assert len(result) >= 2
 
