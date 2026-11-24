@@ -4,6 +4,7 @@ surprise scoring, suggested questions."""
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import Counter, defaultdict, deque
 from pathlib import Path
@@ -156,6 +157,9 @@ def find_hub_nodes(
     include_tests: bool = True,
     exclude_leaf_primitives: bool = False,
     include_config: bool = True,
+    *,
+    nodes: list[GraphNode] | None = None,
+    edges: list[GraphEdge] | None = None,
 ) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
 
@@ -178,9 +182,12 @@ def find_hub_nodes(
     (``direct``: edges counted, ``bare_name``: edges left out)
     """
     # Get all non-File nodes
-    nodes = store.get_all_nodes(exclude_files=True)
+    if nodes is None:
+        nodes = store.get_all_nodes(exclude_files=True)
     node_map = {n.qualified_name: n for n in nodes}
-    edges, bare = _traced_edges(store.get_all_edges(), set(node_map))
+    edges, bare = _traced_edges(
+        store.get_all_edges() if edges is None else edges, set(node_map),
+    )
     in_degree: dict[str, int] = Counter()
     out_degree: dict[str, int] = Counter()
     builds_on: set[str] = set()
@@ -226,6 +233,151 @@ def find_hub_nodes(
     return scored[:top_n]
 
 
+#: Above this many nodes betweenness is estimated from ``_BETWEENNESS_SAMPLE`` pivots.
+_BETWEENNESS_EXACT_LIMIT = 5000
+_BETWEENNESS_SAMPLE = 500
+#: Seed of the pivot draw. Fixed, so a ranking read in pages is not redrawn between pages.
+_BETWEENNESS_SEED = 0
+#: Set to ``networkx`` to score a large graph with networkx's own sampler (slower, and the
+#: exact figures the tool gave before igraph was used).
+_BETWEENNESS_ENGINE_ENV = "CRG_BETWEENNESS_ENGINE"
+_BRIDGE_CACHE_KEY = "bridge_scores"
+#: Bump when the scoring changes, so an older cached result is never served.
+_BRIDGE_CACHE_VERSION = 1
+
+
+def _bridge_cache_signature(store: GraphStore) -> list[Any]:
+    """What the betweenness scores depend on: the nodes, the edges and which are bare names.
+
+    Cheap (two aggregate scans, no rows loaded). Any insert, delete or rewrite of a
+    node or edge moves the count, the highest id, the newest ``updated_at`` or the number
+    of unresolved edges, so a changed graph never reads another graph's scores.
+    """
+    conn = store._conn
+    nodes = conn.execute(
+        "SELECT COUNT(*), MAX(id), MAX(updated_at) FROM nodes"
+    ).fetchone()
+    edges = conn.execute(
+        "SELECT COUNT(*), MAX(id), MAX(updated_at), "
+        "COALESCE(SUM(target_resolution = 'unresolved'), 0) FROM edges"
+    ).fetchone()
+    engine = os.environ.get(_BETWEENNESS_ENGINE_ENV, "").lower() == "networkx"
+    return [_BRIDGE_CACHE_VERSION, engine, tuple(nodes), tuple(edges)]
+
+
+def _compute_betweenness(store: GraphStore) -> dict[str, float]:
+    """Betweenness of every node over the resolved edges (see :func:`find_bridge_nodes`)."""
+    import networkx as nx
+
+    # A call to a bare name is no path: through it, every caller of ``get`` would sit
+    # next to every other, and the shortest paths between regions would run through names.
+    full = store._build_networkx_graph()
+    nxg = full.edge_subgraph(
+        (u, v) for u, v, d in full.edges(data=True) if not d.get("unresolved_target")
+    ).copy()
+    try:
+        n_nodes = nxg.number_of_nodes()
+        if n_nodes == 0:
+            return {}
+        if n_nodes <= _BETWEENNESS_EXACT_LIMIT:
+            return dict(nx.betweenness_centrality(nxg, normalized=True))
+        k = min(_BETWEENNESS_SAMPLE, n_nodes)
+        scores = _sampled_betweenness_igraph(nxg, k)
+        if scores is None:
+            scores = nx.betweenness_centrality(
+                nxg, k=k, normalized=True, seed=_BETWEENNESS_SEED,
+            )
+        return dict(scores)
+    finally:
+        del nxg, full
+        store.shrink_memory(clear_nx_cache=True)
+
+
+def _networkx_excludes_pivot_self_pairs() -> bool:
+    """Which of networkx's two sampled-rescaling rules this install follows."""
+    import inspect
+
+    from networkx.algorithms.centrality import betweenness as nx_betweenness
+
+    return "sampled_nodes" in inspect.signature(nx_betweenness._rescale).parameters
+
+
+def _sampled_betweenness_igraph(nxg: Any, k: int) -> dict[str, float] | None:
+    """Sampled betweenness from igraph's C code, or ``None`` when igraph is missing.
+
+    Draws the same *k* pivots as ``networkx.betweenness_centrality(k=k, seed=0)`` and
+    scales the sums the same way, so it estimates the same quantity: the scores agree
+    with networkx to float precision (1e-12; only the summation order differs). networkx
+    runs a pure-Python BFS per pivot, which is the cost this avoids.
+    """
+    from .communities import IGRAPH_AVAILABLE
+
+    if not IGRAPH_AVAILABLE or os.environ.get(_BETWEENNESS_ENGINE_ENV, "").lower() == "networkx":
+        return None
+    try:
+        import random
+
+        import igraph as ig
+
+        nodes = list(nxg)
+        n = len(nodes)
+        if n < 3:
+            return None
+        index = {qn: i for i, qn in enumerate(nodes)}
+        pivots = random.Random(_BETWEENNESS_SEED).sample(nodes, k)
+        graph = ig.Graph(
+            n=n, edges=[(index[u], index[v]) for u, v in nxg.edges()], directed=True,
+        )
+        raw = graph.betweenness(directed=True, sources=[index[qn] for qn in pivots])
+        pivot_set = set(pivots)
+        if _networkx_excludes_pivot_self_pairs():
+            # networkx >= 3.5: a pivot cannot count itself as an end of a pair, so its
+            # sum is divided by k - 1 where every other node's is divided by k.
+            other = 1.0 / (k * (n - 2))
+            source = 1.0 / ((k - 1) * (n - 2)) if k > 1 else float("nan")
+            return {
+                qn: raw[i] * (source if qn in pivot_set else other)
+                for i, qn in enumerate(nodes)
+            }
+        scale = n / (k * (n - 1) * (n - 2))
+        return {qn: raw[i] * scale for i, qn in enumerate(nodes)}
+    except Exception as exc:  # igraph API drift must never break the tool
+        logger.warning("igraph betweenness failed, using networkx: %s", exc)
+        return None
+
+
+def _betweenness_scores(store: GraphStore) -> dict[str, float]:
+    """Positive betweenness scores of the graph, computed once per graph state.
+
+    A tool call opens a fresh store, so nothing in memory survives between calls; the
+    scores are kept in the ``metadata`` table beside the graph, keyed by
+    :func:`_bridge_cache_signature`. ``find_bridge_nodes`` and
+    ``generate_suggested_questions`` read the same entry. A graph that cannot be written
+    (read-only, locked by the indexer) just computes every time.
+    """
+    import json
+    import sqlite3
+
+    signature = _bridge_cache_signature(store)
+    try:
+        cached = store.get_metadata(_BRIDGE_CACHE_KEY)
+        if cached:
+            payload = json.loads(cached)
+            if payload.get("signature") == json.loads(json.dumps(signature)):
+                return {str(qn): float(s) for qn, s in payload["scores"].items()}
+    except (ValueError, KeyError, TypeError, AttributeError, sqlite3.Error):
+        logger.warning("Ignoring unreadable bridge score cache", exc_info=True)
+
+    scores = {qn: s for qn, s in _compute_betweenness(store).items() if s > 0}
+    try:
+        store.set_metadata(
+            _BRIDGE_CACHE_KEY, json.dumps({"signature": signature, "scores": scores}),
+        )
+    except sqlite3.Error as exc:
+        logger.warning("Could not cache bridge scores: %s", exc)
+    return scores
+
+
 def find_bridge_nodes(
     store: GraphStore, top_n: int = 10, include_tests: bool = True,
     include_config: bool = True,
@@ -241,27 +393,8 @@ def find_bridge_nodes(
     Returns list of dicts with: name, qualified_name, kind, file,
     betweenness, community_id
     """
-    import networkx as nx
-
-    # Build the graph — use cached version if available. A call to a bare name
-    # is no path: through it, every caller of ``get`` would sit next to every
-    # other, and the shortest paths between regions would run through names.
-    full = store._build_networkx_graph()
-    nxg = full.edge_subgraph(
-        (u, v) for u, v, d in full.edges(data=True) if not d.get("unresolved_target")
-    ).copy()
-
-    # Compute betweenness centrality (approximate for large graphs)
-    n_nodes = nxg.number_of_nodes()
-    if n_nodes > 5000:
-        # Sample-based approximation for large graphs
-        k = min(500, n_nodes)
-        # A fixed seed keeps the sample, and so the ranking, the same on every call:
-        # a ranking read in pages must not be redrawn between pages.
-        bc = nx.betweenness_centrality(nxg, k=k, normalized=True, seed=0)
-    elif n_nodes > 0:
-        bc = nx.betweenness_centrality(nxg, normalized=True)
-    else:
+    bc = _betweenness_scores(store)
+    if not bc:
         return []
 
     community_map = store.get_all_community_ids()
@@ -294,8 +427,6 @@ def find_bridge_nodes(
     # Equal scores are ordered by qualified name, so a ranking read in pages never
     # repeats or skips a node.
     results.sort(key=lambda x: (-float(x["betweenness"]), str(x["qualified_name"])))  # type: ignore[arg-type]
-    del nxg, full, bc
-    store.shrink_memory(clear_nx_cache=True)
     return results[:top_n]
 
 
@@ -423,6 +554,9 @@ def find_knowledge_gaps(
     max_untested: int | None = _MAX_UNTESTED_HOTSPOTS,
     include_tests: bool = True,
     include_non_code: bool = False,
+    *,
+    nodes: list[GraphNode] | None = None,
+    edges: list[GraphEdge] | None = None,
 ) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
 
@@ -450,9 +584,13 @@ def find_knowledge_gaps(
     Isolated nodes and untested hotspots are cut at *max_isolated* and *max_untested*
     (``None`` keeps every row, for a caller that pages). Every list has a fixed order.
     """
-    edges = store.get_all_edges()
+    if edges is None:
+        edges = store.get_all_edges()
     # Table order made explicit: the isolated list is read in node id order.
-    all_nodes = sorted(store.get_all_nodes(exclude_files=True), key=lambda n: n.id)
+    all_nodes = sorted(
+        store.get_all_nodes(exclude_files=True) if nodes is None else nodes,
+        key=lambda n: n.id,
+    )
     community_map = store.get_all_community_ids()
     test_root = None if include_tests else store.get_repo_root()
     test_qns = {n.qualified_name for n in all_nodes if _is_test_node(n, test_root)}
@@ -590,6 +728,9 @@ def find_knowledge_gaps(
 
 def find_surprising_connections(
     store: GraphStore, top_n: int = 15, include_tests: bool = True,
+    *,
+    nodes: list[GraphNode] | None = None,
+    edges: list[GraphEdge] | None = None,
 ) -> list[dict]:
     """Find edges with high surprise scores.
 
@@ -603,21 +744,25 @@ def find_surprising_connections(
     Unless *include_tests* is true, an edge with a test node at either end is dropped
     before scoring and ranking.
     """
-    nodes = store.get_all_nodes(exclude_files=True)
+    if nodes is None:
+        nodes = store.get_all_nodes(exclude_files=True)
     community_map = store.get_all_community_ids()
 
     node_map = {n.qualified_name: n for n in nodes}
     root = None if include_tests else store.get_repo_root()
     # A bare-name match is no coupling, and one call made in five places is one
     # row, not five: rank each (source, target, kind) once.
-    edges: list[GraphEdge] = []
+    unique_edges: list[GraphEdge] = []
     row_keys: set[tuple[str, str, str]] = set()
-    traced, _bare = _traced_edges(store.get_all_edges(), set(node_map))
+    traced, _bare = _traced_edges(
+        store.get_all_edges() if edges is None else edges, set(node_map),
+    )
     for e in traced:
         key = (e.source_qualified, e.target_qualified, e.kind)
         if key not in row_keys:
             row_keys.add(key)
-            edges.append(e)
+            unique_edges.append(e)
+    edges = unique_edges
 
     # A class holding its method, or a JSON key holding its child, is how the
     # code is laid out, never a coupling. Leave those edges out of the candidates
@@ -753,6 +898,9 @@ def generate_suggested_questions(
     - surprising: Why does A call B across community boundary?
     """
     questions = []
+    # One load of the nodes and edges feeds every analysis below.
+    all_nodes = store.get_all_nodes(exclude_files=True)
+    all_edges = store.get_all_edges()
 
     # Bridge node questions
     bridges = find_bridge_nodes(
@@ -773,11 +921,11 @@ def generate_suggested_questions(
     # Hub risk questions
     hubs = find_hub_nodes(
         store, top_n=3, include_tests=include_tests, include_config=False,
+        nodes=all_nodes, edges=all_edges,
     )
-    edges = store.get_all_edges()
     tested = {
         e.source_qualified
-        for e in edges if e.kind == "TESTED_BY"
+        for e in all_edges if e.kind == "TESTED_BY"
     }
     for h in hubs:
         if h["qualified_name"] not in tested:
@@ -794,7 +942,9 @@ def generate_suggested_questions(
             })
 
     # Surprising connection questions
-    surprises = find_surprising_connections(store, top_n=3, include_tests=include_tests)
+    surprises = find_surprising_connections(
+        store, top_n=3, include_tests=include_tests, nodes=all_nodes, edges=all_edges,
+    )
     for s in surprises:
         if "cross-community" in s["reasons"]:
             questions.append({
@@ -811,7 +961,9 @@ def generate_suggested_questions(
             })
 
     # Knowledge gap questions
-    gaps = find_knowledge_gaps(store, include_tests=include_tests)
+    gaps = find_knowledge_gaps(
+        store, include_tests=include_tests, nodes=all_nodes, edges=all_edges,
+    )
 
     for c in gaps["thin_communities"][:2]:
         questions.append({
