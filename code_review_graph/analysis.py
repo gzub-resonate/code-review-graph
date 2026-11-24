@@ -65,6 +65,21 @@ def _is_non_code(node: GraphNode) -> bool:
     )
 
 
+
+
+def _is_constructor(node: GraphNode) -> bool:
+    """Is this a constructor: a function named for the class that holds it?
+
+    Java, Kotlin, C# and Scala write constructors that way, and the parser flags
+    Java's. Frameworks (Guice, Spring) call them, so no call edge names them.
+    """
+    if node.kind != "Function":
+        return False
+    if node.extra.get("java_constructor"):
+        return True
+    return bool(node.parent_name) and node.name == node.parent_name.rsplit(".", 1)[-1]
+
+
 # Edges that say a node builds on another one.
 _OUTGOING_USE_KINDS = frozenset({"CALLS", "REFERENCES"})
 
@@ -348,7 +363,9 @@ def find_knowledge_gaps(
 
     Documentation sections, lockfile entries, Dockerfile stages and anything under
     ``.storybook`` or ``.github`` are left out of ``isolated_nodes`` and
-    ``untested_hotspots`` unless *include_non_code* is set.
+    ``untested_hotspots`` unless *include_non_code* is set. So are constructors
+    held by their class: a framework such as Guice calls them, so nothing in the
+    graph does. A constructor with no CONTAINS edge is still reported.
 
     Returns dict with categories:
     - isolated_nodes: degree <= 1, disconnected from graph
@@ -363,15 +380,24 @@ def find_knowledge_gaps(
 
     # Build degree map
     degree: dict[str, int] = Counter()
+    contained: set[str] = set()
     for e in edges:
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
+        if e.kind == "CONTAINS":
+            contained.add(e.target_qualified)
+
+    def expected(n: GraphNode) -> bool:
+        """Never a gap: non-code, or a constructor its class contains (wired by a framework)."""
+        if include_non_code:
+            return False
+        return _is_non_code(n) or (_is_constructor(n) and n.qualified_name in contained)
 
     # 1. Isolated nodes (degree <= 1, not File)
     isolated = []
     for n in nodes:
         d = degree.get(n.qualified_name, 0)
-        if d <= 1 and (include_non_code or not _is_non_code(n)):
+        if d <= 1 and not expected(n):
             isolated.append({
                 "name": _sanitize_name(n.name),
                 "qualified_name": n.qualified_name,
@@ -419,7 +445,7 @@ def find_knowledge_gaps(
     candidates = [
         n for n in nodes
         if named.get(n.qualified_name, 0) >= 5 and not n.is_test
-        and (include_non_code or not _is_non_code(n))
+        and not expected(n)
     ]
     candidates.sort(key=lambda n: -named.get(n.qualified_name, 0))
     untested_hotspots: list[dict] = []

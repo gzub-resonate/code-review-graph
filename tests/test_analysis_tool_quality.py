@@ -487,3 +487,34 @@ def test_hub_tool_exposes_leaf_primitive_switch_and_keeps_default(tmp_path, stor
     assert default["hub_nodes"][0]["name"] == "FlexBox"
     assert default["hub_nodes"][0]["resolution_split"] == {"direct": 3, "bare_name": 0}
     assert "FlexBox" not in {h["name"] for h in filtered["hub_nodes"]}
+
+
+def test_framework_wired_constructors_are_not_isolated_nodes(store):
+    cls = _node(store, "AppModule", "/r/AppModule.java", kind="Class", language="java")
+    ctor = _node(store, "AppModule", "/r/AppModule.java", language="java", parent="AppModule")
+    method = _node(store, "configure", "/r/AppModule.java", language="java", parent="AppModule")
+    orphan_ctor = _node(store, "Widget", "/r/Widget.java", language="java", parent="Widget")
+    _edge(store, "CONTAINS", cls, ctor)
+    _edge(store, "CONTAINS", cls, method)
+    store.commit()
+
+    isolated = {n["qualified_name"] for n in find_knowledge_gaps(store)["isolated_nodes"]}
+
+    assert ctor not in isolated
+    assert method in isolated  # a method nothing calls is still a gap
+    assert orphan_ctor in isolated  # no CONTAINS edge either: still reported
+    everything = find_knowledge_gaps(store, include_non_code=True)["isolated_nodes"]
+    assert ctor in {n["qualified_name"] for n in everything}
+
+
+def test_a_constructor_is_not_an_untested_hotspot(store):
+    cls = _node(store, "Feed", "/r/Feed.java", kind="Class", language="java")
+    ctor = _node(store, "Feed", "/r/Feed.java", language="java", parent="Feed")
+    _edge(store, "CONTAINS", cls, ctor)
+    for i in range(6):
+        _edge(store, "CALLS", _node(store, f"make{i}", f"/r/m{i}.java", language="java"), ctor)
+    store.commit()
+
+    hot = {h["qualified_name"] for h in find_knowledge_gaps(store)["untested_hotspots"]}
+
+    assert ctor not in hot
