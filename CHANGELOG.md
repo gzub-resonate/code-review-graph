@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `find_large_functions_tool` ranks functions and methods by default. It used to list each file twice
+  (a File node and the Class node spanning it) and fill the top with test files, msw handlers,
+  `.stories.tsx` files and an 18,754-line SQL baseline. `kind` still overrides (one kind or a comma
+  list; a class spanning its file is dropped when File is also listed), `include_tests=true` (CLI
+  `--include-tests`) brings back tests, mocks and generated files, and with `detail_level="minimal"`
+  the summary no longer repeats the hits.
+- `semantic_search_nodes_tool` ranks YamlPath, JsonPath and DocSection nodes at half score unless the
+  query names configuration (a `$` path, `.yml`/`.json`, a dotted key, or such a `kind`), so a
+  workflow's `$.on.schedule` no longer outranks the code that does the scheduling.
+- A Spring mapping such as `@PostMapping(path = {"", "/"})` produced two identical Endpoint nodes
+  for one route, so `get_review_context_tool` listed the endpoint twice. It is now one endpoint
+  whose `path_variants` lists the spellings.
+
 ### Added
 
 - `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has

@@ -131,7 +131,7 @@ code-review-graph flow --id ID | --name NAME [--source]
 code-review-graph communities [--sort size] [--min-size N]
 code-review-graph community --id ID | --name NAME [--members]
 code-review-graph architecture [--detail-level minimal|standard]
-code-review-graph large-functions [--min-lines N] [--kind Function] [--path SUBSTR] [--limit N]
+code-review-graph large-functions [--min-lines N] [--kind Function] [--path SUBSTR] [--limit N] [--include-tests]
 code-review-graph refactor rename --old-name A --new-name B
 code-review-graph refactor dead_code [--kind Function] [--path SUBSTR]
 code-review-graph refactor suggest
@@ -648,7 +648,9 @@ expand_neighbors: bool = False   # With include_source: also the top hits' calle
 max_source_lines: int = 60       # Lines per snippet (1-60)
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
-Search ranks three times what it shows. `total` and `result_count` count the
+Search ranks three times what it shows. YamlPath, JsonPath and DocSection hits score half
+(`_CONFIG_RANK_FACTOR`) unless the query names configuration: a `$` path, a file name such
+as `.yml` or `.json`, a dotted key such as `spring.datasource.url`, or one of those kinds in `kind`. `total` and `result_count` count the
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
 says there may be more.
 
@@ -683,14 +685,21 @@ repo_root: str | None
 #### `find_large_functions_tool`
 ```
 min_lines: int = 50                # Minimum line count
-kind: str | None                   # File, Class, Function, Test, YamlPath, DocSection, or JsonPath
+kind: str | None                   # Default Function. One kind or a comma list: Function, Class,
+                                   # File, Test, YamlPath, DocSection, JsonPath
 file_path_pattern: str | None      # File path substring
 limit: int = 50                    # At most 100; at most 25 with detail_level "minimal"
 repo_root: str | None
 detail_level: str = "standard"     # "minimal" gives fewer, smaller rows
 cursor: str | None                 # next_cursor of the previous reply (see Paging)
+include_tests: bool = False        # Also rank Test nodes and test, mock, story, generated files
 ```
-`total` and `result_count` count every match before the cut.
+`total` and `result_count` count every match before the cut. Without `kind` only functions and
+methods are ranked: a File node is only its file's size and a Class that spans its file repeats
+it. With `kind="File,Class"` a class that spans its whole file is dropped in favour of the File
+node. Unless `include_tests` is true, Test nodes and nodes in test files, `mocks/`, `msw/`,
+`fixtures/` and generated directories, `.stories.` files and baseline `.sql` dumps are left out.
+With `detail_level="minimal"` the summary is one line; the hits are in `results` only.
 
 #### `get_docs_section_tool`
 ```
