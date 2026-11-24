@@ -63,7 +63,10 @@ def test_minimal_mode_carries_totals_but_no_symbol_names(pull_request):
     assert section["removed_symbols_total"] > 0
     assert "added_symbols" not in section
     assert "removed_symbols" not in section
-    assert set(section) == {"head", "base", "added_symbols_total", "removed_symbols_total"}
+    assert set(section) == {
+        "head", "base", "added_symbols_total", "removed_symbols_total", "new_code",
+    }
+    assert "symbols" not in section["new_code"]
 
 
 def test_standard_mode_totals_match_the_lists_when_nothing_is_cut(pull_request):
@@ -76,7 +79,9 @@ def test_standard_mode_totals_match_the_lists_when_nothing_is_cut(pull_request):
 
 def _info(added, removed=None):
     return {"head": "h" * 12, "base": "b" * 12, "added_symbols": added,
-            "removed_symbols": removed or {}}
+            "removed_symbols": removed or {},
+            "new_code": {"rows": [], "production_added": 0, "tests_added": 0, "untested": 0,
+                         "score": 0.0}}
 
 
 def _section(info, size=100):

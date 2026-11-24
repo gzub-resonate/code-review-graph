@@ -1234,7 +1234,11 @@ async def detect_changes_tool(
         ``next_cursor`` is the ``cursor`` for the next page; the other lists
         are on the first page only. For a pull request, ``pull_request`` lists
         at most ``max_results`` added and removed symbols a page, and the same
-        ``next_cursor`` reads the next page of both lists.
+        ``next_cursor`` reads the next page of both lists. ``pull_request.new_code``
+        scores the production code the pull request adds (it has no callers yet) from
+        the tests added with it, new endpoints, size and security-looking names; the
+        overall ``risk_score`` is the higher of that and the changed symbols' score,
+        and ``risk_breakdown`` shows both.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(

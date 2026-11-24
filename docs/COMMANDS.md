@@ -837,7 +837,10 @@ pr: int = None               # Score a pull request's files (read from refs/pull
 head: str = None             # Or a ref/commit to read the changed files from; base then names the target branch
                              # Reply gains `pull_request`: commits, symbol totals, and (not in minimal) the added and
                              # removed names, `max_results` rows a page (max 100), with `symbols_truncated` set
-                             # while rows remain. The same `cursor` reads the next page of functions and symbols
+                             # while rows remain. The same `cursor` reads the next page of functions and symbols.
+                             # `pull_request.new_code` scores the production symbols the pull request adds (totals; and
+                             # beyond minimal, scored rows with `coverage`, `reasons` and linked `tests`), and the
+                             # overall `risk_score` becomes the higher of that and the changed symbols' (`risk_breakdown`)
 ```
 Main tool for code review. Maps changed files to affected functions, YAML and JSON
 paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and

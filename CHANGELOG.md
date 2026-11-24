@@ -4,6 +4,16 @@
 
 ### Added
 
+- `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has
+  no callers in the graph, so it used to look safe: a pull request adding 75 production symbols
+  reported one changed function. `pull_request.new_code` gives the totals (symbols added, tests
+  added, symbols no test in the pull request calls, the highest score) and, beyond `minimal`, one
+  page of scored symbols, riskiest first, each with how a test was tied to it (`coverage`: `linked`,
+  `name_only`, `unit_only` or `none`), the tests, and the reasons: no test, a new endpoint, a
+  security-looking name, size and branching. The overall `risk_score` is now the higher of that and
+  the changed symbols' score, and `risk_breakdown` shows both. The score is a heuristic: a test
+  is tied to a symbol by the names the parser reads, not by a resolved call. The same `cursor` pages
+  the scored symbols with the changed functions and the symbol names.
 - `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The
   files are read from Git and parsed in memory as `pr_blast_radius_tool` does, matched to the base
   graph, and scored by the same analysis as a working-tree diff (risk score, flows, test gaps,
@@ -428,6 +438,9 @@
 
 ### Internal
 
+- `new_code.py` scores a pull request's added symbols; `pr_blast_radius.analyse` keeps each file's
+  added production symbols and test symbols (`FileReport.new_symbols`) for it. Tests are
+  `test_new_code.py`.
 - `analyze_changes` accepts `changed_nodes`, for callers that already know the changed symbols.
 - `ember_extract.py`, `ember_template.py` and `ember_resolver.py` add the Ember
   support; tests are `test_ember_parser.py`, `test_ember_template.py` (including

@@ -10,6 +10,7 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from ..changes import (  # noqa: F401
+    _OVERALL_RISK_LINE,
     DiffRanges,
     analyze_changes,
     compute_risk_score,
@@ -29,6 +30,7 @@ from ..incremental import (
     path_within_repo,
     resolve_review_base,
 )
+from ..new_code import score_new_code
 from ..paging import (
     CursorError,
     Page,
@@ -1043,8 +1045,34 @@ def _pull_request_rows(info: dict[str, Any]) -> list[dict[str, str]]:
     return rows
 
 
+def _new_code_section(
+    new_code: dict[str, Any], page: Page | None,
+) -> dict[str, Any]:
+    """The ``new_code`` part of a pull request review: totals, and one page of scored rows."""
+    section: dict[str, Any] = {
+        "production_added": new_code["production_added"],
+        "tests_added": new_code["tests_added"],
+        "untested": new_code["untested"],
+        "score": new_code["score"],
+    }
+    if page is None:
+        return section
+    rows = []
+    for row in page.items:
+        shown = {**row, "file": _sanitize_name(row["file"]), "name": _sanitize_name(row["name"])}
+        if "parent" in row:
+            shown["parent"] = _sanitize_name(row["parent"])
+        if "tests" in row:
+            shown["tests"] = [_sanitize_name(name) for name in row["tests"]]
+        rows.append(shown)
+    section["symbols"] = rows
+    section["symbols_truncated"] = page.truncated
+    return section
+
+
 def _pull_request_section(
     info: dict[str, Any], detail_level: str, rows_page: Page | None = None,
+    new_page: Page | None = None,
 ) -> dict[str, Any]:
     """The ``pull_request`` part of a pull request review.
 
@@ -1052,11 +1080,15 @@ def _pull_request_section(
     symbol names of one page of rows (see :func:`_pull_request_rows`) are listed per file, and
     ``symbols_truncated`` says when rows remain on a later page. The totals count every
     symbol either way. Names are sanitised like any node name sent to a client.
+
+    ``new_code`` scores the production symbols the pull request adds (see ``new_code.py``):
+    totals at every level, and one page of scored rows beyond ``minimal``.
     """
     section: dict[str, Any] = {
         "head": info["head"], "base": info["base"],
         "added_symbols_total": sum(len(names) for names in info["added_symbols"].values()),
         "removed_symbols_total": sum(len(names) for names in info["removed_symbols"].values()),
+        "new_code": _new_code_section(info["new_code"], new_page),
     }
     if detail_level == "minimal" or rows_page is None:
         return section
@@ -1069,6 +1101,38 @@ def _pull_request_section(
     section["removed_symbols"] = removed
     section["symbols_truncated"] = rows_page.truncated
     return section
+
+
+def _fold_in_new_code(
+    result: dict[str, Any], new_code: dict[str, Any], page: Page | None,
+) -> None:
+    """Make a pull request's risk score count the code it adds, and say so in the summary.
+
+    The score of a change is its riskiest symbol, so the overall score becomes the higher of
+    the changed symbols' and the riskiest new symbol's. ``risk_breakdown`` keeps both.
+    """
+    changed = float(result.get("risk_score") or 0.0)
+    added = float(new_code["score"])
+    result["risk_breakdown"] = {"changed_symbols": round(changed, 4), "new_code": added}
+    if added > changed:
+        summary = str(result.get("summary") or "")
+        result["summary"] = summary.replace(
+            _OVERALL_RISK_LINE.format(changed), _OVERALL_RISK_LINE.format(added), 1,
+        )
+        result["risk_score"] = added
+    if not new_code["production_added"]:
+        return
+    line = (
+        f"\n  - New code: {new_code['production_added']} production symbol(s) added, "
+        f"{new_code['untested']} with no test in this pull request"
+    )
+    rows = new_code["rows"]
+    if rows and rows[0]["score"] > 0:
+        top = rows[0]
+        line += f"; riskiest {top['name']} ({top['score']:.2f}: {'; '.join(top['reasons'])})"
+    if page is not None and page.total > len(page.items) and page.offset == 0:
+        line += f"; {len(page.items)} of {page.total} scored rows shown"
+    result["summary"] = str(result.get("summary") or "") + line
 
 
 def detect_changes_func(
@@ -1160,6 +1224,10 @@ def detect_changes_func(
             pr_info = {
                 "head": loaded["head_sha"][:12], "base": loaded["base_ref"][:12],
                 "added_symbols": {}, "removed_symbols": {},
+                "new_code": score_new_code(
+                    symbol for report in (found["files"] if found else [])
+                    for symbol in report.new_symbols
+                ),
             }
             seen_qns: set[str] = set()
             for report in (found["files"] if found else []):
@@ -1242,6 +1310,7 @@ def detect_changes_func(
         # ordered function names, since a diff is recomputed on every call.
         page = None
         rows_page: Page | None = None
+        new_page: Page | None = None
         later_page = False
         source_funcs = analysis.get("changed_functions", [])
         if detail_level != "minimal":
@@ -1258,15 +1327,17 @@ def detect_changes_func(
                 )
                 later_page = page.offset > 0
             else:
-                # A pull request pages its changed functions and its symbol rows together,
-                # one cursor for both, each by at most ``max_results`` rows a page.
+                # A pull request pages its changed functions, its symbol rows and its scored
+                # new code together, one cursor for all, each by at most ``max_results``
+                # rows a page.
                 pr_rows = _pull_request_rows(pr_info)
+                new_rows = pr_info["new_code"]["rows"]
                 size = min(max_results, _MAX_CHANGED_FUNCTIONS)
                 both = paginate_groups(
-                    [analysis.get("changed_functions", []), pr_rows], size, 2 * size,
-                    2 * _MAX_CHANGED_FUNCTIONS, cursor, scope=scope,
+                    [analysis.get("changed_functions", []), pr_rows, new_rows], size, 3 * size,
+                    3 * _MAX_CHANGED_FUNCTIONS, cursor, scope=scope,
                     stamp=graph_stamp(store, _digest_of(
-                        changed_files, names, pr_info["head"], pr_rows,
+                        changed_files, names, pr_info["head"], pr_rows, new_rows,
                     )),
                 )
                 later_page = both.offset > 0
@@ -1277,6 +1348,9 @@ def detect_changes_func(
                 )
                 rows_page = Page(
                     list(both.groups[1]), len(pr_rows), both.group_offsets[1], both.next_cursor,
+                )
+                new_page = Page(
+                    list(both.groups[2]), len(new_rows), both.group_offsets[2], both.next_cursor,
                 )
             source_funcs = page.items
 
@@ -1420,11 +1494,14 @@ def detect_changes_func(
                 **page.fields(),
             }
         if pr_info is not None:
-            result["pull_request"] = _pull_request_section(pr_info, detail_level, rows_page)
+            result["pull_request"] = _pull_request_section(
+                pr_info, detail_level, rows_page, new_page,
+            )
             if rows_page is not None and rows_page.total:
                 result["summary"] += (
                     f"\n  - Pull request symbol(s): {rows_page.total}{shown_range(rows_page)}"
                 )
+            _fold_in_new_code(result, pr_info["new_code"], new_page)
         if notes:
             # Said once, first: the review covers different files than the
             # base the caller asked for would have.

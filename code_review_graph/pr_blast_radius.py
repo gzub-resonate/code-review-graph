@@ -31,7 +31,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -44,6 +44,8 @@ from .constants import (
 )
 from .endpoint_index import extract_endpoints
 from .graph import GraphNode, GraphStore
+from .new_code import NewSymbol
+from .new_code import collect as collect_new_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -497,6 +499,8 @@ class FileReport:
     reached_tests: int = 0
     same_repo_files: int = 0
     untested: list[str] = None  # type: ignore[assignment]
+    #: Added production symbols and every test symbol of the file, for ``new_code`` scoring.
+    new_symbols: list[NewSymbol] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.untested is None:
@@ -612,6 +616,9 @@ def analyse(
         report = FileReport(change.path, change.status, [], [], [], [])
 
         head_symbols: list[Any] = []
+        head_nodes: list[Any] = []
+        head_edges: list[Any] = []
+        head_text = ""
         if change.status != "deleted":
             is_migration = bool(_MIGRATION_RE.search(change.path))
             room_to_parse = parsed_count < MAX_PARSED_FILES
@@ -626,12 +633,14 @@ def analyse(
                 schema.extend(sql_changes(change.path, blob.decode("utf-8", errors="replace")))
             if blob is not None and room_to_parse:
                 try:
-                    nodes, _edges = parser.parse_bytes(Path(absolute), blob)
+                    nodes, edges = parser.parse_bytes(Path(absolute), blob)
                 except Exception as exc:  # noqa: BLE001 - a parse failure must not fail the PR
                     logger.warning("Could not parse %s: %s", change.path, exc)
                     report.parsed, report.note = False, "the parser could not read it"
                 else:
                     parsed_count += 1
+                    head_nodes, head_edges = nodes, edges
+                    head_text = blob.decode("utf-8", errors="replace")
                     head_symbols = [n for n in nodes if n.kind in _SYMBOL_KINDS]
                     head_endpoint_nodes.extend(
                         _as_graph_node(n) for n in nodes if n.kind == "Endpoint"
@@ -644,6 +653,7 @@ def analyse(
         for node in base_symbols:
             by_key.setdefault(_key(node.kind, node.name, node.parent_name), []).append(node)
         head_keys = set()
+        added_keys: set[tuple[str, str, str]] = set()
         file_ranges = ranges.get(change.path, [])
         for sym in head_symbols:
             key = _key(sym.kind, sym.name, sym.parent_name)
@@ -651,6 +661,7 @@ def analyse(
             matches = by_key.get(key)
             if not matches:
                 report.added.append(sym.name)
+                added_keys.add(key)
             elif sym.kind in _CHANGEABLE_KINDS and any(
                 sym.line_start <= end and sym.line_end >= start for start, end in file_ranges
             ):
@@ -661,6 +672,9 @@ def analyse(
             if key not in head_keys:
                 report.removed.append(key[1])
                 report.seeds.extend(n.qualified_name for n in nodes_)
+        report.new_symbols = collect_new_symbols(
+            change.path, head_nodes, head_edges, head_text, added_keys,
+        )
         all_seeds.extend(report.seeds)
         reports.append(report)
 
