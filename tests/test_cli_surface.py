@@ -1187,6 +1187,8 @@ NUMERIC_ENV_VARS: tuple[NumericVar, ...] = (
     NumericVar("CRG_IMPACT_DEPTH_DECAY", ("status",), "0.5"),
     NumericVar("CRG_IMPACT_SCORE_FLOOR", ("status",), "0.1"),
     NumericVar("CRG_PARSE_WORKERS", ("status",), "2"),
+    # Read per call by the cross-repo MCP tools; no CLI command reaches it.
+    NumericVar("CRG_CROSS_REPO_BUDGET_SECONDS", ("status",), "30", False),
     NumericVar("CRG_MODULE_SCAN_DEPTH", ("status",), "2"),
     NumericVar("CRG_MODULE_SCAN_MAX_DIRS", ("status",), "100"),
     NumericVar("CRG_NESTED_IGNORE_TTL", ("status",), "60"),

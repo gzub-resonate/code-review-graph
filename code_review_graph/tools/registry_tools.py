@@ -212,7 +212,7 @@ def _search_repo(
     row had in the search (lookup-only rows follow the last one).
     """
     rows = hybrid_search(store, query, kind=kind, limit=limit)
-    seen = {row["qualified_name"] for row in rows}
+    seen = {row.get("qualified_name") for row in rows}
     text = query.strip()
     if text:
         if any(sep in text for sep in _QUALIFIED_SEPARATORS):
@@ -237,8 +237,13 @@ def _repo_label(entry: dict[str, Any]) -> str:
     return str(entry.get("alias") or Path(entry["path"]).name)
 
 
+def _now() -> float:
+    """The clock the call budget runs on (a seam for tests)."""
+    return time.monotonic()
+
+
 def _out_of_budget(deadline: float | None) -> bool:
-    return deadline is not None and time.monotonic() >= deadline
+    return deadline is not None and _now() >= deadline
 
 
 def cross_repo_search_func(
@@ -359,7 +364,7 @@ def cross_repo_search_func(
             selected = all_repos
 
         budget = cross_repo_budget_seconds()
-        deadline = time.monotonic() + budget if budget > 0 else None
+        deadline = _now() + budget if budget > 0 else None
         ranked_results: list[tuple[int, int, int, dict[str, Any]]] = []
         searched_repos: list[str] = []
         skipped: list[str] = []
@@ -706,7 +711,7 @@ def cross_repo_requests_func(
         skipped: list[str] = []
         total = 0
         budget = cross_repo_budget_seconds()
-        deadline = time.monotonic() + budget if budget > 0 else None
+        deadline = _now() + budget if budget > 0 else None
         started = 0
 
         for index, entry in enumerate(all_repos):
