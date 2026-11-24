@@ -670,6 +670,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 操作のタイムアウト（秒。build / update / watch） | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | レビューのツールやコマンドにファイル一覧が明示されなかったとき、変更内容を特定する各 Git コマンドのタイムアウト（秒）。超過時はエラーを返し、「変更なし」とは報告しない | `5`（`CRG_GIT_TIMEOUT` を明示設定した場合はその値） |
+| `CRG_DEFAULT_IGNORE` | すべてのリポジトリに適用する追加の除外パターン。各リポジトリの `.code-review-graphignore` に加えて使われます（記法は同じ、カンマまたは改行区切り）。例: `src/generated/**,.claude/**`。リポジトリの `.code-review-graphignore` に `!path` を書くと、これらのパターンで除外されるパスを残せます。パターンが 200 個超、1 つが 256 文字超、制御文字、`!` 始まりはエラーになります | - |
 | `CRG_DATA_DIR` | グラフのデータベースと生成物を置くディレクトリ。`install` が書いたファイルの記録は、リポジトリの `.code-review-graph/` に残ります | - |
 | `CRG_HOME` | ユーザーごとの状態を置くフォルダ: マルチリポジトリの登録簿（`registry.json`）、デーモンの `watch.toml`、その pid と状態のファイル、`logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1` にすると、生成された git フックをリンク済みの git worktree でも動かす | - |

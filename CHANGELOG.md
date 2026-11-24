@@ -4,6 +4,12 @@
 
 ### Added
 
+- `CRG_DEFAULT_IGNORE` sets ignore patterns for every repository without editing each one, for
+  example `src/generated/**,.claude/**` (comma or newline separated, same syntax as
+  `.code-review-graphignore`). Full builds and updates honour it, and a file already in the graph
+  that it excludes is removed on the next update. A `!path` line in a repository's own
+  `.code-review-graphignore` spares a path the setting would exclude. A bad value (over 200 patterns,
+  a pattern over 256 characters, a control character, or a `!` entry) is reported as an error.
 - `cross_repo_search_tool` and `cross_repo_requests_tool` stop after
   `CRG_CROSS_REPO_BUDGET_SECONDS` (default 60, `0` = no limit) instead of running for minutes over a
   large registry. When the time is spent no new repo is started; the ones left come back in
@@ -295,6 +301,7 @@
 
 ### Fixed
 
+- `refactor_tool(mode="dead_code")` no longer lists a Dockerfile build stage (`stage:0`, `stage:builder`) as dead code.
 - `cross_repo_search_tool` ranks an exact name first. Scores differ between repos, so ordering by
   repo-local rank alone put other repos' weak first hits ahead of the exact match, and a repo's
   `limit` could cut its own exact match behind fuzzier hits.

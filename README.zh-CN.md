@@ -674,6 +674,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 操作的超时秒数（build / update / watch） | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | 审查工具或命令未显式给出文件清单时，用于识别变更的每个 Git 命令的超时秒数。超时会返回错误，而不会报告“没有变更” | `5`（显式设置 `CRG_GIT_TIMEOUT` 时取该值） |
+| `CRG_DEFAULT_IGNORE` | 应用于每个仓库的额外忽略模式，与仓库自己的 `.code-review-graphignore` 叠加（语法相同，用逗号或换行分隔），例如 `src/generated/**,.claude/**`。仓库的 `.code-review-graphignore` 中的 `!path` 行可保留这些模式排除的路径。模式超过 200 个、单个超过 256 个字符、含控制字符或以 `!` 开头都会报错 | - |
 | `CRG_DATA_DIR` | 存放图谱数据库和生成产物的目录。`install` 对其所写文件的记录仍放在仓库的 `.code-review-graph/` 中 | - |
 | `CRG_HOME` | 存放每个用户状态的文件夹：多仓库注册表（`registry.json`）、守护进程的 `watch.toml`、它的 pid 和状态文件，以及 `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | 设为 `1` 时允许生成的 git 钩子在链接的 git worktree 中运行 | - |

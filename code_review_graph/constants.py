@@ -109,6 +109,67 @@ def _bounded_float_env(
         return default
     return value
 
+# ---------------------------------------------------------------------------
+# Operator-wide ignore patterns
+# ---------------------------------------------------------------------------
+
+DEFAULT_IGNORE_ENV = "CRG_DEFAULT_IGNORE"
+#: At most this many patterns in ``CRG_DEFAULT_IGNORE``.
+DEFAULT_IGNORE_MAX_PATTERNS = 200
+#: Longest single pattern accepted, in characters.
+DEFAULT_IGNORE_MAX_PATTERN_LENGTH = 256
+
+
+def default_ignore_patterns() -> list[str]:
+    """Return the patterns in ``CRG_DEFAULT_IGNORE``, validated.
+
+    Patterns use the ``.code-review-graphignore`` glob syntax and are separated
+    by commas or newlines. Surrounding whitespace is stripped and blank entries
+    are dropped. Unset or blank means no patterns.
+
+    Read on every call so a long-lived server sees the value it was started
+    with, and so tests can set it per case.
+
+    Raises:
+        CodeReviewGraphError: too many patterns, a pattern that is too long or
+            contains a control character, or a ``!`` negation (negations belong
+            in a repository's own ``.code-review-graphignore``). A wrong
+            setting must stop the run: skipping it silently would index the
+            generated code the operator meant to exclude.
+    """
+    from .errors import CodeReviewGraphError
+
+    raw = os.environ.get(DEFAULT_IGNORE_ENV)
+    if raw is None or not raw.strip():
+        return []
+    patterns = [
+        part.strip()
+        for part in raw.replace("\r", "\n").replace(",", "\n").split("\n")
+        if part.strip()
+    ]
+    if len(patterns) > DEFAULT_IGNORE_MAX_PATTERNS:
+        raise CodeReviewGraphError(
+            f"{DEFAULT_IGNORE_ENV} has {len(patterns)} patterns; the limit is "
+            f"{DEFAULT_IGNORE_MAX_PATTERNS}. Shorten the list or use broader globs."
+        )
+    for pattern in patterns:
+        if len(pattern) > DEFAULT_IGNORE_MAX_PATTERN_LENGTH:
+            raise CodeReviewGraphError(
+                f"{DEFAULT_IGNORE_ENV} has a pattern of {len(pattern)} characters "
+                f"(limit {DEFAULT_IGNORE_MAX_PATTERN_LENGTH}): {pattern[:40]!r}..."
+            )
+        if any(ord(char) < 32 or ord(char) == 127 for char in pattern):
+            raise CodeReviewGraphError(
+                f"{DEFAULT_IGNORE_ENV} has a pattern with a control character: {pattern!r}."
+            )
+        if pattern.startswith("!"):
+            raise CodeReviewGraphError(
+                f"{DEFAULT_IGNORE_ENV} cannot hold the negation {pattern!r}. "
+                "Spare a path with a '!' line in the repository's .code-review-graphignore."
+            )
+    return patterns
+
+
 SECURITY_KEYWORDS: frozenset[str] = frozenset({
     "auth", "login", "password", "token", "session", "crypt", "secret",
     "credential", "permission", "sql", "query", "execute", "connect",

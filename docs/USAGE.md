@@ -381,6 +381,29 @@ vendor/**
 *.generated.ts
 ```
 
+### Operator-wide patterns: `CRG_DEFAULT_IGNORE`
+
+To exclude generated code from every repository without editing each one, set
+`CRG_DEFAULT_IGNORE` where the server or the build runs. It takes the same glob syntax as
+`.code-review-graphignore`, separated by commas or newlines (blank entries are ignored):
+
+```
+CRG_DEFAULT_IGNORE="src/generated/**,.claude/**"
+```
+
+These patterns apply in addition to the repository's own file, to full builds and to
+incremental updates. A file already in the graph that a new value excludes is removed on the
+next `update`. Unset or blank changes nothing.
+
+Precedence: a `!path` line in a repository's `.code-review-graphignore` spares a path (or a
+folder and everything under it) that a `CRG_DEFAULT_IGNORE` pattern excludes, for example
+`!src/generated/keep`. It does not spare a path that the built-in list or the repository's own
+patterns exclude. `!` entries are not accepted inside `CRG_DEFAULT_IGNORE` itself.
+
+A bad value is an error, not a silent skip: more than 200 patterns, a pattern longer than 256
+characters, a control character, or a `!` entry stops the command with a message naming the
+variable.
+
 In git repositories, indexing is based on tracked files plus untracked files git does not ignore (`git ls-files` and `git ls-files --others --exclude-standard`), so gitignored files are skipped. Use `.code-review-graphignore` to exclude other files or when git is not available.
 
 ## Symlinked Folders
