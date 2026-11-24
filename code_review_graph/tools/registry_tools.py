@@ -200,6 +200,27 @@ def _node_row(node: GraphNode) -> dict[str, Any]:
     }
 
 
+def _lookup_rows(
+    store: GraphStore, query: str, kind: str | None, limit: int,
+) -> list[dict[str, Any]]:
+    """The rows of the nodes whose name (or qualified tail) is the query, at most ``limit``.
+
+    A plain indexed lookup: no ranking, no embeddings, so it costs a fraction of
+    ``hybrid_search`` and can run on every repo.
+    """
+    text = query.strip()
+    if not text:
+        return []
+    if any(sep in text for sep in _QUALIFIED_SEPARATORS):
+        found = store.search_nodes_by_qualified_tail(text, limit=limit)
+    else:
+        found = store.get_nodes_by_name(text)[:limit]
+    return [
+        _node_row(node) for node in found
+        if (node.kind == kind if kind else node.kind != _UNSEARCHED_KIND)
+    ]
+
+
 def _search_repo(
     store: GraphStore, query: str, kind: str | None, limit: int,
 ) -> list[tuple[int, str, dict[str, Any]]]:
@@ -213,24 +234,61 @@ def _search_repo(
     """
     rows = hybrid_search(store, query, kind=kind, limit=limit)
     seen = {row.get("qualified_name") for row in rows}
-    text = query.strip()
-    if text:
-        if any(sep in text for sep in _QUALIFIED_SEPARATORS):
-            found = store.search_nodes_by_qualified_tail(text, limit=limit)
-        else:
-            found = store.get_nodes_by_name(text)[:limit]
-        for node in found:
-            if kind and node.kind != kind:
-                continue
-            if not kind and node.kind == _UNSEARCHED_KIND:
-                continue
-            row = _node_row(node)
-            if row["qualified_name"] not in seen:
-                seen.add(row["qualified_name"])
-                rows.append(row)
+    for row in _lookup_rows(store, query, kind, limit):
+        if row["qualified_name"] not in seen:
+            seen.add(row["qualified_name"])
+            rows.append(row)
     tiered = [(rank, _match_tier(query, row), row) for rank, row in enumerate(rows)]
     tiered.sort(key=lambda item: (_TIER_ORDER[item[1]], item[0]))
     return tiered[:limit]
+
+
+#: Seconds the exact-name pass may spend on the repos the budget kept the full search
+#: out of. It is a bound on a slow volume, not a share of the call's budget.
+_EXACT_PASS_SECONDS = 30.0
+
+
+def _exact_pass(
+    left: list[tuple[int, dict[str, Any]]], query: str, kind: str | None, limit: int,
+) -> tuple[list[tuple[int, int, int, dict[str, Any]]], list[str]]:
+    """Exact-name rows of the repos the time budget kept out of the full search.
+
+    Without it an exact name in a repo reached after the budget ran out would be
+    missing from the answer, though finding it costs one indexed lookup. Returns
+    the rows as ``(tier rank, local rank, registry position, row)`` and the
+    aliases of the repos looked in. A repo is still named in ``skipped_repos``
+    (its fuzzy matches were not searched).
+    """
+    rows: list[tuple[int, int, int, dict[str, Any]]] = []
+    looked_in: list[str] = []
+    deadline = _now() + _EXACT_PASS_SECONDS
+    for position, entry in left:
+        if _out_of_budget(deadline):
+            break
+        repo_path = Path(entry["path"])
+        db_path = get_db_path(repo_path)
+        if not db_path.exists():
+            continue
+        try:
+            store = GraphStore(str(db_path))
+            try:
+                found = _lookup_rows(store, query, kind, limit)
+            finally:
+                store.close()
+        except Exception as exc:
+            logger.warning("Exact lookup failed for %s: %s", repo_path, exc)
+            continue
+        alias = entry.get("alias", repo_path.name)
+        looked_in.append(alias)
+        for local_rank, row in enumerate(found):
+            tier = _match_tier(query, row)
+            if tier not in ("exact", "exact_ci", "qualified"):
+                continue
+            row["repo"] = alias
+            row["repo_path"] = str(repo_path)
+            row["match"] = tier
+            rows.append((_TIER_ORDER[tier], local_rank, position, row))
+    return rows, looked_in
 
 
 def _repo_label(entry: dict[str, Any]) -> str:
@@ -262,8 +320,10 @@ def cross_repo_search_func(
     ``qualified`` suffix, ``prefix``, ``tokens``, ``fuzzy``), then by each
     repo's local rank, then registry order. A repo's exact-name nodes are
     always kept, whatever ``limit`` is. At most ``CRG_CROSS_REPO_BUDGET_SECONDS``
-    (default 60, 0 = unlimited) are spent per call: once spent no new repo is
-    started and the ones left are named in ``skipped_repos``.
+    (default 300, 0 = unlimited) are spent per call: once spent no full search
+    is started and the repos left are named in ``skipped_repos``. Those repos
+    still get a plain exact-name lookup (bounded to 30 s), so an exact match in
+    one of them is returned; ``exact_lookup_repos_total`` counts them.
 
     Args:
         query: Search query string.
@@ -368,12 +428,14 @@ def cross_repo_search_func(
         ranked_results: list[tuple[int, int, int, dict[str, Any]]] = []
         searched_repos: list[str] = []
         skipped: list[str] = []
+        left: list[tuple[int, dict[str, Any]]] = []
 
         for repo_index, repo_entry in enumerate(selected):
             # The first repo always runs, so a call makes progress; after that no
             # new repo is started once the budget is spent, and each one left is named.
             if repo_index and _out_of_budget(deadline):
                 skipped.extend(_repo_label(e) for e in selected[repo_index:])
+                left = list(enumerate(selected))[repo_index:]
                 break
             repo_path = Path(repo_entry["path"])
             db_path = get_db_path(repo_path)
@@ -396,6 +458,11 @@ def cross_repo_search_func(
                 logger.warning(
                     "Search failed for %s: %s", repo_path, exc
                 )
+
+        # The repos the budget kept out of the full search still get the cheap exact-name
+        # lookup, so an exact match in a late repo is not lost to the time limit.
+        exact_rows, exact_looked_in = _exact_pass(left, query, kind, limit)
+        ranked_results.extend(exact_rows)
 
         # Scores from different search paths are not comparable across repos.
         # Order by match tier first (an exact name beats any fuzzy hit, whatever
@@ -429,7 +496,8 @@ def cross_repo_search_func(
         if skipped_total:
             notes += (
                 f"; time budget of {budget:g}s spent, {skipped_total} repo(s) not searched "
-                "(see skipped_repos; raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
+                f"(exact names were still looked up in {len(exact_looked_in)} of them; "
+                "see skipped_repos; raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
             )
 
         response = {
@@ -447,6 +515,7 @@ def cross_repo_search_func(
             "skipped_repos": skipped_shown,
             "skipped_repos_total": skipped_total,
             "skipped_repos_truncated": skipped_truncated,
+            "exact_lookup_repos_total": len(exact_looked_in),
             **page.fields(),
         }
         if repos:
@@ -568,7 +637,7 @@ def cross_repo_requests_func(
             first page.
         origin: Only ``feign`` or only ``js`` calls. Default: both.
 
-    The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 60,
+    The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 300,
     0 = unlimited). Once spent, no further client repo is started; those left are
     named in ``skipped_repos`` (with ``skipped_repos_total``), ``truncated`` is set,
     and ``counts`` and ``total`` leave them out. A cursor made on such a partial

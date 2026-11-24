@@ -962,10 +962,14 @@ query, split on non-alphanumerics and camelCase, is in the name) or `fuzzy`. A r
 exact-name nodes are always kept, whatever `limit` is; those the ranked search did not
 return carry `score` 0.
 
-The call has a time budget, `CRG_CROSS_REPO_BUDGET_SECONDS` (default 60, `0` = no limit).
+The call has a time budget, `CRG_CROSS_REPO_BUDGET_SECONDS` (default 300, `0` = no limit).
 When it is spent no further repo is started: the ones not searched are listed in
 `skipped_repos` (capped at 20; `skipped_repos_total` and `skipped_repos_truncated` give
 the real count), `truncated` is set and the summary says so. The first repo always runs.
+The repos not searched still get an exact-name lookup (an indexed query, bounded to 30
+seconds in all), so an `exact`, `exact_ci` or `qualified` match in one of them is returned;
+only their `prefix`, `tokens` and `fuzzy` matches are missing. `exact_lookup_repos_total`
+counts the repos that lookup reached.
 A `cursor` made on such a partial answer is only accepted while the same repos are
 skipped; otherwise it is refused and the call must start over.
 
@@ -1139,7 +1143,7 @@ capped by `limit` and `max_results`, and `truncated` says so. A repository whose
 graph is missing or unreadable is listed in `unreadable` (with its role,
 `client` or `target`, and a short reason) and does not stop the call.
 
-The call has the same time budget (`CRG_CROSS_REPO_BUDGET_SECONDS`, default 60, `0` = no
+The call has the same time budget (`CRG_CROSS_REPO_BUDGET_SECONDS`, default 300, `0` = no
 limit). When it is spent no further client repo is read; those left are listed in
 `skipped_repos` / `skipped_repos_total`, `truncated` is set, and `counts` and `total` leave
 them out. A cursor made on such a partial answer is refused unless the same repos are

@@ -691,7 +691,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for` 和 `detect-changes` 查找测试时每一跳最多跟随的被调用者数。按名称取前面的，因此同一张图谱总是给出同一个答案 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 为没有测试的变更符号向上回溯 `CALLS` 寻找已测试调用者的跳数。仅作为提示报告，不计为覆盖率 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 寻找该已测试调用者时检查的调用者数量上限 | `500` |
-| `CRG_CROSS_REPO_BUDGET_SECONDS` | 单次 `cross_repo_search_tool` 或 `cross_repo_requests_tool` 调用在停止启动新仓库并将其余仓库列入 `skipped_repos` 之前可运行的秒数。`0` 表示不限制 | `60` |
+| `CRG_CROSS_REPO_BUDGET_SECONDS` | 单次 `cross_repo_search_tool` 或 `cross_repo_requests_tool` 调用在停止启动新仓库并将其余仓库列入 `skipped_repos` 之前可运行的秒数。`0` 表示不限制 | `300` |
 | `CRG_TOOL_TIMEOUT` | 只读 MCP 工具的超时秒数（`0` 表示禁用）。不限制写入类工具：build、postprocess、embed、wiki 和 apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` 统计提交数的时间窗口 | `90` |
 | `CRG_CONTEXT_HISTORY` | 设为 `1` 时，把每次 `context_savings` 估算记入本地日志 `.code-review-graph/context-history.jsonl`；用 `code-review-graph context-history` 查看。记录 token 数、工具名、时间戳、详细级别以及文件数和深度，从不记录文件名、路径或源代码，也从不外发 | - |
