@@ -439,6 +439,28 @@
   `code-review-graph build` once to update an existing graph.
 - Feign client methods no longer start an execution flow just because of their
   mapping annotation. Run `code-review-graph build` once to update an existing graph.
+- Community detection no longer splits a class from its own members. A class
+  and the methods it CONTAINS, and a method and the endpoint it HANDLES, are
+  detected as one unit (Leiden runs on one vertex per owner, with the group's
+  internal edges kept as vertex strength), and the same holds when an
+  oversized community is split. Class-to-method CONTAINS edges stop showing up
+  as cross-community coupling and as "surprising connections". On a Java
+  Spring service (1,583 nodes) 35 of 578 class-to-member CONTAINS edges
+  crossed communities before; none do now.
+- JSON and YAML document rows (`JsonPath`, `YamlPath`) are kept out of Leiden
+  and grouped into one community per directory and file type (for example
+  `taskdefs-json`). The same file checked in for several environments used to
+  become one identical clone community per copy.
+- Communities with fewer than three members are merged into the neighbour
+  they share the most edge weight with (or, with no edges, the one holding
+  nodes of the same file, then the same directory). No community is created
+  by the merge, and config-document communities only merge with each other.
+- Community names come from the dominant non-generic directory, or from the
+  class of a dominant file, and ignore test files; a slice across layers is
+  named by its shared vocabulary (`wave-hierarchy`). Descriptions now give the
+  node count and kind mix, the top three files, and how many endpoints and
+  entry points the community holds, instead of "Community of N nodes".
+  Community ids and names change on the next full build or re-detection.
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could

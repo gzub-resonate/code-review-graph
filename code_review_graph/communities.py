@@ -62,6 +62,28 @@ EDGE_WEIGHTS: dict[str, float] = {
     "DEPENDS_ON": 0.6,
 }
 
+#: Node kinds that are rows of a JSON/YAML document rather than code. Every
+#: environment's copy of a config file yields the same tree of these nodes, so
+#: Leiden would give each copy its own community. They are kept out of Leiden
+#: and grouped by directory instead (see ``_group_config_documents``).
+CONFIG_DOCUMENT_KINDS = frozenset({"JsonPath", "YamlPath"})
+
+#: Edge kinds that bind a member to its owner: a class to its methods, a method
+#: to the endpoint it handles. The two ends are always detected together.
+_PIN_EDGE_KINDS = frozenset({"CONTAINS", "HANDLES"})
+
+#: A directory's config documents above this many rows are cut into slices.
+_CONFIG_MAX_MEMBERS = 200
+
+#: Communities with fewer members than this are folded into a neighbour.
+_MIN_COMMUNITY_MEMBERS = 3
+
+#: Directory names that say nothing about what lives in them.
+_GENERIC_DIRS = frozenset({
+    "src", "main", "java", "kotlin", "scala", "lib", "app", "source", "sources",
+    "python", "js", "ts", "com", "org", "net", "io", "code", "packages",
+})
+
 # Common words to filter when generating community names
 _COMMON_WORDS = frozenset({
     "get", "set", "self", "init", "new", "create", "update", "delete",
@@ -86,8 +108,21 @@ def _is_test_node(node: GraphNode) -> bool:
 
 def _naming_members(members: list[GraphNode]) -> list[GraphNode]:
     """Prefer production nodes as the source of community name vocabulary."""
-    production_members = [member for member in members if not _is_test_node(member)]
-    return production_members or members
+    production_members = [
+        member for member in members
+        if not _is_test_node(member) and not _is_test_file(member.file_path)
+    ]
+    return production_members or [m for m in members if not _is_test_node(m)] or members
+
+
+_TEST_FILE_RE = re.compile(
+    r"(^|/)(tests?|__tests__)/|(^|/)test_[^/]*$|[^/]*(Tests?|IT|_test|\.test|\.spec)\.[^/.]+$"
+)
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Return whether a path looks like a test file (``FooTest.java``, ``test_foo.py``)."""
+    return bool(_TEST_FILE_RE.search(file_path.replace("\\", "/")))
 
 
 def _top_by_count(counts: Counter[str]) -> tuple[str, int]:
@@ -98,34 +133,52 @@ def _top_by_count(counts: Counter[str]) -> tuple[str, int]:
 def _generate_community_name(members: list[GraphNode]) -> str:
     """Generate a meaningful name for a community of nodes.
 
-    Algorithm:
-    1. Find most common module/file prefix among members
-    2. If a dominant class exists (>40% of nodes), use its name
-    3. Fallback: most frequent keyword in function/class names
-    4. Format: "{prefix}-{keyword}"
+    Algorithm (production members only when there are any):
+    1. The dominant directory: the most common parent directory, skipping
+       generic ones such as ``src`` or ``java``.
+    2. If one file holds more than 40% of the members, name the community
+       after the class in it (or the file stem), so a controller and its
+       methods read as ``controller-hierarchy-wave-log-controller``.
+    3. Otherwise add the most frequent keyword, taken from class names first
+       and from all names only when there are no classes.
+    4. Format: "{directory}-{class or keyword}"
     """
     if not members:
         return "empty"
 
     naming_members = _naming_members(members)
 
-    # 1. Find common file prefix
-    file_paths = [m.file_path for m in naming_members]
-    prefix = _extract_file_prefix(file_paths)
+    prefix = _extract_file_prefix([m.file_path for m in naming_members])
 
-    # 2. Check for dominant class
-    class_names = [m.name for m in naming_members if m.kind == "Class"]
-    if class_names:
-        class_counts = Counter(class_names)
-        top_class, top_count = _top_by_count(class_counts)
-        if top_count > len(naming_members) * 0.4:
-            if prefix:
-                return f"{prefix}-{_to_slug(top_class)}"
-            return _to_slug(top_class)
+    # Dominant file -> its class (or the file stem)
+    file_counts = Counter(m.file_path for m in naming_members)
+    top_file, top_count = min(file_counts.items(), key=lambda item: (-item[1], item[0]))
+    if top_count > len(naming_members) * 0.4:
+        classes_in_file = [
+            m.name for m in naming_members
+            if m.kind == "Class" and m.file_path == top_file
+        ]
+        if len(classes_in_file) == 1:
+            subject = _to_slug(classes_in_file[0])
+        else:
+            subject = _to_slug(_file_stem(top_file))
+        if subject and subject != prefix:
+            return f"{prefix}-{subject}" if prefix else subject
 
-    # 3. Most frequent keyword from function/class names
-    keywords = _extract_keywords(naming_members)
-    keyword = keywords[0] if keywords else ""
+    # Most frequent keyword; class names say more than method names.
+    class_members = [m for m in naming_members if m.kind == "Class"]
+    keywords = _extract_keywords(class_members) or _extract_keywords(naming_members)
+    dir_share = max(
+        (n for label, n in Counter(_dir_label(m.file_path) for m in naming_members).items()
+         if label),
+        default=0,
+    ) / len(naming_members)
+    if dir_share < 0.5 and len(keywords) >= 2:
+        # A slice across layers (controller, service, repository of one
+        # feature): no directory speaks for it, the shared vocabulary does.
+        return "-".join(keywords[:2])
+    prefix_words = set(prefix.split("-"))
+    keyword = next((k for k in keywords if k not in prefix_words), "")
 
     if prefix and keyword:
         return f"{prefix}-{keyword}"
@@ -136,25 +189,35 @@ def _generate_community_name(members: list[GraphNode]) -> str:
     return "cluster"
 
 
+def _file_stem(file_path: str) -> str:
+    """Return the file name without directories or extension."""
+    return file_path.replace("\\", "/").rsplit("/", 1)[-1].split(".", 1)[0]
+
+
+def _dir_label(file_path: str) -> str:
+    """Return the slug of the nearest non-generic parent directory, or ``""``."""
+    segments = [s for s in file_path.replace("\\", "/").split("/")[:-1] if s]
+    for segment in reversed(segments):
+        if segment.lower() not in _GENERIC_DIRS:
+            slug = _to_slug(segment)
+            if slug:
+                return slug
+    return ""
+
+
 def _extract_file_prefix(file_paths: list[str]) -> str:
-    """Find the most common short directory or module name from file paths."""
+    """Find the dominant short directory (or, failing that, module) name."""
     if not file_paths:
         return ""
-    # Extract the parent directory or file stem
-    parts: list[str] = []
-    for fp in file_paths:
-        # Use the last directory component or file stem
-        segments = fp.replace("\\", "/").split("/")
-        # Take the parent dir if it exists, otherwise the file stem
-        if len(segments) >= 2:
-            parts.append(segments[-2])
-        else:
-            stem = segments[-1].rsplit(".", 1)[0]
-            parts.append(stem)
-
-    counts = Counter(parts)
-    top_part, _ = _top_by_count(counts)
-    return _to_slug(top_part)
+    labels = Counter(_dir_label(fp) for fp in file_paths)
+    labels.pop("", None)
+    if labels:
+        return min(labels.items(), key=lambda item: (-item[1], item[0]))[0]
+    stems = Counter(_to_slug(_file_stem(fp)) for fp in file_paths)
+    stems.pop("", None)
+    if stems:
+        return min(stems.items(), key=lambda item: (-item[1], item[0]))[0]
+    return ""
 
 
 def _extract_keywords(members: list[GraphNode]) -> list[str]:
@@ -274,6 +337,52 @@ def _compute_cohesion(
 # ---------------------------------------------------------------------------
 
 
+_TEST_CLASS_SUFFIX_RE = re.compile(r"^(.+?)(?:Tests?|Specs?|Suite|IT)$")
+_TEST_CLASS_PREFIX_RE = re.compile(r"^Test(.+)$")
+
+
+def _name_based_test_subjects(idx_to_node: dict[int, GraphNode]) -> dict[int, int]:
+    """Link a test class to the class it tests by name (``FooTest`` -> ``Foo``).
+
+    Covers ``FooTest``, ``FooTests``, ``FooSpec``, ``FooSuite``, ``FooIT`` and
+    ``TestFoo``, for languages (Scala, Java, Kotlin) where the graph has no
+    TESTED_BY edge from a test class. Only classes in a test file or flagged as
+    tests count, and the subject is a non-test class of that name; with several
+    candidates the one whose directory shares the longest prefix with the test
+    (``src/test`` read as ``src/main``) wins, then the lowest qualified name.
+    """
+    subjects: dict[str, list[tuple[int, GraphNode]]] = defaultdict(list)
+    for index, node in idx_to_node.items():
+        if node.kind == "Class" and not _is_test_node(node) and not _is_test_file(node.file_path):
+            subjects[node.name].append((index, node))
+
+    def mirrored_dir(path: str) -> list[str]:
+        segments = path.replace("\\", "/").split("/")[:-1]
+        return ["main" if s in ("test", "tests") else s for s in segments]
+
+    linked: dict[int, int] = {}
+    for index, node in idx_to_node.items():
+        if node.kind != "Class" or not (_is_test_node(node) or _is_test_file(node.file_path)):
+            continue
+        match = _TEST_CLASS_SUFFIX_RE.match(node.name) or _TEST_CLASS_PREFIX_RE.match(node.name)
+        candidates = subjects.get(match.group(1), []) if match else []
+        if not candidates:
+            continue
+        test_dir = mirrored_dir(node.file_path)
+
+        def shared(candidate: tuple[int, GraphNode], test_dir: list[str] = test_dir) -> int:
+            count = 0
+            for a, b in zip(test_dir, mirrored_dir(candidate[1].file_path)):
+                if a != b:
+                    break
+                count += 1
+            return count
+
+        best = min(candidates, key=lambda c: (-shared(c), c[1].qualified_name))
+        linked[index] = best[0]
+    return linked
+
+
 def _reassign_test_nodes(
     clusters: list[list[int]],
     idx_to_node: dict[int, GraphNode],
@@ -328,6 +437,9 @@ def _reassign_test_nodes(
         test_index, subject_index = (
             (source, target) if source_is_test else (target, source)
         )
+        subjects_by_test[test_index].add(subject_index)
+
+    for test_index, subject_index in _name_based_test_subjects(idx_to_node).items():
         subjects_by_test[test_index].add(subject_index)
 
     target_by_test: dict[int, int] = {}
@@ -393,6 +505,134 @@ def _load_igraph() -> bool:
     return True
 
 
+def _containment_roots(
+    nodes: Sequence[GraphNode],
+    qn_to_idx: dict[str, int],
+    edges: Sequence[GraphEdge | _CommunityEdge],
+) -> list[int]:
+    """Map every node index to the index of the node that owns it.
+
+    A class owns the methods it CONTAINS and a method owns the endpoint it
+    HANDLES, transitively. Nodes with no owner are their own root. Leiden runs
+    on one vertex per owner, so an owner and its members cannot be split, and
+    the result does not depend on edge weights.
+    """
+    parent = list(range(len(nodes)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for e in edges:
+        if e.kind not in _PIN_EDGE_KINDS:
+            continue
+        owner = qn_to_idx.get(e.source_qualified)
+        member = qn_to_idx.get(e.target_qualified)
+        if owner is None or member is None or owner == member:
+            continue
+        owner_root, member_root = find(owner), find(member)
+        if owner_root != member_root:
+            # The owner's root wins, so a class stays the root of its group.
+            parent[member_root] = owner_root
+    return [find(i) for i in range(len(nodes))]
+
+
+def _leiden_clusters(
+    node_count: int,
+    roots: list[int],
+    qn_to_idx: dict[str, int],
+    edges: Sequence[GraphEdge | _CommunityEdge],
+    *,
+    resolution: float,
+    n_iterations: int | None = None,
+) -> list[list[int]] | None:
+    """Run Leiden on the graph with every owner and its members as one vertex.
+
+    Returns clusters of node indices, or ``None`` when no edge joins two
+    different nodes (the caller falls back to file grouping).
+    """
+    vertex_of_root: dict[int, int] = {}
+    vertex_of: list[int] = []
+    for i in range(node_count):
+        vertex_of.append(vertex_of_root.setdefault(roots[i], len(vertex_of_root)))
+
+    # One weight per node pair (the strongest edge kind between them), so
+    # duplicate call sites cannot bias the result; pairs between two groups
+    # then add up.
+    best: dict[tuple[int, int], float] = {}
+    for e in edges:
+        src = qn_to_idx.get(e.source_qualified)
+        tgt = qn_to_idx.get(e.target_qualified)
+        if src is None or tgt is None or src == tgt:
+            continue
+        pair = (min(src, tgt), max(src, tgt))
+        weight = EDGE_WEIGHTS.get(e.kind, 0.5)
+        if weight > best.get(pair, 0.0):
+            best[pair] = weight
+    if not best:
+        return None
+
+    group_weights: dict[tuple[int, int], float] = {}
+    strength = [0.0] * len(vertex_of_root)
+    for (src, tgt), weight in best.items():
+        a, b = vertex_of[src], vertex_of[tgt]
+        # An edge inside a group is a self-loop. igraph's Leiden ignores
+        # loops, but modularity needs the degree they add, so the vertex
+        # strengths are kept and passed as node weights below.
+        strength[a] += weight
+        strength[b] += weight
+        if a != b:
+            key = (min(a, b), max(a, b))
+            group_weights[key] = group_weights.get(key, 0.0) + weight
+
+    group_edges = sorted(group_weights)
+    g = ig.Graph(n=len(vertex_of_root), edges=group_edges, directed=False)
+    g.es["weight"] = [group_weights[pair] for pair in group_edges]
+
+    logger.info("Running Leiden on %d vertices, %d edges...", g.vcount(), g.ecount())
+    seed = env_int("CRG_LEIDEN_SEED", _LEIDEN_SEED)
+    # Deterministic seeding for benchmark reproducibility — community
+    # detection is not a security-sensitive context. nosec B311.
+    ig.set_random_number_generator(random.Random(seed))  # nosec B311
+    kwargs: dict[str, Any] = {}
+    if n_iterations is not None:
+        kwargs["n_iterations"] = n_iterations
+    # Modularity written as CPM: node weights = strength, resolution / 2m.
+    partition = g.community_leiden(
+        objective_function="CPM",
+        weights="weight",
+        node_weights=strength,
+        resolution=resolution / sum(strength),
+        **kwargs,
+    )
+
+    by_cluster: dict[int, list[int]] = {}
+    for i in range(node_count):
+        by_cluster.setdefault(partition.membership[vertex_of[i]], []).append(i)
+    return [by_cluster[cid] for cid in sorted(by_cluster)]
+
+
+def _repin_members(clusters: list[list[int]], roots: list[int]) -> list[list[int]]:
+    """Put every member in the cluster of its owner.
+
+    Test reassignment moves single nodes between clusters; a test method
+    reassigned away from its test class would undo the grouping, so each
+    group follows its root.
+    """
+    cluster_of_root: dict[int, int] = {}
+    for cid, cluster in enumerate(clusters):
+        for vertex in cluster:
+            if roots[vertex] == vertex:
+                cluster_of_root[vertex] = cid
+    repinned: list[list[int]] = [[] for _ in clusters]
+    for cid, cluster in enumerate(clusters):
+        for vertex in cluster:
+            repinned[cluster_of_root.get(roots[vertex], cid)].append(vertex)
+    return [sorted(cluster) for cluster in repinned]
+
+
 def _detect_leiden(
     nodes: list[GraphNode],
     edges: Sequence[GraphEdge | _CommunityEdge],
@@ -419,64 +659,29 @@ def _detect_leiden(
 
     logger.info("Building igraph with %d nodes...", len(qn_to_idx))
 
-    g = ig.Graph(n=len(qn_to_idx), directed=False)
-    edge_list: list[tuple[int, int]] = []
-    weights: list[float] = []
-    seen_edges: set[tuple[int, int]] = set()
+    # Run Leiden -- scale resolution inversely with graph size to get
+    # coarser clusters on large repos.  Default resolution=1.0 produces
+    # thousands of tiny communities for 30k+ node graphs.
+    import math
+    resolution = max(0.05, 1.0 / math.log10(max(len(nodes), 10)))
 
-    for e in edges:
-        src_idx = qn_to_idx.get(e.source_qualified)
-        tgt_idx = qn_to_idx.get(e.target_qualified)
-        if src_idx is not None and tgt_idx is not None and src_idx != tgt_idx:
-            pair = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
-            if pair not in seen_edges:
-                seen_edges.add(pair)
-                edge_list.append(pair)
-                weights.append(EDGE_WEIGHTS.get(e.kind, 0.5))
-
-    if not edge_list:
+    roots = _containment_roots(nodes, qn_to_idx, edges)
+    clusters = _leiden_clusters(
+        len(nodes), roots, qn_to_idx, edges, resolution=resolution, n_iterations=2,
+    )
+    if clusters is None:
         fallback = _detect_file_based(nodes, edges, min_size, adj=adj)
         for comm in fallback:
             comm["detector"] = DETECTOR_FILE
         return fallback
 
-    g.add_edges(edge_list)
-    g.es["weight"] = weights
-
-    # Run Leiden -- scale resolution inversely with graph size to get
-    # coarser clusters on large repos.  Default resolution=1.0 produces
-    # thousands of tiny communities for 30k+ node graphs.
-    import math
-    n_nodes = g.vcount()
-    resolution = max(0.05, 1.0 / math.log10(max(n_nodes, 10)))
-
-    logger.info(
-        "Running Leiden on %d nodes, %d edges...",
-        g.vcount(), g.ecount(),
-    )
-
-    seed = env_int("CRG_LEIDEN_SEED", _LEIDEN_SEED)
-    # Deterministic seeding for benchmark reproducibility — community
-    # detection is not a security-sensitive context. nosec B311.
-    ig.set_random_number_generator(random.Random(seed))  # nosec B311
-    partition = g.community_leiden(
-        objective_function="modularity",
-        weights="weight",
-        resolution=resolution,
-        n_iterations=2,
-    )
-
     logger.info(
         "Leiden complete, found %d partitions. Computing cohesion...",
-        len(partition),
+        len(clusters),
     )
 
-    clusters = _reassign_test_nodes(
-        [list(cluster_ids) for cluster_ids in partition],
-        idx_to_node,
-        qn_to_idx,
-        edges,
-    )
+    clusters = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+    clusters = _repin_members(clusters, roots)
 
     pending: list[tuple[list[GraphNode], set[str]]] = []
     for cluster_ids in clusters:
@@ -664,54 +869,27 @@ def _split_oversized(
             for i, n in enumerate(member_nodes)
         }
         idx_to_node = {i: node for i, node in enumerate(member_nodes)}
-        # GraphStore preserves one edge per call site. Leiden needs one stable
-        # edge per vertex pair so duplicate call sites cannot bias a split.
-        weights_by_pair: dict[tuple[int, int], float] = {}
-        for e in member_edges:
-            si = qn_to_idx.get(e.source_qualified)
-            ti = qn_to_idx.get(e.target_qualified)
-            if si is not None and ti is not None and si != ti:
-                pair = (min(si, ti), max(si, ti))
-                weights_by_pair[pair] = max(
-                    weights_by_pair.get(pair, 0.0),
-                    EDGE_WEIGHTS.get(e.kind, 0.5),
-                )
-
-        ig_edges = sorted(weights_by_pair)
-        ig_weights = [weights_by_pair[pair] for pair in ig_edges]
-
-        if not ig_edges:
-            result.append(comm)
-            continue
 
         try:
-            g = ig.Graph(
-                n=len(member_nodes),
-                edges=ig_edges,
-                directed=False,
+            # GraphStore preserves one edge per call site; _leiden_clusters
+            # keeps one weight per vertex pair, and keeps a class with its
+            # methods, so a split cannot separate them.
+            roots = _containment_roots(member_nodes, qn_to_idx, member_edges)
+            partition_clusters = _leiden_clusters(
+                len(member_nodes), roots, qn_to_idx, member_edges, resolution=0.5,
             )
-            g.es["weight"] = ig_weights
-            seed = env_int("CRG_LEIDEN_SEED", _LEIDEN_SEED)
-            # Deterministic seeding for benchmark reproducibility — community
-            # detection is not a security-sensitive context. nosec B311.
-            ig.set_random_number_generator(random.Random(seed))  # nosec B311
-            partition = g.community_leiden(
-                objective_function="modularity",
-                weights="weight",
-                resolution=0.5,
-            )
-
-            partition_clusters: dict[int, list[int]] = {}
-            for idx, cid in enumerate(partition.membership):
-                partition_clusters.setdefault(cid, []).append(idx)
+            if partition_clusters is None:
+                result.append(comm)
+                continue
 
             reassigned_clusters = _reassign_test_nodes(
-                list(partition_clusters.values()),
+                partition_clusters,
                 idx_to_node,
                 qn_to_idx,
                 edges,
                 resolution_nodes=nodes,
             )
+            reassigned_clusters = _repin_members(reassigned_clusters, roots)
             sub_communities = [
                 [idx_to_node[idx] for idx in cluster]
                 for cluster in reassigned_clusters
@@ -835,6 +1013,350 @@ def _dedupe_community_names(
 
 
 # ---------------------------------------------------------------------------
+# Config documents
+# ---------------------------------------------------------------------------
+
+
+def _group_config_documents(
+    nodes: list[GraphNode],
+    edges: Sequence[GraphEdge | _CommunityEdge],
+    min_size: int,
+) -> list[dict[str, Any]]:
+    """Group JSON/YAML document nodes into one community per directory and type.
+
+    The same document is usually checked in once per environment (``taskdef-dev``,
+    ``taskdef-qa``, ...). Leiden gives each copy a community of its own, and the
+    copies are identical, so they are kept out of Leiden. Files that sit in the
+    same directory and are the same type are one community instead, which is also
+    how people look for them.
+    """
+    groups: dict[tuple[str, str], list[GraphNode]] = defaultdict(list)
+    for node in nodes:
+        path = node.file_path.replace("\\", "/")
+        groups[(path.rsplit("/", 1)[0] if "/" in path else "", node.kind)].append(node)
+
+    pending: list[tuple[tuple[str, str], str, list[GraphNode]]] = []
+    for key in sorted(groups):
+        members = groups[key]
+        label = _dir_label(key[0] + "/x") or "config"
+        base = f"{label}-{'json' if key[1] == 'JsonPath' else 'yaml'}"
+        # A very large document set (a data file of a thousand rows) is cut
+        # into equal slices in document order, so no community is a blob.
+        # Slices keep neighbouring rows together; the cap is high enough that
+        # the usual per-environment copies stay one community.
+        parts = -(-len(members) // _CONFIG_MAX_MEMBERS)
+        if parts > 1:
+            members = sorted(members, key=lambda n: (n.file_path, n.line_start, n.qualified_name))
+            size = -(-len(members) // parts)
+            slices = [(f"{base}-{i + 1}", members[i * size:(i + 1) * size]) for i in range(parts)]
+        else:
+            slices = [(base, members)]
+        for name, part in slices:
+            if len(part) >= min_size:
+                pending.append((key, name, part))
+
+    cohesions = _compute_cohesion_batch(
+        [{m.qualified_name for m in members} for _, _, members in pending], edges,
+    )
+    communities: list[dict[str, Any]] = []
+    for (_, name, members), cohesion in zip(pending, cohesions):
+        communities.append({
+            "name": name,
+            "level": 0,
+            "size": len(members),
+            "cohesion": round(cohesion, 4),
+            "dominant_language": _dominant_language(members),
+            "description": "",
+            "members": [m.qualified_name for m in members],
+            "config_document": True,
+        })
+    return communities
+
+
+def _dominant_language(members: Sequence[GraphNode]) -> str:
+    lang_counts = Counter(m.language for m in members if m.language)
+    if not lang_counts:
+        return ""
+    return min(lang_counts.items(), key=lambda item: (-item[1], item[0]))[0]
+
+
+# ---------------------------------------------------------------------------
+# Tests with no subject
+# ---------------------------------------------------------------------------
+
+#: A cluster made only of test code, smaller than this, is not worth a
+#: community of its own when no subject pulled it into one.
+_SMALL_TEST_CLUSTER = 10
+
+
+def _group_orphan_tests(
+    communities: list[dict[str, Any]],
+    nodes: Sequence[GraphNode],
+    edges: Sequence[GraphEdge | _CommunityEdge],
+) -> list[dict[str, Any]]:
+    """Group small all-test communities into one ``tests`` community per module.
+
+    Tests that tie to a subject already moved to its community. What is left
+    are test classes with no subject (helpers, fixtures, suites named after
+    nothing), which clustered into pairs and triples. They are grouped by the
+    path before the first ``src``/``test``/``tests`` directory (the module root,
+    below the prefix every file shares); a module with a single such cluster
+    keeps it.
+    """
+    node_by_qn = {n.qualified_name: n for n in nodes}
+
+    def test_only(comm: dict[str, Any]) -> bool:
+        if comm.get("config_document") or len(comm["members"]) >= _SMALL_TEST_CLUSTER:
+            return False
+        found = [node_by_qn[q] for q in comm["members"] if q in node_by_qn]
+        return bool(found) and all(
+            _is_test_node(n) or _is_test_file(n.file_path) for n in found
+        )
+
+    candidates = [i for i, c in enumerate(communities) if test_only(c)]
+    if len(candidates) < 2:
+        return communities
+
+    dirs = [
+        [seg for seg in n.file_path.replace("\\", "/").split("/")[:-1] if seg] for n in nodes
+    ]
+    prefix_len = 0
+    if dirs:
+        for depth in range(min(len(d) for d in dirs)):
+            if len({d[depth] for d in dirs}) == 1:
+                prefix_len = depth + 1
+            else:
+                break
+
+    def module_key(comm: dict[str, Any]) -> str:
+        first = node_by_qn[comm["members"][0]]
+        segments = [
+            seg for seg in first.file_path.replace("\\", "/").split("/")[:-1] if seg
+        ][prefix_len:]
+        key: list[str] = []
+        for seg in segments:
+            if seg in ("src", "test", "tests", "__tests__"):
+                break
+            key.append(seg)
+        return "/".join(key)
+
+    groups: dict[str, list[int]] = defaultdict(list)
+    for i in candidates:
+        groups[module_key(communities[i])].append(i)
+
+    drop: set[int] = set()
+    created: list[dict[str, Any]] = []
+    for key in sorted(groups):
+        indices = groups[key]
+        if len(indices) < 2:
+            continue
+        members = [q for i in indices for q in communities[i]["members"]]
+        member_nodes = [node_by_qn[q] for q in members if q in node_by_qn]
+        label = _to_slug(key.rsplit("/", 1)[-1]) if key else ""
+        created.append({
+            "name": f"{label}-tests" if label else "tests",
+            "level": 0,
+            "size": len(members),
+            "cohesion": 0.0,
+            "dominant_language": _dominant_language(member_nodes),
+            "description": "",
+            "members": members,
+            "merged": True,
+            "keep_name": True,
+        })
+        drop.update(indices)
+    if not created:
+        return communities
+    return [c for i, c in enumerate(communities) if i not in drop] + created
+
+
+# ---------------------------------------------------------------------------
+# Thin community merging
+# ---------------------------------------------------------------------------
+
+
+def _merge_thin_communities(
+    communities: list[dict[str, Any]],
+    nodes: Sequence[GraphNode],
+    edges: Sequence[GraphEdge | _CommunityEdge],
+    min_members: int = _MIN_COMMUNITY_MEMBERS,
+) -> list[dict[str, Any]]:
+    """Fold communities with fewer than *min_members* nodes into a neighbour.
+
+    The target is the community the thin one shares the most edge weight with.
+    With no edges to another community it is the one holding the most nodes of
+    the same file, then of the same directory. A thin community with no such
+    neighbour stays as it is; no community is ever created. Config-document
+    communities only merge with each other. Communities that absorb another
+    are marked ``"merged": True`` so the caller can rename them and refresh
+    their cohesion.
+    """
+    thin = [i for i, c in enumerate(communities) if len(c["members"]) < min_members]
+    if not thin or len(communities) < 2:
+        return communities
+
+    node_by_qn = {n.qualified_name: n for n in nodes}
+    owner: dict[str, int] = {}
+    for i, comm in enumerate(communities):
+        for qn in comm["members"]:
+            owner[qn] = i
+    is_config = [bool(c.get("config_document")) for c in communities]
+    members: list[list[str]] = [list(c["members"]) for c in communities]
+    redirect: dict[int, int] = {}
+
+    def resolve(i: int) -> int:
+        while i in redirect:
+            i = redirect[i]
+        return i
+
+    thin_qns = {qn for i in thin for qn in members[i]}
+    neighbours: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for e in edges:
+        weight = EDGE_WEIGHTS.get(e.kind, 0.5)
+        if e.source_qualified in thin_qns:
+            neighbours[e.source_qualified].append((e.target_qualified, weight))
+        if e.target_qualified in thin_qns:
+            neighbours[e.target_qualified].append((e.source_qualified, weight))
+
+    by_file: dict[str, Counter[int]] = defaultdict(Counter)
+    by_dir: dict[str, Counter[int]] = defaultdict(Counter)
+    for qn, i in owner.items():
+        node = node_by_qn.get(qn)
+        if node is None:
+            continue
+        path = node.file_path.replace("\\", "/")
+        by_file[path][i] += 1
+        by_dir[path.rsplit("/", 1)[0] if "/" in path else ""][i] += 1
+
+    def best_target(i: int) -> int | None:
+        def usable(j: int) -> bool:
+            return j != i and is_config[j] == is_config[i]
+
+        scores: dict[int, float] = defaultdict(float)
+        for qn in members[i]:
+            for other, weight in neighbours.get(qn, ()):
+                j = owner.get(other)
+                if j is not None:
+                    j = resolve(j)
+                    if usable(j):
+                        scores[j] += weight
+        if not scores:
+            for index in (by_file, by_dir):
+                counts: Counter[int] = Counter()
+                for qn in members[i]:
+                    node = node_by_qn.get(qn)
+                    if node is None:
+                        continue
+                    path = node.file_path.replace("\\", "/")
+                    key = path if index is by_file else (
+                        path.rsplit("/", 1)[0] if "/" in path else ""
+                    )
+                    for j, count in index[key].items():
+                        j = resolve(j)
+                        if usable(j):
+                            counts[j] += count
+                if counts:
+                    scores = {j: float(c) for j, c in counts.items()}
+                    break
+        if not scores:
+            return None
+        return min(scores, key=lambda j: (-scores[j], -len(members[j]), j))
+
+    for i in sorted(thin, key=lambda i: (len(communities[i]["members"]), i)):
+        if i in redirect:
+            continue
+        target = best_target(i)
+        if target is None:
+            continue
+        members[target].extend(members[i])
+        redirect[i] = target
+
+    if not redirect:
+        return communities
+
+    merged: list[dict[str, Any]] = []
+    for i, comm in enumerate(communities):
+        if i in redirect:
+            continue
+        if len(members[i]) != len(comm["members"]):
+            comm = dict(comm)
+            comm["members"] = members[i]
+            comm["size"] = len(members[i])
+            comm["merged"] = True
+        merged.append(comm)
+    logger.info("Merged %d thin communities into neighbours", len(redirect))
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Descriptions
+# ---------------------------------------------------------------------------
+
+
+def _describe_community(
+    member_nodes: Sequence[GraphNode],
+    called_targets: set[str],
+) -> str:
+    """Summarise a community: size and node-kind mix, top files, entry points."""
+    kinds = Counter(n.kind for n in member_nodes)
+    mix = ", ".join(
+        f"{count} {kind}"
+        for kind, count in sorted(kinds.items(), key=lambda item: (-item[1], item[0]))[:4]
+    )
+    files = Counter(
+        "/".join(n.file_path.replace("\\", "/").split("/")[-2:]) for n in member_nodes
+    )
+    top_files = ", ".join(
+        f"{path} ({count})"
+        for path, count in sorted(files.items(), key=lambda item: (-item[1], item[0]))[:3]
+    )
+    entry_points = sum(
+        1 for n in member_nodes
+        if n.kind == "Function" and not _is_test_node(n)
+        and n.qualified_name not in called_targets
+    )
+    parts = [f"{len(member_nodes)} nodes ({mix})", f"top files: {top_files}"]
+    endpoints = kinds.get("Endpoint", 0)
+    if endpoints or entry_points:
+        parts.append(f"{endpoints} endpoints, {entry_points} entry points")
+    return _sanitize_name("; ".join(parts))
+
+
+def _finalize_communities(
+    communities: list[dict[str, Any]],
+    nodes: Sequence[GraphNode],
+    edges: Sequence[GraphEdge | _CommunityEdge],
+) -> None:
+    """Refresh merged communities and give every community a real description."""
+    node_by_qn = {n.qualified_name: n for n in nodes}
+
+    merged = [c for c in communities if c.get("merged")]
+    if merged:
+        cohesions = _compute_cohesion_batch([set(c["members"]) for c in merged], edges)
+        for comm, cohesion in zip(merged, cohesions):
+            member_nodes = [node_by_qn[q] for q in comm["members"] if q in node_by_qn]
+            comm["cohesion"] = round(cohesion, 4)
+            comm["dominant_language"] = _dominant_language(member_nodes)
+            if not comm.get("config_document") and not comm.get("keep_name"):
+                generated = _generate_community_name(member_nodes)
+                if generated not in {"", "empty", "cluster"}:
+                    comm["name"] = generated
+
+    called_targets = {e.target_qualified for e in edges if e.kind == "CALLS"}
+    for comm in communities:
+        member_nodes = [node_by_qn[q] for q in comm["members"] if q in node_by_qn]
+        details = _describe_community(member_nodes, called_targets)
+        previous = comm.get("description", "")
+        # The file-based detector names its directory; keep that as the lead.
+        comm["description"] = (
+            f"{previous}; {details}" if previous.startswith("Directory-based community")
+            else details
+        )
+        comm.pop("merged", None)
+        comm.pop("keep_name", None)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -871,22 +1393,33 @@ def detect_communities(
         len(unique_nodes), len(all_edges),
     )
 
+    # JSON/YAML document rows are grouped by directory, not clustered: one
+    # copy of a config file per environment would be one clone community each.
+    config_nodes = [n for n in unique_nodes if n.kind in CONFIG_DOCUMENT_KINDS]
+    code_nodes = [n for n in unique_nodes if n.kind not in CONFIG_DOCUMENT_KINDS]
+
     if _load_igraph():
         logger.info("Detecting communities with Leiden algorithm (igraph)")
-        results = _detect_leiden(unique_nodes, all_edges, min_size)
+        results = _detect_leiden(code_nodes, all_edges, min_size)
         detector = DETECTOR_LEIDEN
     else:
         logger.info(
             'Tip: pip install "code-review-graph[communities]" for finer communities '
             "(grouping by file for now)."
         )
-        results = _detect_file_based(unique_nodes, all_edges, min_size)
+        results = _detect_file_based(code_nodes, all_edges, min_size)
         detector = DETECTOR_FILE
 
     # Split oversized communities
     results = _split_oversized(
-        results, unique_nodes, all_edges,
+        results, code_nodes, all_edges,
     )
+    results.extend(_group_config_documents(config_nodes, all_edges, min_size))
+    results = _group_orphan_tests(results, unique_nodes, all_edges)
+    results = _merge_thin_communities(results, unique_nodes, all_edges)
+    _finalize_communities(results, unique_nodes, all_edges)
+    for comm in results:
+        comm.pop("config_document", None)
     _dedupe_community_names(results, unique_nodes)
     # Which algorithm made each community, for store_communities to record.
     # Leiden falls back to file grouping on a graph with no usable edges and
