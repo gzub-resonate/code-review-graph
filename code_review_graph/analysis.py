@@ -4,6 +4,7 @@ surprise scoring, suggested questions."""
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,29 @@ def _is_constructor(node: GraphNode) -> bool:
     if node.extra.get("java_constructor"):
         return True
     return bool(node.parent_name) and node.name == node.parent_name.rsplit(".", 1)[-1]
+
+
+_DUNDER_METHOD = re.compile(r"^__\w+__$")
+
+
+def _is_runtime_called_dunder(node: GraphNode) -> bool:
+    """Is this a ``__init__``, ``__repr__`` or other dunder method of a class?
+
+    The interpreter calls these, so no call edge names them and "nothing calls it" says
+    nothing about them.
+    """
+    return (
+        node.kind == "Function"
+        and bool(node.parent_name)
+        and bool(_DUNDER_METHOD.match(node.name))
+    )
+
+
+def _is_untestable_here(node: GraphNode) -> bool:
+    """Is this a node no test can cover by design: a config document key or a Step
+    Functions state or machine (an ASL file is run by AWS, not called by a test)?
+    """
+    return node.kind in CONFIG_DOCUMENT_KINDS or node.language == "asl"
 
 
 # Edges that say a node builds on another one.
@@ -415,7 +439,11 @@ def find_knowledge_gaps(
     - single_file_communities: entire community in one file
     - import_cycles: files that import each other (see find_import_cycles)
 
-    Configuration-document nodes (``CONFIG_DOCUMENT_KINDS``) are never isolated nodes.
+    Configuration-document nodes (``CONFIG_DOCUMENT_KINDS``) are never isolated nodes. They and
+    Step Functions (ASL) states and machines are left out of ``untested_hotspots`` unless
+    *include_non_code* is set, since no test covers them by design. Dunder methods of a class
+    (``__init__``, ``__repr__``) are left out of ``isolated_nodes`` for the same flag: the
+    interpreter calls them, so no edge names them.
     Unless *include_tests* is true, test nodes are left out of the node lists and a
     community made only of test nodes is left out of the community lists.
 
@@ -456,7 +484,10 @@ def find_knowledge_gaps(
         config_key = n.kind in CONFIG_DOCUMENT_KINDS and not (
             include_non_code and _is_non_code(n)
         )
-        if d <= 1 and not config_key and not expected(n):
+        runtime_dunder = (
+            not include_non_code and _is_runtime_called_dunder(n) and n.qualified_name in contained
+        )
+        if d <= 1 and not config_key and not expected(n) and not runtime_dunder:
             isolated.append({
                 "name": _sanitize_name(n.name),
                 "qualified_name": n.qualified_name,
@@ -515,6 +546,7 @@ def find_knowledge_gaps(
         n for n in nodes
         if named.get(n.qualified_name, 0) >= 5 and not n.is_test
         and not expected(n)
+        and (include_non_code or not _is_untestable_here(n))
     ]
     candidates.sort(key=lambda n: (-named.get(n.qualified_name, 0), n.qualified_name))
     untested_hotspots: list[dict] = []

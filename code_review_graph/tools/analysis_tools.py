@@ -286,7 +286,10 @@ def get_knowledge_gaps_func(
             ConfigProperty) are never reported as isolated nodes.
         include_non_code: Also report documentation sections, lockfile entries,
             Dockerfile stages and anything under ``.storybook`` or ``.github``
-            as isolated nodes and untested hotspots (default False).
+            as isolated nodes and untested hotspots, and also config document
+            keys and Step Functions (ASL) states as untested hotspots and the
+            dunder methods of a class (``__init__``, ``__repr__``) as isolated
+            nodes (default False).
 
     Returns:
         Gaps by category. ``summary`` maps each category to its untruncated
