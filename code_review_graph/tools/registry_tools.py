@@ -11,6 +11,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Optional
 
+from .. import aws_sdk_links as al
 from .. import feign_links as fl
 from .. import stepfunction_links as sl
 from .. import terraform_links as tl
@@ -730,6 +731,30 @@ def _stepfunction_links(
     return result
 
 
+def _awssdk_links(
+    repos: list[str] | None,
+    target_name: str | None,
+    target: str | None,
+    status: str | None,
+    max_results: int,
+) -> dict[str, Any]:
+    """The ``origin="awssdk"`` branch: AWS resources application code calls, joined to owners."""
+    definitions = sl.Definitions()
+    result = _infra_links(
+        "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges,
+        definitions.defines, al.resolve_links, "target_name", "target",
+        repos, target_name, target, status, max_results,
+    )
+    for row in result["results"]:
+        # Every string here was read from a repository's files: none is passed on as written.
+        for key, value in list(row.items()):
+            if isinstance(value, str):
+                row[key] = _sanitize_name(value)
+            elif isinstance(value, list):
+                row[key] = [_sanitize_name(str(item)) for item in value]
+    return result
+
+
 def _infra_links(
     origin: str,
     noun: str,
@@ -920,11 +945,15 @@ def cross_repo_requests_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
-    infra_origins = ("terraform", "workflow", "stepfunction")
+    infra_origins = ("terraform", "workflow", "stepfunction", "awssdk")
     if status is not None and origin not in infra_origins and status not in fl.STATUSES:
         raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
-        raise ValueError("origin must be one of: feign, js, terraform, workflow, stepfunction")
+        raise ValueError(
+            "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk"
+        )
+    if origin == "awssdk":
+        return _awssdk_links(repos, service, route, status, max_results)
     if origin == "stepfunction":
         return _stepfunction_links(repos, service, route, status, max_results)
     if origin == "terraform":

@@ -35,6 +35,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 from . import asl_parse, ember_extract, ember_template, js_api_extract, py_api_extract
 from . import dead_code_evidence as _dead_code_evidence
 from . import scala_parse as _scala_parse
+from .aws_sdk_calls import aws_sdk_edges
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
     E2E_DIR_RE,
@@ -4268,6 +4269,9 @@ class CodeParser:
         for node in nodes:
             if not node.is_test and self._is_test_path(node.file_path or fallback_path):
                 node.is_test = True
+        # AWS SDK calls, s3:// locations and aws s3 commands (see aws_sdk_calls.py); not in tests.
+        if not self._is_test_path(fallback_path):
+            edges.extend(aws_sdk_edges(path, source, nodes, edges, self._get_parser))
         return nodes, edges
 
     def _extract_bytes(
