@@ -191,6 +191,21 @@ class TestConfigDocumentsDoNotClone:
 
         assert sorted(c["name"] for c in result) == ["a-json", "a-yaml", "b-json"]
 
+    def test_a_huge_data_file_is_cut_into_bounded_slices(self):
+        rows = 1000
+        tmp = tempfile.TemporaryDirectory()
+        store = _config_store(tmp.name, {"data/early-vote.json": ("JsonPath", rows)})
+        try:
+            result = cm.detect_communities(store, min_size=2)
+        finally:
+            store.close()
+            tmp.cleanup()
+
+        assert sum(c["size"] for c in result) == rows
+        assert max(c["size"] for c in result) <= cm._CONFIG_MAX_MEMBERS
+        assert len(result) == 5
+        assert sorted(c["name"] for c in result)[0] == "data-json-1"
+
     def test_no_two_communities_share_size_and_cohesion(self):
         layout = {
             f"env{i}/docs/service.yml": ("YamlPath", 8) for i in range(4)

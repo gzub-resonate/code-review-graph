@@ -72,6 +72,9 @@ CONFIG_DOCUMENT_KINDS = frozenset({"JsonPath", "YamlPath"})
 #: to the endpoint it handles. The two ends are always detected together.
 _PIN_EDGE_KINDS = frozenset({"CONTAINS", "HANDLES"})
 
+#: A directory's config documents above this many rows are cut into slices.
+_CONFIG_MAX_MEMBERS = 200
+
 #: Communities with fewer members than this are folded into a neighbour.
 _MIN_COMMUNITY_MEMBERS = 3
 
@@ -977,21 +980,33 @@ def _group_config_documents(
         path = node.file_path.replace("\\", "/")
         groups[(path.rsplit("/", 1)[0] if "/" in path else "", node.kind)].append(node)
 
-    pending: list[tuple[tuple[str, str], list[GraphNode]]] = []
+    pending: list[tuple[tuple[str, str], str, list[GraphNode]]] = []
     for key in sorted(groups):
         members = groups[key]
-        if len(members) >= min_size:
-            pending.append((key, members))
+        label = _dir_label(key[0] + "/x") or "config"
+        base = f"{label}-{'json' if key[1] == 'JsonPath' else 'yaml'}"
+        # A very large document set (a data file of a thousand rows) is cut
+        # into equal slices in document order, so no community is a blob.
+        # Slices keep neighbouring rows together; the cap is high enough that
+        # the usual per-environment copies stay one community.
+        parts = -(-len(members) // _CONFIG_MAX_MEMBERS)
+        if parts > 1:
+            members = sorted(members, key=lambda n: (n.file_path, n.line_start, n.qualified_name))
+            size = -(-len(members) // parts)
+            slices = [(f"{base}-{i + 1}", members[i * size:(i + 1) * size]) for i in range(parts)]
+        else:
+            slices = [(base, members)]
+        for name, part in slices:
+            if len(part) >= min_size:
+                pending.append((key, name, part))
 
     cohesions = _compute_cohesion_batch(
-        [{m.qualified_name for m in members} for _, members in pending], edges,
+        [{m.qualified_name for m in members} for _, _, members in pending], edges,
     )
     communities: list[dict[str, Any]] = []
-    for ((directory, kind), members), cohesion in zip(pending, cohesions):
-        label = _dir_label(directory + "/x") or "config"
-        suffix = "json" if kind == "JsonPath" else "yaml"
+    for (_, name, members), cohesion in zip(pending, cohesions):
         communities.append({
-            "name": f"{label}-{suffix}",
+            "name": name,
             "level": 0,
             "size": len(members),
             "cohesion": round(cohesion, 4),
