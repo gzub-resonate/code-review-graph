@@ -50,6 +50,12 @@ _ROUTER_CLASSES = {
 _PREFIX_KEYWORDS = {"APIRouter": "prefix", "Blueprint": "url_prefix"}
 _VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
 _MOUNT_CALLS = {"include_router": "prefix", "register_blueprint": "url_prefix"}
+#: ``router.add_api_route("/x", handler)``-style registrations: the decorator-free
+#: spelling of the same routes.  Value: (position of the handler, framework).
+_ADD_CALLS = {
+    "add_api_route": FASTAPI, "add_api_websocket_route": FASTAPI, "add_url_rule": FLASK,
+}
+_WEBSOCKET = "WEBSOCKET"
 _ROUTERISH_RE = re.compile(
     r"^(?:app|api|router|bp|blueprint|\w+_router|\w+_bp|\w+_blueprint|\w+_api|\w+_app)$",
 )
@@ -61,7 +67,8 @@ _FLASK_CONVERTER_RE = re.compile(
     r"<(?:(?P<conv>[A-Za-z_]\w*)(?:\([^)]*\))?:)?(?P<name>[A-Za-z_]\w*)>",
 )
 _QUICK_RE = re.compile(
-    rb"APIRouter|FastAPI|Blueprint|Flask|\.(?:route|get|post|put|patch|delete)\(",
+    rb"APIRouter|FastAPI|Blueprint|Flask|"
+    rb"\.(?:route|get|post|put|patch|delete|websocket|add_api_route|add_url_rule)\(",
 )
 _PATH_PARAM_RE = re.compile(r"\{(?P<name>[A-Za-z_]\w*):path\}$")
 
@@ -152,6 +159,7 @@ class _Facts:
     #: local name -> [module, imported name or ``None``, relative level]
     imports: dict[str, list[Any]] = field(default_factory=dict)
     decorated: list[Any] = field(default_factory=list)
+    adds: list[Any] = field(default_factory=list)
 
 
 def _callee_name(call: Any) -> Optional[str]:
@@ -211,8 +219,11 @@ def _note_mount(call: Any, facts: _Facts) -> None:
     keyword = _MOUNT_CALLS.get(_text(attr))
     if keyword is None:
         return
-    positional, _ = _call_parts(call)
-    ref = _child_ref(positional[0]) if positional else None
+    positional, keywords = _call_parts(call)
+    first = positional[0] if positional else keywords.get(
+        "router" if keyword == "prefix" else "blueprint",
+    )
+    ref = _child_ref(first) if first is not None else None
     if ref is None:
         return
     facts.mounts.append({
@@ -265,6 +276,8 @@ def _collect(root: Any) -> _Facts:
             _note_assignment(node, facts)
         elif kind == "call":
             _note_mount(node, facts)
+            if _callee_name(node) in _ADD_CALLS:
+                facts.adds.append(node)
         elif kind == "import_from_statement":
             _note_import_from(node, facts)
         elif kind == "import_statement":
@@ -284,11 +297,15 @@ class _Route:
     handler: str
     handler_line: int
     framework: str
+    #: Registered by a call (``add_api_route``), so the handler is looked up by name.
+    lookup: bool = False
 
 
 def _methods_of(call: Any, attr: str) -> tuple[str, ...]:
     if attr in _VERBS:
         return (attr.upper(),)
+    if attr in ("websocket", "add_api_websocket_route"):
+        return (_WEBSOCKET,)
     _, keywords = _call_parts(call)
     node = keywords.get("methods")
     if node is None:
@@ -299,6 +316,23 @@ def _methods_of(call: Any, attr: str) -> tuple[str, ...]:
     if not values or any(v is None for v in values):
         return ()
     return tuple(sorted({v.upper() for v in values if v}))
+
+
+def _is_router(var: str, facts: _Facts) -> bool:
+    """Whether ``var`` is a router object, decided from how it came to be.
+
+    A name built here by ``APIRouter``/``FastAPI``/``Blueprint``/``Flask`` is one.
+    An imported name is one only when its own name or the name it was imported
+    under reads as a router (``oauth_router``, ``app``, ``bp``); an imported
+    ``cache`` or ``client`` is not, so ``@cache.get(...)`` is left alone.
+    """
+    if var in facts.routers:
+        return True
+    spec = facts.imports.get(var)
+    if spec is not None:
+        real = spec[1] if spec[1] else var
+        return bool(_ROUTERISH_RE.match(var) or _ROUTERISH_RE.match(str(real)))
+    return bool(_ROUTERISH_RE.match(var))
 
 
 def _route_of(decorator: Any, handler: Any, facts: _Facts) -> Optional[_Route]:
@@ -313,11 +347,9 @@ def _route_of(decorator: Any, handler: Any, facts: _Facts) -> Optional[_Route]:
     if obj is None or attr_node is None or obj.type != "identifier":
         return None
     attr, var = _text(attr_node), _text(obj)
-    if attr not in _VERBS and attr not in ("route", "api_route"):
+    if attr not in _VERBS and attr not in ("route", "api_route", "websocket"):
         return None
-    if var not in facts.routers and not (
-        var in facts.imports or _ROUTERISH_RE.match(var)
-    ):
+    if not _is_router(var, facts):
         return None
     positional, keywords = _call_parts(call)
     path = _literal(positional[0] if positional else keywords.get("path"))
@@ -347,14 +379,69 @@ def _routes(facts: _Facts) -> list[_Route]:
             route = _route_of(decorator, handler, facts)
             if route is not None:
                 found.append(route)
+    for call in facts.adds:
+        route = _add_route(call, facts)
+        if route is not None:
+            found.append(route)
     return found
+
+
+def _handler_name(node: Any) -> Optional[str]:
+    """``fn`` for ``fn``, ``View`` for ``View.as_view("n")``; else ``None``."""
+    if node is None:
+        return None
+    if node.type == "identifier":
+        return _text(node)
+    if node.type == "call":
+        fn = node.child_by_field_name("function")
+        if fn is not None and fn.type == "attribute":
+            attr = fn.child_by_field_name("attribute")
+            obj = fn.child_by_field_name("object")
+            if attr is not None and obj is not None and _text(attr) == "as_view" \
+                    and obj.type == "identifier":
+                return _text(obj)
+    return None
+
+
+def _add_route(call: Any, facts: _Facts) -> Optional[_Route]:
+    """A route registered by ``router.add_api_route("/x", handler, methods=[...])``."""
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "attribute":
+        return None
+    obj = fn.child_by_field_name("object")
+    attr_node = fn.child_by_field_name("attribute")
+    if obj is None or attr_node is None or obj.type != "identifier":
+        return None
+    attr, var = _text(attr_node), _text(obj)
+    if not _is_router(var, facts):
+        return None
+    positional, keywords = _call_parts(call)
+    path = _literal(positional[0] if positional else keywords.get("path", keywords.get("rule")))
+    if attr == "add_url_rule":
+        target = keywords.get("view_func") or (positional[2] if len(positional) > 2 else None)
+    else:
+        target = keywords.get("endpoint") or (positional[1] if len(positional) > 1 else None)
+    handler = _handler_name(target)
+    methods = _methods_of(call, attr)
+    if path is None or handler is None or not methods:
+        return None
+    line = call.start_point[0] + 1
+    return _Route(
+        var, methods, path, line, call.end_point[0] + 1, handler, 0,
+        facts.routers[var][0] if var in facts.routers else _ADD_CALLS[attr], lookup=True,
+    )
 
 
 def _qualified(name: str, file_path: str, parent: Optional[str]) -> str:
     return f"{file_path}::{parent}.{name}" if parent else f"{file_path}::{name}"
 
 
-def _handler_qn(route: _Route, file_path: str, functions: list[Any]) -> str:
+def _handler_qn(route: _Route, file_path: str, functions: list[Any]) -> Optional[str]:
+    if route.lookup:
+        same = [f for f in functions if f.name == route.handler]
+        if len(same) != 1:
+            return None
+        return _qualified(same[0].name, file_path, same[0].parent_name)
     best = None
     for fn in functions:
         if fn.name == route.handler and fn.line_start >= route.line:
@@ -389,7 +476,9 @@ def extract(
     facts = _collect(root)
     routes = _routes(facts)
     emitted = 0
-    functions = [n for n in nodes if n.kind in ("Function", "Test")]
+    functions = [
+        n for n in nodes if n.kind in ("Function", "Test") or (n.kind == "Class")
+    ]
     counter = 0
     for route in routes:
         if counter >= MAX_ENDPOINTS:
@@ -398,6 +487,8 @@ def extract(
         prefix = declared[1] if declared else ""
         converted, catch_all = convert_path(route.path)
         source_qn = _handler_qn(route, file_path, functions)
+        if source_qn is None:
+            continue
         for method in route.methods:
             counter += 1
             local = join_path(prefix or "", converted) if prefix is not None else converted

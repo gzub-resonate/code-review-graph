@@ -1203,6 +1203,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             file_path_pattern=args.path,
             limit=args.limit,
             repo_root=root,
+            include_tests=args.include_tests,
         )
     else:
         result = tools.refactor_func(
@@ -2521,6 +2522,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     large_cmd.add_argument("--path", default=None, help="File-path substring filter")
     large_cmd.add_argument("--limit", type=_positive_int, default=50)
+    large_cmd.add_argument(
+        "--include-tests", action="store_true",
+        help="Also rank test, mock, story and generated files",
+    )
     large_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     refactor_cmd = sub.add_parser("refactor", help="Preview graph-backed refactors")

@@ -83,6 +83,7 @@ _LEGACY_GRAPH_COMMANDS = [
                 "kind": "Class",
                 "file_path_pattern": None,
                 "limit": 4,
+                "include_tests": False,
             },
         ),
         (

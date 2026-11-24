@@ -393,6 +393,8 @@ def parse_asl(
     machine = _sanitize_asl_name(name) or "state-machine"
     machine_extra: dict[str, Any] = {
         "asl_format": True,
+        "asl_role": "state_machine",
+        "display_name": f"statemachine {machine}",
         "state_count": 0,
         "unresolved_transitions": 0,
     }
@@ -459,6 +461,16 @@ def parse_asl(
             if state_ql in ("JSONPath", "JSONata"):
                 extra["query_language"] = state_ql
             identity = qualified[len(file_path) + 2:]
+            state_path = identity[len(machine) + 1:]
+            extra["asl_role"] = "state"
+            extra["state_machine"] = machine
+            extra["state_path"] = state_path
+            extra["is_machine_start"] = bool(extra["is_start"]) and prefix == ""
+            extra["display_name"] = f"{machine}/{state_path}"
+            extra["docstring"] = (
+                f"Step Functions {state_type} state {machine}/{state_path} "
+                f"in state machine {machine}"
+            )
             nodes.append(node_cls(
                 kind="Function",
                 name=state_name,
@@ -557,6 +569,9 @@ def parse_asl(
         ))
 
     read_machine(document, "", machine_qualified, 0)
+    machine_extra["docstring"] = (
+        f"Step Functions state machine {machine} with {machine_extra['state_count']} states"
+    )
     if problems & {"truncated", "collision"}:
         file_extra["asl_problem"] = "truncated"
     if "duplicate_keys" in problems:

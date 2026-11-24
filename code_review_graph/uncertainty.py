@@ -288,6 +288,68 @@ def _confirmed_note(target: str, current: bool) -> str:
     )
 
 
+_HTTP_HANDLER_RE = re.compile(
+    r"(?:^|_)(?:endpoint|handler|view|route|callback)(?:$|_)|"
+    r"^(?:get|post|put|patch|delete)_\w+$|^(?:do|handle|serve)_\w+$",
+)
+
+
+def _served_routes(store: Any, node: Any) -> str:
+    """``GET /a, POST /b`` for the endpoints a function has a HANDLES edge to."""
+    try:
+        seen: list[str] = []
+        for edge in store.get_edges_by_source(node.qualified_name):
+            if edge.kind != "HANDLES":
+                continue
+            extra = edge.extra or {}
+            label = f"{extra.get('http_method', '')} {extra.get('route', '')}".strip()
+            if label and label not in seen:
+                seen.append(label)
+        return ", ".join(seen[:5])
+    except Exception:
+        return ""
+
+
+def _route_note(pattern: str, target: str, node: Any, store: Any = None) -> str | None:
+    """Reword a zero for a route query whose target may be a route the graph missed.
+
+    ``handlers_of`` takes an *endpoint* and ``endpoints_for`` a *handler*. A zero
+    for a decorated function, or one named like an HTTP handler, is not proof
+    that it serves no route: the route may be registered where the parser does
+    not look (a router object it could not tell from another object, a
+    registration built at run time, a framework it does not read).
+    """
+    if pattern not in ("handlers_of", "endpoints_for"):
+        return None
+    kind = getattr(node, "kind", "")
+    if kind == "Endpoint":
+        return None
+    extra = getattr(node, "extra", None) or {}
+    decorated = bool(extra.get("decorators"))
+    name = str(getattr(node, "name", "") or "")
+    if not (decorated or _HTTP_HANDLER_RE.search(name)):
+        return None
+    if pattern == "handlers_of":
+        served = _served_routes(store, node)
+        if served:
+            return _interpolated_target(
+                "'", target,
+                "' is a handler, not an endpoint: handlers_of takes an endpoint. "
+                f"It serves {served}; use endpoints_for to list them",
+            )
+        return _interpolated_target(
+            "'", target,
+            "' is a function, not an endpoint, so no HANDLES edge points at it: "
+            "handlers_of takes an endpoint (use endpoints_for to list the routes "
+            "this function serves); this 0 does not mean it serves none",
+        )
+    return _interpolated_target(
+        "route may not be statically visible: no HANDLES edge leaves '", target,
+        "' (checked FastAPI/Flask route decorators, add_api_route and add_url_rule); "
+        "not proof it serves none",
+    )
+
+
 def _live_git_head(root: Path) -> str | None:
     """Read the checked-out commit.
 
@@ -489,6 +551,10 @@ def empty_query_confidence(
         gap = gap_note(getattr(node, "language", None), pattern)
         if gap:
             return _bounded(gap)
+
+        route_note = _route_note(pattern, target, node, store)
+        if route_note:
+            return _bounded(route_note)
 
         return _bounded(_confirmed_note(target, current))
     except Exception:

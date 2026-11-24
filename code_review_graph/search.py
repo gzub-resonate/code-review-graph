@@ -76,6 +76,16 @@ _TEST_INTENT_WORDS = frozenset({
 # them: by kind, by a ``$`` path, or by naming a ``.json`` file.
 _JSON_RANK_PENALTY = 0.25
 
+# A workflow's ``$.on.schedule`` key or a README heading shares words with the code that does
+# the work: "shut down environment on a schedule" ranked two GitHub workflow YamlPaths above the
+# shutdown lambda. Rank YamlPath, JsonPath and DocSection nodes at this fraction of their score
+# (so their share of the RRF result is halved) unless the caller asks for configuration: by
+# kind, a ``$`` path, a file name such as ``.yml``, or a dotted key. A JSON row is already held
+# back by ``_JSON_RANK_PENALTY`` and is not penalised twice.
+_CONFIG_NODE_KINDS = frozenset({"YamlPath", "JsonPath", "DocSection"})
+_CONFIG_RANK_FACTOR = 0.5
+_CONFIG_FILE_HINTS = (".yml", ".yaml", ".json", ".toml", ".md")
+
 
 # ---------------------------------------------------------------------------
 # FTS5 index management
@@ -954,6 +964,23 @@ def _has_json_intent(query: str, kind: Optional[str]) -> bool:
     )
 
 
+def _has_config_intent(query: str, kind: Optional[str]) -> bool:
+    """Whether the caller asked for configuration keys or docs, not code.
+
+    True for a config kind filter, a ``$`` path, a config file name (``.yml``, ``.json``) or
+    a config-key-looking dotted token such as ``spring.datasource.url``.
+    """
+    if kind in _CONFIG_NODE_KINDS:
+        return True
+    lowered = query.lower()
+    return (
+        query.lstrip().startswith("$")
+        or "$." in query
+        or any(hint in lowered for hint in _CONFIG_FILE_HINTS)
+        or bool(_DOTTED_IDENT_RE.search(query))
+    )
+
+
 def _fts_search_past_json(
     conn: sqlite3.Connection,
     query: str,
@@ -1100,6 +1127,7 @@ def hybrid_search(
         {w.lower() for w in query_words} & _TEST_INTENT_WORDS
     )
     json_intent = _has_json_intent(query, kind)
+    config_intent = _has_config_intent(query, kind)
 
     # Batch-fetch all candidate nodes in one query
     candidate_ids = [node_id for node_id, _ in merged]
@@ -1156,6 +1184,8 @@ def hybrid_search(
             boost *= 1.5
         if row["language"] == "json" and not json_intent:
             boost *= _JSON_RANK_PENALTY
+        elif node_kind in _CONFIG_NODE_KINDS and not config_intent:
+            boost *= _CONFIG_RANK_FACTOR
 
         if not test_intent:
             row_keys = row.keys()

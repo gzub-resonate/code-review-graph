@@ -151,6 +151,10 @@ class ClientCall:
     absolute_url: bool = False
     #: Why the call is only a likely match (for example ``ember_data_convention``).
     notes: tuple[str, ...] = ()
+    #: For ``origin == "js"``: the query keys the URL spells out, or ``None`` when the
+    #: query is unknown (no ``?``, a computed suffix, a computed key). Used only to tell
+    #: handlers apart that differ by a Spring ``params`` condition.
+    query_keys: Optional[tuple[str, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,10 @@ class ServerEndpoint:
     catch_all: bool = False
     #: The wildcard may also match nothing (``[[...path]]``).
     optional_catch_all: bool = False
+    #: Spring ``params`` conditions of the mapping, as written (``a``, ``!a``, ``a=v``).
+    params: tuple[str, ...] = ()
+    #: Spring ``headers`` conditions of the mapping, as written.
+    headers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -467,6 +475,47 @@ def _js_result(
     return LinkResult(AMBIGUOUS, reason, candidates, confidence)
 
 
+def _params_compatible(call: ClientCall, server: ServerEndpoint) -> bool:
+    """Whether the mapping's ``params`` conditions can hold for the call's query.
+
+    Only decided when the call spells its query keys out: ``a`` needs key ``a``, ``!a``
+    needs it absent, ``a=v`` needs key ``a``. ``a!=v`` holds with the key absent, so it
+    never rules a handler out. With unknown keys every handler stays possible.
+    """
+    keys = call.query_keys
+    if keys is None:
+        return True
+    present = set(keys)
+    for condition in server.params:
+        text = condition.strip()
+        if text.startswith("!") and "=" not in text:
+            if text[1:].strip() in present:
+                return False
+        elif "!=" in text:
+            continue
+        elif text.split("=", 1)[0].strip() not in present:
+            return False
+    return True
+
+
+def _narrow_by_params(
+    call: ClientCall, candidates: tuple[ServerEndpoint, ...],
+) -> tuple[ServerEndpoint, ...]:
+    """The handlers the call's query keys leave possible, or all of them if none do.
+
+    Like Spring, the handler with the most ``params`` conditions wins over one with fewer
+    when its conditions hold, so a plain ``GET /accounts`` handler does not stand beside
+    ``GET /accounts?onlyActive`` for a call that names the key.
+    """
+    if len(candidates) < 2 or call.query_keys is None:
+        return candidates
+    kept = tuple(c for c in candidates if _params_compatible(call, c))
+    if not kept:
+        return candidates
+    most = max(len(c.params) for c in kept)
+    return tuple(c for c in kept if len(c.params) == most)
+
+
 def _route_hits(call: ClientCall, index: ServerIndex) -> Optional[LinkResult]:
     """Exact route first, then a wildcard route; ``None`` when neither fits."""
     wanted = normalize_route(call.route)
@@ -475,7 +524,7 @@ def _route_hits(call: ClientCall, index: ServerIndex) -> Optional[LinkResult]:
         if _method_matches(call.http_method, server.http_method):
             found.setdefault(_location_key(server, wanted), server)
     if found:
-        return _js_result(_sorted_candidates(found))
+        return _js_result(_narrow_by_params(call, _sorted_candidates(found)))
     method = call.http_method.upper()
     for prefix, server in index.catch_all:
         if server.http_method.upper() != method:

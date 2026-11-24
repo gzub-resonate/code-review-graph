@@ -1071,6 +1071,25 @@ def _new_code_section(
     return section
 
 
+def _label_config_changes(analysis: dict[str, Any], changes: dict[str, str]) -> None:
+    """Say on each changed config path how the pull request changed it (added, changed,
+    removed), and count them in the summary."""
+    counts: dict[str, int] = {}
+    # A row's ``qualified_name`` is sanitised; the keys are the raw names.
+    by_row = {_sanitize_name(k): v for k, v in changes.items()}
+    for key in ("changed_yaml_paths", "changed_json_paths"):
+        for row in analysis.get(key, []):
+            label = by_row.get(row.get("qualified_name", ""))
+            if label:
+                row["change"] = label
+                counts[label] = counts.get(label, 0) + 1
+    if counts:
+        analysis["summary"] = str(analysis.get("summary") or "") + (
+            "\n  - Config paths: "
+            + ", ".join(f"{counts[k]} {k}" for k in ("added", "changed", "removed") if k in counts)
+        )
+
+
 def _pull_request_section(
     info: dict[str, Any], detail_level: str, rows_page: Page | None = None,
     new_page: Page | None = None,
@@ -1229,7 +1248,7 @@ def detect_changes_func(
             pr_nodes = []
             pr_info = {
                 "head": loaded["head_sha"][:12], "base": loaded["base_ref"][:12],
-                "added_symbols": {}, "removed_symbols": {},
+                "added_symbols": {}, "removed_symbols": {}, "config_changes": {},
                 "new_code": score_new_code(
                     symbol for report in (found["files"] if found else [])
                     for symbol in report.new_symbols
@@ -1237,6 +1256,13 @@ def detect_changes_func(
             }
             seen_qns: set[str] = set()
             for report in (found["files"] if found else []):
+                # Config paths the pull request adds, changes or removes are not in the graph
+                # (the base has no new path), so they come from the in-memory parse.
+                for config_change, config_node in report.config:
+                    if config_node.qualified_name not in seen_qns:
+                        seen_qns.add(config_node.qualified_name)
+                        pr_nodes.append(config_node)
+                        pr_info["config_changes"][config_node.qualified_name] = config_change
                 for qn in report.changed_qns:
                     node = store.get_node(qn)
                     if node is not None and qn not in seen_qns:
@@ -1262,9 +1288,15 @@ def detect_changes_func(
             base = resolve_review_base(root, base)
 
         if not changed_files:
+            empty = "No changed files detected."
+            if pr_info is not None:
+                from .pr_tools import no_change_summary
+
+                empty = no_change_summary(loaded, empty)
             return {
                 "status": "ok",
-                "summary": "No changed files detected.",
+                "summary": empty,
+                "already_merged": bool(pr_info is not None and loaded["already_merged"]),
                 "risk_score": 0.0,
                 "changed_functions": [],
                 "changed_yaml_paths": [],
@@ -1310,6 +1342,9 @@ def detect_changes_func(
             include_churn=True,
             changed_nodes=pr_nodes,
         )
+
+        if pr_info is not None and pr_info["config_changes"]:
+            _label_config_changes(analysis, pr_info["config_changes"])
 
         # The changed functions are the paged list. The cursor is bound to the exact
         # review (base, changed files, depth, detail level), to the graph, and to the
