@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
 from .. import feign_links as fl
+from ..constants import cross_repo_budget_seconds
 from ..endpoint_index import attach as attach_endpoints
 from ..endpoint_index import extract_endpoints, read_endpoint_index
 from ..errors import GraphStoreError
-from ..graph import GraphStore, _sanitize_name
+from ..graph import GraphNode, GraphStore, _sanitize_name
 from ..incremental import get_db_path
 from ..paging import (
     CursorError,
@@ -136,6 +139,108 @@ def _echoed(names: list[str]) -> tuple[list[str], int, bool]:
     return _bounded(cleaned, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES)
 
 
+#: Match tiers, best first. ``cross_repo_search_tool`` orders its merged rows by
+#: tier before anything else, because the scores of different repos are not
+#: comparable and an exact name in one repo must not wait behind another repo's
+#: weak rank-1 hit.
+_MATCH_TIERS = ("exact", "exact_ci", "qualified", "prefix", "tokens", "fuzzy")
+_TIER_ORDER = {name: rank for rank, name in enumerate(_MATCH_TIERS)}
+_QUALIFIED_SEPARATORS = (".", "::")
+#: Kind the hybrid search leaves out unless asked for; the exact lookup does too.
+_UNSEARCHED_KIND = "Output"
+_NON_ALNUM = re.compile(r"[^0-9A-Za-z]+")
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _name_tokens(text: str) -> set[str]:
+    """Lowercase words of ``text``: split on non-alphanumerics and at camelCase."""
+    tokens: set[str] = set()
+    for run in _NON_ALNUM.split(text):
+        tokens.update(part.lower() for part in _CAMEL_BOUNDARY.split(run) if part)
+    return tokens
+
+
+def _match_tier(query: str, row: dict[str, Any]) -> str:
+    """The tier a search row falls in for ``query`` (see ``_MATCH_TIERS``)."""
+    text = query.strip()
+    name = str(row.get("name") or "")
+    if not text or not name:
+        return "fuzzy"
+    if name == text:
+        return "exact"
+    if name.lower() == text.lower():
+        return "exact_ci"
+    if any(sep in text for sep in _QUALIFIED_SEPARATORS):
+        qualified = str(row.get("qualified_name") or "")
+        symbol = qualified.partition("::")[2] or qualified
+        if symbol == text or any(symbol.endswith(sep + text) for sep in _QUALIFIED_SEPARATORS):
+            return "qualified"
+    if name.startswith(text):
+        return "prefix"
+    wanted = _name_tokens(text)
+    if wanted and wanted <= _name_tokens(name):
+        return "tokens"
+    return "fuzzy"
+
+
+def _node_row(node: GraphNode) -> dict[str, Any]:
+    """A search row for a node the exact lookup found (``score`` 0.0: it was not ranked)."""
+    return {
+        "name": _sanitize_name(node.name),
+        "qualified_name": _sanitize_name(node.qualified_name),
+        "kind": node.kind,
+        "file_path": node.file_path,
+        "line_start": node.line_start,
+        "line_end": node.line_end,
+        "language": node.language or "",
+        "params": node.params,
+        "return_type": node.return_type,
+        "signature": None,
+        "score": 0.0,
+    }
+
+
+def _search_repo(
+    store: GraphStore, query: str, kind: str | None, limit: int,
+) -> list[tuple[int, str, dict[str, Any]]]:
+    """One repo's rows as ``(local_rank, match, row)``, at most ``limit`` of them.
+
+    The hybrid search is cut at ``limit`` by relevance, which can drop an exact
+    name behind fuzzier hits. So the rows an exact lookup finds that the search
+    did not return are added, and the cut is made after ordering by match tier,
+    so an exact match always survives it. ``local_rank`` is the position the
+    row had in the search (lookup-only rows follow the last one).
+    """
+    rows = hybrid_search(store, query, kind=kind, limit=limit)
+    seen = {row["qualified_name"] for row in rows}
+    text = query.strip()
+    if text:
+        if any(sep in text for sep in _QUALIFIED_SEPARATORS):
+            found = store.search_nodes_by_qualified_tail(text, limit=limit)
+        else:
+            found = store.get_nodes_by_name(text)[:limit]
+        for node in found:
+            if kind and node.kind != kind:
+                continue
+            if not kind and node.kind == _UNSEARCHED_KIND:
+                continue
+            row = _node_row(node)
+            if row["qualified_name"] not in seen:
+                seen.add(row["qualified_name"])
+                rows.append(row)
+    tiered = [(rank, _match_tier(query, row), row) for rank, row in enumerate(rows)]
+    tiered.sort(key=lambda item: (_TIER_ORDER[item[1]], item[0]))
+    return tiered[:limit]
+
+
+def _repo_label(entry: dict[str, Any]) -> str:
+    return str(entry.get("alias") or Path(entry["path"]).name)
+
+
+def _out_of_budget(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
 def cross_repo_search_func(
     query: str,
     kind: str | None = None,
@@ -147,12 +252,19 @@ def cross_repo_search_func(
     """Search across registered repositories.
 
     [REGISTRY] Runs hybrid_search on each registered repo's graph database
-    and merges the results.
+    and merges the results. Scores are not comparable between repos, so rows
+    are ordered by match tier first (``match``: ``exact`` name, ``exact_ci``,
+    ``qualified`` suffix, ``prefix``, ``tokens``, ``fuzzy``), then by each
+    repo's local rank, then registry order. A repo's exact-name nodes are
+    always kept, whatever ``limit`` is. At most ``CRG_CROSS_REPO_BUDGET_SECONDS``
+    (default 60, 0 = unlimited) are spent per call: once spent no new repo is
+    started and the ones left are named in ``skipped_repos``.
 
     Args:
         query: Search query string.
         kind: Optional node kind filter (e.g. "Function", "Class").
-        limit: Maximum results per repo (default: 20).
+        limit: Maximum results per repo (default: 20). The cut is made after
+            ordering by match tier, so an exact match survives it.
         max_results: Maximum merged results to return across all repos
             (default 50, capped at 100). ``total`` reports the untruncated
             merged count; without it the response grew with the number of
@@ -178,10 +290,12 @@ def cross_repo_search_func(
 
     Returns:
         Combined search results from the searched repos, plus ``total``
-        and ``truncated``. When more results remain, ``next_cursor`` is the
-        ``cursor`` that returns the next ones. When ``repos`` was given, also ``unknown`` and
-        ``ambiguous`` with their ``*_total`` counts, both bounded like every
-        other list in a response.
+        and ``truncated``; every row has ``match`` (its tier). When the time
+        budget ran out, ``skipped_repos`` (bounded), ``skipped_repos_total`` and
+        ``truncated`` say which repos were not searched. When more results remain,
+        ``next_cursor`` is the ``cursor`` that returns the next ones.
+        When ``repos`` was given, also ``unknown`` and ``ambiguous`` with their
+        ``*_total`` counts, both bounded like every other list in a response.
     """
     from ..registry import Registry
 
@@ -244,10 +358,18 @@ def cross_repo_search_func(
         else:
             selected = all_repos
 
-        ranked_results: list[tuple[int, int, dict[str, Any]]] = []
+        budget = cross_repo_budget_seconds()
+        deadline = time.monotonic() + budget if budget > 0 else None
+        ranked_results: list[tuple[int, int, int, dict[str, Any]]] = []
         searched_repos: list[str] = []
+        skipped: list[str] = []
 
         for repo_index, repo_entry in enumerate(selected):
+            # The first repo always runs, so a call makes progress; after that no
+            # new repo is started once the budget is spent, and each one left is named.
+            if repo_index and _out_of_budget(deadline):
+                skipped.extend(_repo_label(e) for e in selected[repo_index:])
+                break
             repo_path = Path(repo_entry["path"])
             db_path = get_db_path(repo_path)
             if not db_path.exists():
@@ -256,14 +378,12 @@ def cross_repo_search_func(
             try:
                 store = GraphStore(str(db_path))
                 try:
-                    results = hybrid_search(
-                        store, query, kind=kind, limit=limit
-                    )
                     alias = repo_entry.get("alias", repo_path.name)
-                    for local_rank, r in enumerate(results):
+                    for local_rank, match, r in _search_repo(store, query, kind, limit):
                         r["repo"] = alias
                         r["repo_path"] = str(repo_path)
-                        ranked_results.append((local_rank, repo_index, r))
+                        r["match"] = match
+                        ranked_results.append((_TIER_ORDER[match], local_rank, repo_index, r))
                     searched_repos.append(alias)
                 finally:
                     store.close()
@@ -273,20 +393,25 @@ def cross_repo_search_func(
                 )
 
         # Scores from different search paths are not comparable across repos.
-        # Merge by each repo's local rank and use registry order as a stable tie-breaker.
-        ranked_results.sort(key=lambda item: (item[0], item[1]))
-        merged = [result for _, _, result in ranked_results]
+        # Order by match tier first (an exact name beats any fuzzy hit, whatever
+        # its repo), then by each repo's local rank, with registry order as a
+        # stable tie-breaker.
+        ranked_results.sort(key=lambda item: item[:3])
+        merged = [item[3] for item in ranked_results]
+        skipped_shown, skipped_total, skipped_truncated = _echoed(skipped)
         # The rows come from several graph databases and are searched afresh on every
-        # call, so the stamp is a digest of the rows themselves.
+        # call, so the stamp is a digest of the rows themselves, and of the repos left
+        # out: a cursor made on a partial answer is only honoured for the same partial one.
         page = paginate(
             merged, max_results, _MAX_CROSS_REPO_RESULTS, cursor,
             scope=make_scope(
                 "cross_repo_search_tool", query=query, kind=kind, limit=limit,
                 repos=sorted(set(repos)) if repos else None,
             ),
-            stamp=make_scope("cross_repo_search_rows", rows=merged),
+            stamp=make_scope("cross_repo_search_rows", rows=merged, skipped=skipped),
         )
-        all_results, total, truncated = page.items, page.total, page.truncated
+        all_results, total = page.items, page.total
+        truncated = page.truncated or bool(skipped)
 
         # A dropped or duplicated name reaches the summary too. The
         # all-unknown branch already said so there, and CLAUDE.md trains
@@ -296,6 +421,11 @@ def cross_repo_search_func(
             notes += f"; {unknown_total} name(s) matched no repository"
         if ambiguous_total:
             notes += f"; {ambiguous_total} name(s) matched several"
+        if skipped_total:
+            notes += (
+                f"; time budget of {budget:g}s spent, {skipped_total} repo(s) not searched "
+                "(see skipped_repos; raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
+            )
 
         response = {
             "status": "ok",
@@ -309,6 +439,9 @@ def cross_repo_search_func(
             "total": total,
             "truncated": truncated,
             "repos_searched": searched_repos,
+            "skipped_repos": skipped_shown,
+            "skipped_repos_total": skipped_total,
+            "skipped_repos_truncated": skipped_truncated,
             **page.fields(),
         }
         if repos:
@@ -330,10 +463,6 @@ def cross_repo_search_func(
 _MAX_REQUEST_ROWS = 100
 _MAX_CANDIDATES_PER_ROW = 5
 _MAX_UNREADABLE = 20
-
-
-def _repo_label(entry: dict[str, Any]) -> str:
-    return str(entry.get("alias") or Path(entry["path"]).name)
 
 
 _STORED = "stored"
@@ -433,6 +562,12 @@ def cross_repo_requests_func(
             client repo, then keeps the first ``max_results``. Omit it for the
             first page.
         origin: Only ``feign`` or only ``js`` calls. Default: both.
+
+    The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 60,
+    0 = unlimited). Once spent, no further client repo is started; those left are
+    named in ``skipped_repos`` (with ``skipped_repos_total``), ``truncated`` is set,
+    and ``counts`` and ``total`` leave them out. A cursor made on such a partial
+    answer is refused unless the same repos are skipped again.
 
     Returns:
         ``results`` rows, ``counts`` by status, ``total``, ``truncated``,
@@ -568,11 +703,21 @@ def cross_repo_requests_func(
         origin_counts: dict[str, int] = {}
         rows_by_repo: list[list[dict[str, Any]]] = []
         searched: list[str] = []
+        skipped: list[str] = []
         total = 0
+        budget = cross_repo_budget_seconds()
+        deadline = time.monotonic() + budget if budget > 0 else None
+        started = 0
 
         for index, entry in enumerate(all_repos):
             if id(entry) not in selected_ids:
                 continue
+            # The first client repo always runs, so a call makes progress; after
+            # that no new one is started once the budget is spent, and each is named.
+            if started and _out_of_budget(deadline):
+                skipped.append(_repo_label(entry))
+                continue
+            started += 1
             clients, _own_servers, why, _src = load(index)
             if why:
                 note_unreadable(entry, "client", why)
@@ -667,9 +812,13 @@ def cross_repo_requests_func(
                 "cross_repo_requests_tool", repos=sorted(repos) if repos else None,
                 service=service, route=route, status=status, origin=origin,
             ),
-            stamp=content_stamp(rows_by_repo),
+            # The client repos left out are part of the stamp: a cursor made on a partial
+            # answer is only honoured for the same partial one.
+            stamp=content_stamp([rows_by_repo, skipped]),
         )
-        results, truncated = page.items, page.truncated
+        results = page.items
+        truncated = page.truncated or bool(skipped)
+        skipped_shown, skipped_total, skipped_truncated = _echoed(skipped)
         shown_unreadable, unreadable_total, unreadable_truncated = _bounded(
             unreadable, _MAX_UNREADABLE, _MAX_UNREADABLE,
         )
@@ -681,6 +830,12 @@ def cross_repo_requests_func(
             notes += f"; {ambiguous_total} name(s) matched several"
         if unreadable_total:
             notes += f"; {unreadable_total} repo(s) could not be read"
+        if skipped_total:
+            notes += (
+                f"; time budget of {budget:g}s spent, {skipped_total} client repo(s) not read "
+                "(see skipped_repos; counts and total leave them out; "
+                "raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
+            )
         ordered = ", ".join(f"{counts[s]} {s}" for s in fl.STATUSES if s in counts)
         response: dict[str, Any] = {
             "status": "ok",
@@ -701,6 +856,9 @@ def cross_repo_requests_func(
             "truncated": truncated,
             **page.fields(),
             "repos_searched": searched,
+            "skipped_repos": skipped_shown,
+            "skipped_repos_total": skipped_total,
+            "skipped_repos_truncated": skipped_truncated,
             "endpoint_index": {
                 kind: sum(1 for item in loaded.values() if item[3] == kind)
                 for kind in (_STORED, _COMPUTED)
