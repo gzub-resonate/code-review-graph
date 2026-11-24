@@ -401,3 +401,74 @@ def test_leaf_primitives_are_opt_in(store):
     kept = {h["name"] for h in find_hub_nodes(store, exclude_leaf_primitives=True)}
     assert "FlexBox" not in kept
     assert {"Page", "View0"} <= kept
+
+
+# ------------------------------------------------------------ non-code gaps
+
+
+NON_CODE = [
+    ("#exec-summary", "/r/docs/report.html", "DocSection"),
+    ("provider", "/r/infra/.terraform.lock.hcl", "YamlPath"),
+    ("prev", "/r/ui/.storybook/preview.tsx", "Function"),
+    ("m", "/r/ui/.storybook/mocks.ts", "Function"),
+    ("stage:0", "/r/Dockerfile", "Function"),
+    ("build", "/r/.github/actions/x/Dockerfile", "Function"),
+    ("ci", "/r/.github/scripts/ci.py", "Function"),
+    ("resolved", "/r/package-lock.json", "JsonPath"),
+]
+
+
+def test_non_code_is_not_an_isolated_node_or_untested_hotspot(tmp_path, store):
+    for name, file, kind in NON_CODE:
+        qn = _node(store, name, file, kind=kind)
+        for i in range(5):
+            _edge(store, "CALLS", qn, _node(store, f"{name}_{i}", "/r/deps.py"))
+    lonely = _node(store, "lonely_code", "/r/src/app.py")
+    hot = _hotspot(store, "real_hotspot", "/r/src/app.py")
+    store.commit()
+
+    gaps = find_knowledge_gaps(store)
+
+    isolated = {n["qualified_name"] for n in gaps["isolated_nodes"]}
+    hotspots = {h["qualified_name"] for h in gaps["untested_hotspots"]}
+    assert lonely in isolated and hot in hotspots
+    for name, file, _kind in NON_CODE:
+        qn = f"{file}::{name}"
+        assert qn not in hotspots, qn
+    # The non-code roots have five callees and no caller: opting in brings them back.
+    everything = find_knowledge_gaps(store, include_non_code=True)
+    assert {f"{f}::{n}" for n, f, _k in NON_CODE} <= {
+        h["qualified_name"] for h in everything["untested_hotspots"]
+    }
+    via_tool = get_knowledge_gaps_func(repo_root=str(tmp_path), include_non_code=True)
+    assert via_tool["summary"]["untested_hotspots"] >= len(NON_CODE)
+
+
+def test_isolated_non_code_nodes_are_left_out_unless_asked_for(tmp_path, store):
+    for name, file, kind in NON_CODE:
+        _node(store, name, file, kind=kind)
+    lonely = _node(store, "lonely_code", "/r/src/app.py")
+    store.commit()
+
+    quiet = {n["qualified_name"] for n in find_knowledge_gaps(store)["isolated_nodes"]}
+    loud = {
+        n["qualified_name"]
+        for n in find_knowledge_gaps(store, include_non_code=True)["isolated_nodes"]
+    }
+
+    assert quiet == {lonely}
+    assert lonely in loud and len(loud) == len(NON_CODE) + 1
+
+
+def test_a_hotspot_is_ranked_by_edges_that_name_a_node(store):
+    # Twelve bare-name calls make no hotspot; five traced edges do.
+    noisy = _node(store, "noisy_main", "/r/app.py")
+    for i in range(12):
+        _edge(store, "CALLS", noisy, f"generic{i}")
+    solid = _hotspot(store, "solid", "/r/app2.py")
+    store.commit()
+
+    names = {h["name"] for h in find_knowledge_gaps(store)["untested_hotspots"]}
+
+    assert "solid" in names and "noisy_main" not in names
+    assert solid

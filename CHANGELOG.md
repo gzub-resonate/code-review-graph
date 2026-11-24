@@ -21,6 +21,11 @@
 
 ### Changed
 
+- `get_knowledge_gaps_tool` leaves documentation sections, lockfile entries,
+  Dockerfile stages and files under `.storybook` or `.github` out of
+  `isolated_nodes` and `untested_hotspots`; the new `include_non_code` parameter
+  (default false) brings them back. A hotspot's `degree` counts only edges that
+  name a node, as hub nodes do.
 - `get_hub_nodes_tool`, `get_bridge_nodes_tool` and
   `get_surprising_connections_tool` no longer count calls and references whose
   target is only a bare name (`unresolved`, as in `query_graph_tool`): they

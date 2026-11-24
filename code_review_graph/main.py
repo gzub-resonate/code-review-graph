@@ -1341,6 +1341,7 @@ async def get_knowledge_gaps_tool(
     repo_root: Optional[str] = None,
     max_per_category: int = 15,
     detail_level: str = "standard",
+    include_non_code: bool = False,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1355,13 +1356,16 @@ async def get_knowledge_gaps_tool(
             total_gaps still report the untruncated counts. Default: 15.
         detail_level: "standard" for full gap records, "minimal" to drop
             file paths. Default: standard.
+        include_non_code: Also report documentation sections, lockfile entries,
+            Dockerfile stages and .storybook/.github files as isolated nodes
+            and untested hotspots. Default: false.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_knowledge_gaps_tool",
         lambda: get_knowledge_gaps_func(
             repo_root=root, max_per_category=max_per_category,
-            detail_level=detail_level,
+            detail_level=detail_level, include_non_code=include_non_code,
         ),
         root,
     )

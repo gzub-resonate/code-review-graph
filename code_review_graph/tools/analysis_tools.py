@@ -171,6 +171,7 @@ def get_knowledge_gaps_func(
     repo_root: str | None = None,
     max_per_category: int = 15,
     detail_level: str = "standard",
+    include_non_code: bool = False,
 ) -> dict[str, Any]:
     """Identify structural weaknesses in the codebase.
 
@@ -186,6 +187,9 @@ def get_knowledge_gaps_func(
             untruncated counts.
         detail_level: "standard" (default) returns full gap records;
             "minimal" drops file paths and keeps identifying fields only.
+        include_non_code: Also report documentation sections, lockfile entries,
+            Dockerfile stages and anything under ``.storybook`` or ``.github``
+            as isolated nodes and untested hotspots (default False).
 
     Returns:
         Gaps by category. ``summary`` maps each category to its untruncated
@@ -195,7 +199,7 @@ def get_knowledge_gaps_func(
 
     store, root = _get_store(repo_root or None)
     try:
-        raw = find_knowledge_gaps(store, repo_root=root)
+        raw = find_knowledge_gaps(store, repo_root=root, include_non_code=include_non_code)
         # Totals must come from the untruncated lists: the summary counts are
         # the whole point of the tool, and capping them would hide the gap.
         totals = {category: len(rows) for category, rows in raw.items()}

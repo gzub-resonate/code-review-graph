@@ -13,7 +13,13 @@ from .constants import (
     IMPORT_CONTEXT_PARENT_PACKAGE,
     IMPORT_CONTEXT_TYPE_ONLY,
 )
-from .graph import RESOLUTION_UNRESOLVED, GraphEdge, GraphStore, _sanitize_name
+from .graph import (
+    RESOLUTION_UNRESOLVED,
+    GraphEdge,
+    GraphNode,
+    GraphStore,
+    _sanitize_name,
+)
 from .migrations import TARGET_RESOLUTION_KINDS
 from .parser import normalize_file_path
 
@@ -27,6 +33,38 @@ _MAX_CYCLE_HOPS = 10
 _MAX_UNTESTED_HOTSPOTS = 20
 # Node kinds that make up a config document rather than code.
 _CONFIG_DOCUMENT_KINDS = frozenset({"JsonPath", "YamlPath"})
+# Files a package manager writes, whatever the ecosystem names them.
+_LOCKFILE_NAMES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "uv.lock", "pipfile.lock", "cargo.lock", "gemfile.lock",
+    "composer.lock", "go.sum", "gradle.lockfile", "packages.lock.json", "flake.lock",
+})
+_LOCKFILE_SUFFIXES = (".lock", ".lock.hcl", ".lockfile", "-lock.json", "-lock.yaml")
+# Folders that hold tooling around the code, not the code.
+_NON_CODE_DIRS = frozenset({".storybook", ".github"})
+
+
+def _is_non_code(node: GraphNode) -> bool:
+    """Is this node documentation, a lockfile entry or tooling, not code?
+
+    Such nodes are isolated or unreferenced by nature (an HTML anchor, a provider
+    pinned in ``.terraform.lock.hcl``, a Storybook mock, a Dockerfile stage), so
+    listing them as gaps tells the reader nothing.
+    """
+    if node.kind == "DocSection" or node.name.startswith("stage:"):
+        return True
+    parts = node.file_path.replace("\\", "/").lower().split("/")
+    base = parts[-1]
+    return (
+        base in _LOCKFILE_NAMES
+        or base.endswith(_LOCKFILE_SUFFIXES)
+        or base.startswith("dockerfile")
+        or base.endswith(".dockerfile")
+        or base == "containerfile"
+        or any(part in _NON_CODE_DIRS for part in parts[:-1])
+    )
+
+
 # Edges that say a node builds on another one.
 _OUTGOING_USE_KINDS = frozenset({"CALLS", "REFERENCES"})
 
@@ -304,9 +342,13 @@ def find_import_cycles(
 
 
 def find_knowledge_gaps(
-    store: GraphStore, repo_root: Path | None = None,
+    store: GraphStore, repo_root: Path | None = None, include_non_code: bool = False,
 ) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
+
+    Documentation sections, lockfile entries, Dockerfile stages and anything under
+    ``.storybook`` or ``.github`` are left out of ``isolated_nodes`` and
+    ``untested_hotspots`` unless *include_non_code* is set.
 
     Returns dict with categories:
     - isolated_nodes: degree <= 1, disconnected from graph
@@ -329,7 +371,7 @@ def find_knowledge_gaps(
     isolated = []
     for n in nodes:
         d = degree.get(n.qualified_name, 0)
-        if d <= 1:
+        if d <= 1 and (include_non_code or not _is_non_code(n)):
             isolated.append({
                 "name": _sanitize_name(n.name),
                 "qualified_name": n.qualified_name,
@@ -369,11 +411,17 @@ def find_knowledge_gaps(
     # 3. Untested hotspots (degree >= 5, no covering test). "Tested" is what
     # tests_for answers: a direct test, or one that reaches the node through
     # test helpers. A test of something the node merely calls is not coverage.
+    # A hotspot is ranked like a hub: by the edges that name a node.
+    named: dict[str, int] = Counter()
+    for e in _traced_edges(edges, {n.qualified_name for n in nodes})[0]:
+        named[e.source_qualified] += 1
+        named[e.target_qualified] += 1
     candidates = [
         n for n in nodes
-        if degree.get(n.qualified_name, 0) >= 5 and not n.is_test
+        if named.get(n.qualified_name, 0) >= 5 and not n.is_test
+        and (include_non_code or not _is_non_code(n))
     ]
-    candidates.sort(key=lambda n: -degree.get(n.qualified_name, 0))
+    candidates.sort(key=lambda n: -named.get(n.qualified_name, 0))
     untested_hotspots: list[dict] = []
     for n in candidates:
         if len(untested_hotspots) >= _MAX_UNTESTED_HOTSPOTS:
@@ -385,7 +433,7 @@ def find_knowledge_gaps(
             "qualified_name": n.qualified_name,
             "kind": n.kind,
             "file": n.file_path,
-            "degree": degree[n.qualified_name],
+            "degree": named[n.qualified_name],
         })
 
     # 4. Single-file communities

@@ -785,7 +785,13 @@ betweenness.
 repo_root: str | None
 max_per_category: int = 15       # Entries per gap category (max 50)
 detail_level: str = "standard"   # "minimal" drops file paths
+include_non_code: bool = False   # also report docs, lockfiles, tooling as gaps
 ```
+Documentation sections (`DocSection`), lockfile entries (`package-lock.json`,
+`.terraform.lock.hcl`, `uv.lock` and the like), Dockerfile stages and anything
+under `.storybook` or `.github` are expected to be isolated or unreferenced, so
+`isolated_nodes` and `untested_hotspots` leave them out unless `include_non_code`
+is set. A hotspot's `degree` counts only edges that name a node, as hub nodes do.
 `summary` maps each category to its untruncated count. The categories are
 `isolated_nodes`, `thin_communities`, `untested_hotspots`,
 `single_file_communities` and `import_cycles`.
