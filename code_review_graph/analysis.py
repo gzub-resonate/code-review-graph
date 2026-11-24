@@ -24,7 +24,7 @@ from .graph import (
     _sanitize_name,
 )
 from .migrations import TARGET_RESOLUTION_KINDS
-from .parser import is_test_file, normalize_file_path
+from .parser import is_test_file, normalize_file_path, repo_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,20 @@ def _is_test_node(node: Any, repo_root: str | None) -> bool:
         or node.is_test
         or is_test_file(node.file_path, repo_root)
     )
+
+
+#: Directories and file names of generated code (jOOQ, protobuf, ``__generated__`` and the
+#: like). ``find_large_functions`` leaves the same paths out of its ranking.
+_GENERATED_PATH_RE = re.compile(
+    r"(^|/)(__generated__|generated)/|\.generated\.|_pb2(_grpc)?\.py$",
+    re.IGNORECASE,
+)
+
+
+def is_generated_file(path: str, repo_root: str | None = None) -> bool:
+    """Whether *path* is generated code, judged on the path under the repository root."""
+    relative = repo_relative_path(path, repo_root) if repo_root else None
+    return bool(_GENERATED_PATH_RE.search(relative or path.replace("\\", "/")))
 
 
 def _is_non_code(node: GraphNode) -> bool:
@@ -228,6 +242,8 @@ def find_hub_nodes(
     *,
     nodes: list[GraphNode] | None = None,
     edges: list[GraphEdge] | None = None,
+    include_generated: bool = True,
+    stats: dict[str, int] | None = None,
 ) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
 
@@ -250,6 +266,9 @@ def find_hub_nodes(
     non-test definitions share that name, so a name defined on many classes is damped
     harder than one defined twice. Ranking uses ``ranking_degree`` (weighted);
     ``total_degree`` stays the raw count.
+
+    Generated code (see ``is_generated_file``) is left out unless *include_generated* is true;
+    a *stats* dict receives ``generated_excluded``, the number of nodes that cost.
 
     Returns list of dicts with: name, qualified_name, kind, file,
     in_degree, out_degree, total_degree, ranking_degree, community_id, resolution_split
@@ -280,7 +299,9 @@ def find_hub_nodes(
             if target is not None and not target.is_test:
                 builds_on.add(e.source_qualified)
     community_map = store.get_all_community_ids()
-    root = None if include_tests else store.get_repo_root()
+    repo = store.get_repo_root() if not (include_tests and include_generated) else None
+    root = None if include_tests else repo
+    generated_excluded = 0
 
     scored: list[dict[str, Any]] = []
     for n in nodes:
@@ -295,6 +316,9 @@ def find_hub_nodes(
         if total == 0:
             continue
         if exclude_leaf_primitives and qn not in builds_on:
+            continue
+        if not include_generated and is_generated_file(n.file_path, repo):
+            generated_excluded += 1
             continue
         scored.append({
             "name": _sanitize_name(n.name),
@@ -312,6 +336,8 @@ def find_hub_nodes(
     # Equal degrees are ordered by qualified name, so a ranking read in pages never
     # repeats or skips a node.
     scored.sort(key=lambda x: (-x["ranking_degree"], x["qualified_name"]))
+    if stats is not None:
+        stats["generated_excluded"] = generated_excluded
     return scored[:top_n]
 
 
@@ -466,6 +492,8 @@ def _betweenness_scores(store: GraphStore) -> dict[str, float]:
 def find_bridge_nodes(
     store: GraphStore, top_n: int = 10, include_tests: bool = True,
     include_config: bool = True,
+    include_generated: bool = True,
+    stats: dict[str, int] | None = None,
 ) -> list[dict]:
     """Find nodes with highest betweenness centrality.
 
@@ -473,7 +501,8 @@ def find_bridge_nodes(
     between many node pairs. If they break, multiple communities
     lose connectivity. Test nodes are left out unless *include_tests* is true; they still
     count as paths while betweenness is computed, and are dropped before ranking.
-    Config document nodes are dropped the same way unless *include_config* is true.
+    Config document nodes are dropped the same way unless *include_config* is true, and
+    generated code unless *include_generated* is true (counted in ``stats``).
 
     Returns list of dicts with: name, qualified_name, kind, file,
     betweenness, community_id
@@ -488,7 +517,9 @@ def find_bridge_nodes(
         for n in store.get_all_nodes(exclude_files=True)
     }
 
-    root = None if include_tests else store.get_repo_root()
+    repo = store.get_repo_root() if not (include_tests and include_generated) else None
+    root = None if include_tests else repo
+    generated_excluded = 0
     results = []
     for qn, score in bc.items():
         if score <= 0 or qn not in node_map:
@@ -499,6 +530,9 @@ def find_bridge_nodes(
         if not include_tests and _is_test_node(n, root):
             continue
         if not include_config and n.kind in CONFIG_DOCUMENT_KINDS:
+            continue
+        if not include_generated and is_generated_file(n.file_path, repo):
+            generated_excluded += 1
             continue
         results.append({
             "name": _sanitize_name(n.name),
@@ -512,6 +546,8 @@ def find_bridge_nodes(
     # Equal scores are ordered by qualified name, so a ranking read in pages never
     # repeats or skips a node.
     results.sort(key=lambda x: (-float(x["betweenness"]), str(x["qualified_name"])))  # type: ignore[arg-type]
+    if stats is not None:
+        stats["generated_excluded"] = generated_excluded
     return results[:top_n]
 
 
@@ -642,6 +678,8 @@ def find_knowledge_gaps(
     *,
     nodes: list[GraphNode] | None = None,
     edges: list[GraphEdge] | None = None,
+    include_generated: bool = True,
+    stats: dict[str, int] | None = None,
 ) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
 
@@ -665,6 +703,11 @@ def find_knowledge_gaps(
     interpreter calls them, so no edge names them.
     Unless *include_tests* is true, test nodes are left out of the node lists and a
     community made only of test nodes is left out of the community lists.
+
+    Generated code (see ``is_generated_file``) is left out of ``isolated_nodes`` and
+    ``untested_hotspots`` unless *include_generated* is true. A *stats* dict receives
+    ``generated_isolated_excluded`` and ``generated_hotspot_candidates_excluded`` (hotspot
+    candidates are counted before their test coverage is looked up).
 
     Isolated nodes and untested hotspots are cut at *max_isolated* and *max_untested*
     (``None`` keeps every row, for a caller that pages). Every list has a fixed order.
@@ -698,6 +741,10 @@ def find_knowledge_gaps(
             return False
         return _is_non_code(n) or (_is_constructor(n) and n.qualified_name in contained)
 
+    repo = store.get_repo_root() if not (include_tests and include_generated) else None
+    generated_isolated = 0
+    generated_candidates = 0
+
     # 1. Isolated nodes (degree <= 1, not File)
     isolated = []
     for n in nodes:
@@ -711,6 +758,9 @@ def find_knowledge_gaps(
             not include_non_code and _is_runtime_called_dunder(n) and n.qualified_name in contained
         )
         if d <= 1 and not config_key and not expected(n) and not runtime_dunder:
+            if not include_generated and is_generated_file(n.file_path, repo):
+                generated_isolated += 1
+                continue
             isolated.append({
                 "name": _sanitize_name(n.name),
                 "qualified_name": n.qualified_name,
@@ -771,6 +821,10 @@ def find_knowledge_gaps(
         and not expected(n)
         and (include_non_code or not _is_untestable_here(n))
     ]
+    if not include_generated:
+        kept = [n for n in candidates if not is_generated_file(n.file_path, repo)]
+        generated_candidates = len(candidates) - len(kept)
+        candidates = kept
     candidates.sort(key=lambda n: (-named.get(n.qualified_name, 0), n.qualified_name))
     untested_hotspots: list[dict] = []
     for n in candidates:
@@ -802,6 +856,9 @@ def find_knowledge_gaps(
                 "file": next(iter(files)),
             })
 
+    if stats is not None:
+        stats["generated_isolated_excluded"] = generated_isolated
+        stats["generated_hotspot_candidates_excluded"] = generated_candidates
     return {
         "isolated_nodes": isolated[:max_isolated],
         "thin_communities": thin,
@@ -816,6 +873,8 @@ def find_surprising_connections(
     *,
     nodes: list[GraphNode] | None = None,
     edges: list[GraphEdge] | None = None,
+    include_generated: bool = True,
+    stats: dict[str, int] | None = None,
 ) -> list[dict]:
     """Find edges with high surprise scores.
 
@@ -827,10 +886,19 @@ def find_surprising_connections(
     - Non-standard edge kind for the node types
 
     Unless *include_tests* is true, an edge with a test node at either end is dropped
-    before scoring and ranking.
+    before scoring and ranking, and likewise an edge with a generated-code node at either end
+    unless *include_generated* is true (counted in ``stats["generated_excluded"]``).
+
+    Equal scores are ordered by the combined degree of the two endpoints (the busier pair
+    first), then by name. Each row carries ``combined_degree`` and ``group_count``: how many
+    ranked edges leave the same source for the same target class (or file) with the same
+    edge kind, so ``A.create`` calling three ``B.can*`` methods reads as one family of 3.
+    No row is dropped for belonging to a family.
     """
     if nodes is None:
         nodes = store.get_all_nodes(exclude_files=True)
+    repo = store.get_repo_root() if not (include_tests and include_generated) else None
+    generated_excluded = 0
     community_map = store.get_all_community_ids()
 
     node_map = {n.qualified_name: n for n in nodes}
@@ -901,6 +969,11 @@ def find_surprising_connections(
             continue
         if not include_tests and (_is_test_node(src, root) or _is_test_node(tgt, root)):
             continue
+        if not include_generated and (
+            is_generated_file(src.file_path, repo) or is_generated_file(tgt.file_path, repo)
+        ):
+            generated_excluded += 1
+            continue
 
         score = 0.0
         reasons = []
@@ -959,19 +1032,38 @@ def find_surprising_connections(
                 "reasons": reasons,
                 "source_community": src_cid,
                 "target_community": tgt_cid,
+                "combined_degree": src_deg + tgt_deg,
             }))
 
     # Equal scores are ordered by endpoints, edge kind and edge id (two edges can join
     # the same pair), so a ranking read in pages never repeats or skips an edge.
     scored_edges.sort(key=lambda item: (
-        -float(item[1]["surprise_score"]), item[1]["source_qualified"],
+        -float(item[1]["surprise_score"]), -int(item[1]["combined_degree"]),
+        item[1]["source_qualified"],
         item[1]["target_qualified"], item[1]["edge_kind"], item[0],
     ))
-    return [row for _, row in scored_edges[:top_n]]
+    families: Counter[tuple[str, str, str]] = Counter()
+    keyed: list[tuple[tuple[str, str, str], dict[str, Any]]] = []
+    for _, row in scored_edges:
+        tgt = node_map[row["target_qualified"]]
+        family = (
+            row["source_qualified"],
+            tgt.parent_name or row["target_file"],
+            row["edge_kind"],
+        )
+        families[family] += 1
+        keyed.append((family, row))
+    for family, row in keyed:
+        row["group_count"] = families[family]
+    if stats is not None:
+        stats["generated_excluded"] = generated_excluded
+    return [row for _, row in keyed[:top_n]]
 
 
 def generate_suggested_questions(
     store: GraphStore, include_tests: bool = True,
+    include_generated: bool = True,
+    stats: dict[str, int] | None = None,
 ) -> list[dict]:
     """Auto-generate review questions from graph analysis.
 
@@ -981,8 +1073,13 @@ def generate_suggested_questions(
     - low_cohesion: Should community X be split?
     - hub_risk: Does hub node X have adequate test coverage?
     - surprising: Why does A call B across community boundary?
+
+    Generated code is left out of every source unless *include_generated* is true; a
+    *stats* dict receives ``generated_excluded``, the nodes and edges that dropped out.
     """
     questions = []
+    sub: dict[str, int] = {}
+    excluded = 0
     # One load of the nodes and edges feeds every analysis below.
     all_nodes = store.get_all_nodes(exclude_files=True)
     all_edges = store.get_all_edges()
@@ -990,7 +1087,9 @@ def generate_suggested_questions(
     # Bridge node questions
     bridges = find_bridge_nodes(
         store, top_n=3, include_tests=include_tests, include_config=False,
+        include_generated=include_generated, stats=sub,
     )
+    excluded += sub.get("generated_excluded", 0)
     for b in bridges:
         questions.append({
             "category": "bridge_node",
@@ -1007,7 +1106,9 @@ def generate_suggested_questions(
     hubs = find_hub_nodes(
         store, top_n=3, include_tests=include_tests, include_config=False,
         nodes=all_nodes, edges=all_edges,
+        include_generated=include_generated, stats=sub,
     )
+    excluded += sub.get("generated_excluded", 0)
     tested = {
         e.source_qualified
         for e in all_edges if e.kind == "TESTED_BY"
@@ -1029,7 +1130,9 @@ def generate_suggested_questions(
     # Surprising connection questions
     surprises = find_surprising_connections(
         store, top_n=3, include_tests=include_tests, nodes=all_nodes, edges=all_edges,
+        include_generated=include_generated, stats=sub,
     )
+    excluded += sub.get("generated_excluded", 0)
     for s in surprises:
         if "cross-community" in s["reasons"]:
             questions.append({
@@ -1048,7 +1151,13 @@ def generate_suggested_questions(
     # Knowledge gap questions
     gaps = find_knowledge_gaps(
         store, include_tests=include_tests, nodes=all_nodes, edges=all_edges,
+        include_generated=include_generated, stats=sub,
     )
+    excluded += sub.get("generated_isolated_excluded", 0) + sub.get(
+        "generated_hotspot_candidates_excluded", 0,
+    )
+    if stats is not None:
+        stats["generated_excluded"] = excluded
 
     for c in gaps["thin_communities"][:2]:
         questions.append({

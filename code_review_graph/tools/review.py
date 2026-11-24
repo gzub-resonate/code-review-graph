@@ -1182,7 +1182,10 @@ def detect_changes_func(
     Args:
         base: Git ref to diff against (default: HEAD~1).
         changed_files: Explicit list of changed file paths (relative to repo
-            root).  Auto-detected from git diff if omitted.
+            root).  Auto-detected from git diff if omitted.  When none of the
+            given files has diff lines, their production symbols are treated as
+            changed so risk and test gaps are computed; the reply then carries
+            ``changed_symbols_assumed: true`` and the summary says so.
         include_source: If True, include source code snippets for changed
             functions.  Default: False.
         max_depth: Impact radius depth for BFS traversal.  Default: 2.
@@ -1194,7 +1197,12 @@ def detect_changes_func(
             Default: "standard".
         max_results: Maximum changed functions, YAML paths and test gaps to return
             (default 25, capped at 200). ``changed_functions_total`` and
-            ``test_gaps_total`` report the untruncated counts.
+            ``test_gaps_total`` report the untruncated counts. A test gap is a changed
+            production symbol with no *direct* test (a TESTED_BY edge): ``coverage`` is
+            ``"none"`` when no test reaches it and ``"indirect"`` when a test only reaches
+            it through a caller, and ``test_gaps_uncovered`` / ``test_gaps_indirect`` count
+            the two. That is stricter than query_graph's ``tests_for``, which also lists
+            transitive and inferred tests.
         max_flows: Maximum affected flows to embed (default 20, capped at
             200). The embedded flows carry per-flow metadata only; use
             get_affected_flows_tool for step detail. See #849.
@@ -1228,6 +1236,7 @@ def detect_changes_func(
 
     store, root = _get_store(repo_root)
     notes: list[str] = []
+    files_given = changed_files is not None
     try:
         # Detect changed files if not provided.
         pr_nodes: list[GraphNode] | None = None
@@ -1346,6 +1355,46 @@ def detect_changes_func(
         if pr_info is not None and pr_info["config_changes"]:
             _label_config_changes(analysis, pr_info["config_changes"])
 
+        # Files named explicitly with no diff lines in them (a diff elsewhere, or none at
+        # all) have no changed symbols to score, and an answer of risk 0.00 and no test gaps
+        # reads as an all-clear. Take the production symbols the files define as changed
+        # instead, so risk and test gaps are computed, and say so.
+        symbols_assumed = False
+        if (
+            files_given and pr_info is None and not cursor
+            and not analysis.get("changed_functions")
+            and not analysis.get("changed_yaml_paths")
+            and not analysis.get("changed_json_paths")
+            and not analysis.get("removed_symbols_total")
+        ):
+            assumed_nodes = [
+                node
+                for fp in abs_files
+                for node in store.get_nodes_by_file(fp)
+                if not (node.is_test or is_test_file(node.file_path, root))
+            ]
+            if assumed_nodes:
+                analysis = analyze_changes(
+                    store,
+                    changed_files=abs_files,
+                    repo_root=str(root),
+                    base=base,
+                    include_churn=True,
+                    changed_nodes=assumed_nodes,
+                )
+                symbols_assumed = analysis.get("changed_functions") is not None and bool(
+                    analysis.get("changed_functions")
+                    or analysis.get("changed_yaml_paths")
+                    or analysis.get("changed_json_paths")
+                )
+                if symbols_assumed:
+                    analysis["summary"] += (
+                        f"\n  - Assumed changed: no diff lines were found in the "
+                        f"{len(changed_files)} given file(s) against {base}, so their "
+                        "production symbols are treated as changed "
+                        "(changed_symbols_assumed=true)"
+                    )
+
         # The changed functions are the paged list. The cursor is bound to the exact
         # review (base, changed files, depth, detail level), to the graph, and to the
         # ordered function names, since a diff is recomputed on every call.
@@ -1441,6 +1490,8 @@ def detect_changes_func(
                 "test_gap_count": len(analysis.get("test_gaps", [])),
                 "removed_symbol_count": analysis.get("removed_symbols_total", 0),
                 "review_priorities": top_priorities,
+                "test_gaps_uncovered": analysis.get("test_gaps_uncovered", 0),
+                "test_gaps_indirect": analysis.get("test_gaps_indirect", 0),
                 # Minimal mode still has to say when the score it reports is
                 # missing the change-frequency term.
                 "churn_status": analysis.get("churn_status", "off"),
@@ -1534,6 +1585,8 @@ def detect_changes_func(
                 "truncated": any_cut,
                 **page.fields(),
             }
+        if symbols_assumed:
+            result["changed_symbols_assumed"] = True
         if pr_info is not None:
             result["pull_request"] = _pull_request_section(
                 pr_info, detail_level, rows_page, new_page,

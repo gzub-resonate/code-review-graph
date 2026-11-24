@@ -8,6 +8,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, cast
 
+from ..analysis import is_generated_file
 from ..config_keys import normalize_spring_config_key
 from ..constants import (
     IMPORT_CONTEXT_KEY,
@@ -1140,6 +1141,7 @@ def query_graph(
     resolution: str = RESOLUTION_ALL,
     to: str | None = None,
     cursor: str | None = None,
+    file_hint: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1165,6 +1167,9 @@ def query_graph(
             and may change between pages). Rows keep the order the graph yields
             them, and a cursor is refused if the pattern, target, resolution or
             graph differ from the call that made it. Not available for path_to.
+        file_hint: A substring of a file path (case-insensitive). When a bare name matches
+            several symbols and the hint leaves exactly one, that one is used; a hint that
+            leaves none or several keeps the "ambiguous" answer.
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
@@ -1174,6 +1179,10 @@ def query_graph(
         ``call_site`` it was found at, one row per call site rather than one
         per node, plus a ``resolution_split`` saying how much of the answer is
         certain.
+
+        ``tests_for`` also returns ``tests_direct`` and ``tests_inferred``: how many of the
+        ``result_count`` tests are traced links and how many carry ``inferred_by`` (guessed
+        from a callee's test, an ambiguous call or a naming convention).
     """
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
@@ -1205,9 +1214,12 @@ def query_graph(
             return _query_route(store, root, target, to, minimal)
         response_limit = min(max_results, 5) if minimal else max_results
         # The target as asked, before it is resolved: it is what the rows answer.
-        page_scope = make_scope(
-            "query_graph_tool", pattern=pattern, target=target, resolution=resolution,
-        )
+        scope_args: dict[str, Any] = {
+            "pattern": pattern, "target": target, "resolution": resolution,
+        }
+        if file_hint:
+            scope_args["file_hint"] = file_hint
+        page_scope = make_scope("query_graph_tool", **scope_args)
         page_stamp = graph_stamp(store)
         page_offset = _cursor_offset(cursor, page_scope, page_stamp)
         results: list[dict[str, Any]] = []
@@ -1335,6 +1347,15 @@ def query_graph(
                     ]
                     if exact_type_candidates:
                         candidates = exact_type_candidates
+                if file_hint and len(candidates) > 1:
+                    # A hint only ever decides when it leaves exactly one candidate.
+                    needle = file_hint.replace("\\", "/").lower()
+                    hinted = [
+                        c for c in candidates
+                        if needle in normalize_file_path(c.file_path).lower()
+                    ]
+                    if len(hinted) == 1:
+                        candidates = hinted
                 if len(candidates) == 1:
                     node = candidates[0]
                     target = node.qualified_name
@@ -1949,6 +1970,10 @@ def query_graph(
             # Say it where it is read first: a guessed test link is not a
             # traced one, and an agent should not report it as coverage.
             summary += f"; {inferred_results} of them guesses (see inferred_by)"
+        if pattern == "tests_for":
+            tests_inferred = inferred_results
+            tests_direct = total_results - inferred_results
+            summary += f" ({tests_direct} direct, {tests_inferred} inferred)"
 
         # A zero here is the dangerous direction: agents read it as "none
         # exist" and either conclude wrongly or fall back to grepping the
@@ -2008,6 +2033,9 @@ def query_graph(
                 "results": minimal_results,
                 **page.fields(),
             }
+            if pattern == "tests_for":
+                minimal_response["tests_direct"] = tests_direct
+                minimal_response["tests_inferred"] = tests_inferred
             if resolution_split is not None:
                 minimal_response["distinct_nodes"] = distinct_nodes
                 minimal_response["resolution_split"] = resolution_split
@@ -2027,6 +2055,9 @@ def query_graph(
             "edges": edges_out,
             **page.fields(),
         }
+        if pattern == "tests_for":
+            response["tests_direct"] = tests_direct
+            response["tests_inferred"] = tests_inferred
         if resolution_split is not None:
             response["distinct_nodes"] = distinct_nodes
             response["resolution_split"] = resolution_split
@@ -2500,7 +2531,10 @@ def _is_non_production_file(path: str, root: str | Path) -> bool:
     """Whether *path* is a test, mock, story or generated file."""
     if is_test_file(path, root):
         return True
-    return bool(_NON_PRODUCTION_PATH_RE.search(repo_relative_path(path, root) or path))
+    return bool(
+        _NON_PRODUCTION_PATH_RE.search(repo_relative_path(path, root) or path)
+        or is_generated_file(path, str(root))
+    )
 
 
 def find_large_functions(

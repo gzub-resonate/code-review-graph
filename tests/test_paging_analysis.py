@@ -481,7 +481,10 @@ def test_surprise_ties_break_by_endpoints(repo):
     rows = get_surprising_connections_func(repo_root=str(root), top_n=100)[
         "surprising_connections"]
     keys = [
-        (-r["surprise_score"], r["source_qualified"], r["target_qualified"], r["edge_kind"])
+        (
+            -r["surprise_score"], -r["combined_degree"], r["source_qualified"],
+            r["target_qualified"], r["edge_kind"],
+        )
         for r in rows
     ]
     assert keys == sorted(keys)
