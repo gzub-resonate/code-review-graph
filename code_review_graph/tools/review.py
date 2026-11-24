@@ -1538,6 +1538,14 @@ def detect_changes_func(
             result["pull_request"] = _pull_request_section(
                 pr_info, detail_level, rows_page, new_page,
             )
+            if detail_level == "minimal":
+                # The analysis only counts symbols a pure-deletion hunk removed from a
+                # file; the pull request counts every symbol its head lacks (a rewritten
+                # test file, say). One response must carry one number.
+                result["removed_symbol_count"] = max(
+                    result["removed_symbol_count"],
+                    result["pull_request"]["removed_symbols_total"],
+                )
             if rows_page is not None and rows_page.total:
                 result["summary"] += (
                     f"\n  - Pull request symbol(s): {rows_page.total}{shown_range(rows_page)}"
