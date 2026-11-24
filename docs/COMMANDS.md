@@ -831,8 +831,12 @@ repo_root: str | None
 detail_level: str = "standard"   # "minimal": name, qualified_name, file, kind, betweenness
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
+include_config: bool = False      # JSON/YAML/output/property nodes are left out before ranking
 ```
-Minimal rows give `qualified_name` and `file` relative to the repository root.
+Config document nodes are left out unless `include_config` is set; a repository with
+nothing else gets them back with a `note`. `get_minimal_context_tool` names code
+communities before config ones, and `get_suggested_questions_tool` asks about code
+bridges and hubs only. Minimal rows give `qualified_name` and `file` relative to the repository root.
 Calls to a bare name no node answers to are not paths, so they do not carry
 betweenness.
 

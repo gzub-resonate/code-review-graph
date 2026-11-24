@@ -227,3 +227,21 @@ class TestARepoOfOnlyConfigIsNotEmpty:
         assert "note" not in list_communities_func(repo_root=str(repo))
         assert "note" not in get_hub_nodes_func(repo_root=str(repo))
         assert "note" not in get_architecture_overview_func(repo_root=str(repo))
+
+
+class TestBridgesAndMinimalContextLeaveConfigOut:
+    def test_the_bridge_ranking_leaves_config_out_by_default(self, tmp_path):
+        from code_review_graph.tools.analysis_tools import get_bridge_nodes_func
+        repo = _repo(tmp_path, {"data/votes.json": 30})
+        default = get_bridge_nodes_func(repo_root=str(repo), top_n=20)["bridge_nodes"]
+        assert all(b["kind"] != "JsonPath" for b in default)
+        everything = get_bridge_nodes_func(
+            repo_root=str(repo), top_n=40, include_config=True,
+        )["bridge_nodes"]
+        assert any(b["kind"] == "JsonPath" for b in everything)
+
+    def test_minimal_context_names_code_communities_first(self, tmp_path):
+        from code_review_graph.tools.context import get_minimal_context
+        repo = _repo(tmp_path, {"data/votes.json": 30, "data/other.json": 30})
+        names = get_minimal_context(repo_root=str(repo))["communities"]
+        assert names and not any("json" in n for n in names)

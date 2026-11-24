@@ -1503,6 +1503,7 @@ async def get_bridge_nodes_tool(
     detail_level: str = "standard",
     cursor: Optional[str] = None,
     include_tests: bool = False,
+    include_config: bool = False,
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -1520,6 +1521,9 @@ async def get_bridge_nodes_tool(
         include_tests: Include test methods and test files. Default: false,
             so tests are left out before ranking, totals and paging. A cursor
             made with one value is refused for the other.
+        include_config: Include JSON, YAML, output and property document
+            nodes. Default: false, so they are left out before ranking, totals
+            and paging. A cursor made with one value is refused for the other.
 
     Returns:
         Ranked bridges. When more remain the reply carries ``next_cursor``.
@@ -1529,7 +1533,7 @@ async def get_bridge_nodes_tool(
         "get_bridge_nodes_tool",
         lambda: get_bridge_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
-            include_tests=include_tests,
+            include_tests=include_tests, include_config=include_config,
         ),
         root,
     )

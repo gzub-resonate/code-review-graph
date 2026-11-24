@@ -204,6 +204,7 @@ def find_hub_nodes(
 
 def find_bridge_nodes(
     store: GraphStore, top_n: int = 10, include_tests: bool = True,
+    include_config: bool = True,
 ) -> list[dict]:
     """Find nodes with highest betweenness centrality.
 
@@ -211,6 +212,7 @@ def find_bridge_nodes(
     between many node pairs. If they break, multiple communities
     lose connectivity. Test nodes are left out unless *include_tests* is true; they still
     count as paths while betweenness is computed, and are dropped before ranking.
+    Config document nodes are dropped the same way unless *include_config* is true.
 
     Returns list of dicts with: name, qualified_name, kind, file,
     betweenness, community_id
@@ -253,6 +255,8 @@ def find_bridge_nodes(
         if n.kind == "File":
             continue
         if not include_tests and _is_test_node(n, root):
+            continue
+        if not include_config and n.kind in CONFIG_DOCUMENT_KINDS:
             continue
         results.append({
             "name": _sanitize_name(n.name),
@@ -719,7 +723,9 @@ def generate_suggested_questions(
     questions = []
 
     # Bridge node questions
-    bridges = find_bridge_nodes(store, top_n=3, include_tests=include_tests)
+    bridges = find_bridge_nodes(
+        store, top_n=3, include_tests=include_tests, include_config=False,
+    )
     for b in bridges:
         questions.append({
             "category": "bridge_node",
@@ -733,7 +739,9 @@ def generate_suggested_questions(
         })
 
     # Hub risk questions
-    hubs = find_hub_nodes(store, top_n=3, include_tests=include_tests)
+    hubs = find_hub_nodes(
+        store, top_n=3, include_tests=include_tests, include_config=False,
+    )
     edges = store.get_all_edges()
     tested = {
         e.source_qualified
