@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import feign_links as fl
+from .. import terraform_links as tl
 from ..constants import cross_repo_budget_seconds, cross_repo_workers
 from ..endpoint_index import attach as attach_endpoints
 from ..endpoint_index import extract_endpoints, read_endpoint_index
@@ -659,6 +660,105 @@ def _candidate_row(server: fl.ServerEndpoint) -> dict[str, Any]:
     return row
 
 
+def _terraform_links(
+    repos: list[str] | None,
+    module_repo: str | None,
+    module_path: str | None,
+    status: str | None,
+    max_results: int,
+) -> dict[str, Any]:
+    """The ``origin="terraform"`` branch: remote module sources joined to registered repos."""
+    from ..registry import Registry
+
+    if status is not None and status not in tl.STATUSES:
+        raise ValueError(f"status must be one of: {', '.join(tl.STATUSES)}")
+    all_repos = Registry().list_repos()
+    selected: list[dict[str, Any]] = all_repos
+    unknown_shown: list[str] = []
+    if repos:
+        selected, unknown, _ambiguous = _select_repos(all_repos, repos)
+        unknown_shown, _total, _cut = _echoed(unknown)
+    by_id = {id(e): i for i, e in enumerate(all_repos)}
+    budget = cross_repo_budget_seconds()
+    started = _now()
+    edges_by_repo: dict[int, list[dict[str, Any]]] = {}
+    skipped: list[str] = []
+    unreadable: list[str] = []
+    for entry in selected:
+        if budget and _now() - started > budget:
+            skipped.append(_sanitize_name(_repo_label(entry)))
+            continue
+        store = tl.open_store(entry)
+        if store is None:
+            unreadable.append(_sanitize_name(_repo_label(entry)))
+            continue
+        try:
+            found = tl.read_module_edges(store)
+        except (sqlite3.Error, GraphStoreError) as exc:
+            logger.warning("Cannot read module sources of %s: %s", entry["path"], exc)
+            unreadable.append(_sanitize_name(_repo_label(entry)))
+            continue
+        finally:
+            store.close()
+        if found:
+            edges_by_repo[by_id[id(entry)]] = found
+
+    stores: dict[int, Optional[GraphStore]] = {}
+
+    def folder_exists(index: int, subdir: Optional[str]) -> bool:
+        if index not in stores:
+            stores[index] = tl.open_store(all_repos[index])
+        store = stores[index]
+        if store is None:
+            return False
+        try:
+            return tl.module_folder_exists(store, Path(all_repos[index]["path"]), subdir)
+        except sqlite3.Error:
+            return False
+
+    try:
+        rows = tl.resolve_links(edges_by_repo, all_repos, folder_exists)
+    finally:
+        for opened in stores.values():
+            if opened is not None:
+                opened.close()
+    if module_repo:
+        rows = [r for r in rows if r["module_repo"] == module_repo]
+    if module_path:
+        wanted = module_path.strip("/")
+        rows = [
+            r for r in rows
+            if (r["module_path"] or "") == wanted
+            or (r["module_path"] or "").startswith(wanted + "/")
+        ]
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+    shown, total, truncated = _bounded(rows, max_results, 100)
+    for r in shown:
+        for key in ("repo", "file", "module_repo", "module_path", "ref"):
+            if isinstance(r.get(key), str):
+                r[key] = _sanitize_name(r[key])
+    result: dict[str, Any] = {
+        "status": "ok",
+        "summary": f"{total} remote Terraform module source(s) across {len(selected)} repo(s)",
+        "origin": "terraform",
+        "results": shown,
+        "counts": counts,
+        "total": total,
+        "truncated": truncated or bool(skipped),
+        "repos_searched": len(selected) - len(skipped),
+        "unreadable": unreadable,
+    }
+    if skipped:
+        result["skipped_repos"] = skipped
+    if unknown_shown:
+        result["unknown"] = unknown_shown
+    return result
+
+
 def cross_repo_requests_func(
     repos: list[str] | None = None,
     service: str | None = None,
@@ -703,7 +803,11 @@ def cross_repo_requests_func(
             the same query. Each page takes up to ``limit`` more rows from every
             client repo, then keeps the first ``max_results``. Omit it for the
             first page.
-        origin: Only ``feign`` or only ``js`` calls. Default: both.
+        origin: Only ``feign`` or only ``js`` calls. Default: both. ``terraform``
+            lists the remote Terraform module sources the repos name instead (see
+            below); ``service`` then filters by module repo name, ``route`` by
+            module folder prefix, and ``status`` is one of ``matched``,
+            ``module_not_found``, ``ambiguous`` or ``repo_not_registered``.
 
     The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 300,
     0 = unlimited). Once spent, no further client repo is started; those left are
@@ -723,10 +827,12 @@ def cross_repo_requests_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
-    if status is not None and status not in fl.STATUSES:
+    if status is not None and origin != "terraform" and status not in fl.STATUSES:
         raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
-    if origin is not None and origin not in ("feign", "js"):
-        raise ValueError("origin must be one of: feign, js")
+    if origin is not None and origin not in ("feign", "js", "terraform"):
+        raise ValueError("origin must be one of: feign, js, terraform")
+    if origin == "terraform":
+        return _terraform_links(repos, service, route, status, max_results)
 
     try:
         all_repos = Registry().list_repos()

@@ -1933,6 +1933,23 @@ def _is_entry_point(node: Any) -> bool:
         return True
     if _matches_entry_name(node):
         return True
+    return _is_runtime_wired(node)
+
+
+#: Names a framework or the runtime calls, so "nothing calls it" says nothing: hook
+#: registration (``register_hooks``) and hook callbacks (``_on_after_tool_call``), a
+#: CommonJS ``exports.handler`` Lambda entry, and Terragrunt/Terraform ``local`` values,
+#: which are values, not callable code.
+_RUNTIME_WIRED_NAMES = re.compile(
+    r"^(register_hooks|_?on_[a-z0-9_]+|exports\.(handler|[a-z]\w*Handler))$"
+)
+
+
+def _is_runtime_wired(node: Any) -> bool:
+    if _RUNTIME_WIRED_NAMES.match(node.name or ""):
+        return True
+    if getattr(node, "language", None) == "hcl":
+        return (node.extra or {}).get("hcl_type") in ("local", "variable", "output")
     return False
 
 

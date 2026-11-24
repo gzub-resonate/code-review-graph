@@ -1813,7 +1813,13 @@ async def cross_repo_requests_tool(
         limit: Maximum rows per client repo. Default: 20.
         max_results: Maximum rows overall, at most 100. ``counts`` and
             ``total`` cover every call that passed the filters. Default: 50.
-        origin: Only ``feign`` or only ``js`` calls. Default: both.
+        origin: Only ``feign`` or only ``js`` calls. Default: both. ``terraform``
+            lists the remote Terraform module sources (``git::...//modules/x``)
+            the repos name and the registered repo and folder each resolves to:
+            ``service`` filters by module repo name, ``route`` by module folder
+            prefix, ``status`` is ``matched``, ``module_not_found``, ``ambiguous``
+            or ``repo_not_registered``. Use it from a module repo to see which
+            stacks use a module.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
     """
