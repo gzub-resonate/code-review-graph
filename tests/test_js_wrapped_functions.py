@@ -499,13 +499,12 @@ def test_a_wrapped_declaration_keeps_its_type_annotation_reference(tmp_path):
     assert _reference_pairs(path, edges) == {("setup", "Props")}
 
 
-def test_a_directly_assigned_function_does_not_walk_its_annotation(tmp_path):
-    """Only the wrapped form gets its annotation walked.
+def test_a_directly_assigned_function_walks_its_annotation_like_the_wrapped_form(tmp_path):
+    """The direct form references its annotation from the enclosing scope, as the wrapped form does.
 
-    A directly assigned function has only ever had the function itself walked, so
-    `Props` in `const Card: FC<Props> = () => ...` is not referenced from the
-    enclosing scope. #972 leaves that as it is; this pins that the annotation walk
-    added for wrapped declarations does not reach the direct form.
+    `Props` in `const Card: FC<Props> = () => ...` is a use of `Props`. #972 left the direct
+    form unwalked; the dead-code false-positive work walks it, so a type used only through a
+    component's annotation is no longer reported as dead code.
     """
     path, (nodes, edges) = _parse(
         tmp_path,
@@ -519,7 +518,7 @@ def test_a_directly_assigned_function_does_not_walk_its_annotation(tmp_path):
 
     assert set(_functions(nodes)) == {"setup", "Card"}
     assert _call_pairs(path, edges) == {("Card", "paint")}
-    assert _reference_pairs(path, edges) == set()
+    assert _reference_pairs(path, edges) == {("setup", "Props")}
 
 
 _FORK_REF_TEST = (

@@ -331,15 +331,6 @@ def test_graph_reaches_dependents_through_a_barrel_file(barrel_repo: Path) -> No
     assert any(f.endswith("src/consumer.ts") for f in impacted), impacted
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "`export * from './lib'` creates no IMPORTS_FROM edge, so importers_of a "
-        "file reached only through a barrel is empty although the instructions "
-        "route 'which files import file X' to it; a text search for './lib' finds "
-        "the barrel. Graph limitation that predates #1096."
-    ),
-)
 def test_importers_of_includes_a_barrel_that_re_exports_the_file(barrel_repo: Path) -> None:
     from code_review_graph.tools.query import query_graph
 

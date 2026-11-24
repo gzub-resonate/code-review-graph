@@ -238,9 +238,9 @@ def test_body_only_seed_edit_leaves_graph_identical_to_full_build(built):
     result = incremental_update(repo, store, changed_files=['fee.ts'])
 
     assert not result['errors']
-    assert sorted(result['dependent_files']) == ['client.ts', 'use.ts']
+    assert sorted(result['dependent_files']) == ['barrel.ts', 'client.ts', 'use.ts']
     # Listed is not enough: the old update listed them too and skipped them.
-    assert result['files_updated'] == 3
+    assert result['files_updated'] == 4
     _assert_matches_full_build(repo, store)
 
 
@@ -252,7 +252,7 @@ def test_deleted_seed_in_watch_batch_reparses_its_importers(built):
     result = incremental_update(repo, store, changed_files=['fee.ts'], reconcile_stale=False)
 
     assert not result['errors']
-    assert sorted(result['dependent_files']) == ['client.ts', 'use.ts']
+    assert sorted(result['dependent_files']) == ['barrel.ts', 'client.ts', 'use.ts']
     assert not store.get_nodes_by_file(str(repo / 'fee.ts'))
     _assert_matches_full_build(repo, store)
 
@@ -275,7 +275,7 @@ def test_unreadable_seed_still_invalidates_its_dependents(built, monkeypatch):
         repo, store, changed_files=list(RENAMED), reconcile_stale=False,
     )
     assert [e['file'] for e in result['errors']] == ['fee.ts']
-    assert sorted(result['dependent_files']) == ['client.ts', 'use.ts']
+    assert sorted(result['dependent_files']) == ['barrel.ts', 'client.ts', 'use.ts']
 
     monkeypatch.setattr(Path, 'read_bytes', real_read_bytes)
     retry = incremental_update(repo, store, changed_files=['fee.ts'], reconcile_stale=False)
@@ -299,7 +299,7 @@ def test_paths_with_spaces_and_unicode_keep_reexport_callers(tmp_path):
 
         assert not result['errors']
         assert sorted(Path(p).as_posix() for p in result['dependent_files']) == [
-            'src dir/ü client.ts', 'src dir/ü use.ts',
+            'src dir/ü barrel.ts', 'src dir/ü client.ts', 'src dir/ü use.ts',
         ]
         _assert_matches_full_build(repo, store)
     finally:
@@ -466,7 +466,7 @@ def test_permission_error_on_seed_hash_does_not_crash_update(built):
     assert [e['file'] for e in result['errors']] == ['fee.ts']
     # client.ts is reached only through fee.ts, so this fails if an unreadable
     # seed is treated as a replay; use.ts alone is also reached via barrel.ts.
-    assert sorted(result['dependent_files']) == ['client.ts', 'use.ts']
+    assert sorted(result['dependent_files']) == ['barrel.ts', 'client.ts', 'use.ts']
 
 
 @pytest.fixture
