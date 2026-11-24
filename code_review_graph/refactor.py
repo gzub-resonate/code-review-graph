@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import functools
 import io
+import json
 import logging
 import re
 import sys
@@ -1990,6 +1991,76 @@ def _csharp_member_scopes(conn: Any) -> dict[str, set[str]]:
     return scopes
 
 
+_HCL_APPLIED_TYPES = frozenset({"resource", "module", "output", "provider"})
+
+# Files whose functions a browser handler string can name.
+_HANDLER_LANGUAGES = frozenset({
+    "html", "javascript", "typescript", "tsx", "vue", "svelte", "jsx",
+})
+
+
+def _collect_use_evidence(conn: Any) -> tuple[dict[str, set[str]], set[str]]:
+    """Re-exported names per source file, and function names handler strings call.
+
+    ``reexport_names`` is set by the parser on the import edge of an
+    ``__init__.py`` or an ``export ... from`` statement; ``["*"]`` means every
+    public name of the target file. ``inline_handler`` marks a bare
+    ``REFERENCES`` edge made from ``onclick="fn(...)"`` text.
+    """
+    reexported: dict[str, set[str]] = {}
+    handlers: set[str] = set()
+    for kind, target, extra in conn.execute(
+        "SELECT kind, target_qualified, extra FROM edges "
+        "WHERE (kind = 'IMPORTS_FROM' AND instr(extra, 'reexport_names')) "
+        "OR (kind = 'REFERENCES' AND instr(extra, 'inline_handler'))"
+    ):
+        try:
+            data = json.loads(extra) if extra else {}
+        except ValueError:
+            continue
+        if kind == "REFERENCES":
+            if data.get("inline_handler"):
+                handlers.add(target.rsplit("::", 1)[-1])
+            continue
+        names = data.get("reexport_names")
+        if isinstance(names, list):
+            reexported.setdefault(target.split("::", 1)[0], set()).update(
+                n for n in names if isinstance(n, str)
+            )
+    return reexported, handlers
+
+
+def _is_reexported(node: Any, reexported: dict[str, set[str]]) -> bool:
+    names = reexported.get(node.file_path)
+    if not names:
+        return False
+    if node.name in names:
+        return True
+    return "*" in names and not node.name.startswith("_")
+
+
+def _is_scala_entry_point(
+    node: Any,
+    base_targets: dict[str, set[str]],
+    class_methods: dict[tuple[str, str], set[str]],
+) -> bool:
+    """``main`` in an object, ``object ... extends App``, or an object with ``main``."""
+    if node.language != "scala":
+        return False
+    if node.kind == "Function":
+        return node.name == "main" and bool(node.parent_name)
+    if node.extra.get("scala_kind") != "object":
+        return False
+    parents = node.extra.get("scala_parents") or ()
+    bases = {
+        t.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+        for t in base_targets.get(node.qualified_name, ())
+    }
+    if "App" in bases or "App" in parents:
+        return True
+    return "main" in class_methods.get((node.file_path, node.name), ())
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -2074,6 +2145,7 @@ def find_dead_code(
     importer_files: dict[str, set[str]] = {}
     csharp_member_scopes: dict[str, set[str]] | None = None
     conn = store._conn
+    reexported_names, inline_handler_names = _collect_use_evidence(conn)
     for row in conn.execute(
         "SELECT e.kind, e.source_qualified, e.target_qualified, e.file_path, n.language, "
         f"CASE WHEN instr(e.extra, '\"{CLAIMED_ENDPOINT_KEY}\"') AND json_valid(e.extra) "
@@ -2096,7 +2168,11 @@ def find_dead_code(
         if _STORYBOOK_FILE_RE.search(file_path):
             continue
         incoming_kinds.setdefault(target, set()).add(edge_kind)
-        if edge_kind in ("CALLS", "INHERITS"):
+        if edge_kind in ("CALLS", "INHERITS") or (
+            # A type or ``Name.member`` use written without an import (Java and
+            # Scala same-package classes) names only the class.
+            edge_kind == "REFERENCES" and "/" not in target and "::" not in target
+        ):
             bare_files_by_language.setdefault((edge_kind, target, language), set()).add(file_path)
             bare_files_all.setdefault((edge_kind, target), set()).add(file_path)
         if edge_kind == "CALLS":
@@ -2190,6 +2266,13 @@ def find_dead_code(
                         return True
         return False
 
+    class_methods: dict[tuple[str, str], set[str]] = {}
+    for method_file, method_parent, method_name in conn.execute(
+        "SELECT file_path, parent_name, name FROM nodes "
+        "WHERE kind = 'Function' AND language = 'scala' AND parent_name IS NOT NULL"
+    ):
+        class_methods.setdefault((method_file, method_parent), set()).add(method_name)
+
     dead: list[dict[str, Any]] = []
 
     for node in candidates:
@@ -2244,6 +2327,30 @@ def find_dead_code(
         # its implementations, so it cannot be dead on its own (like Python's
         # @abstractmethod, handled below).
         if node.extra.get("abstract"):
+            continue
+
+        # Terraform applies a root-module resource, module call, output and
+        # provider; nothing references them, so "unreferenced" says nothing.
+        # Variables and locals stay: an unused one really is dead.
+        if node.extra.get("hcl_type") in _HCL_APPLIED_TYPES:
+            continue
+
+        # Scala: ``main`` in an object, and an object that has one or extends
+        # ``App``, is a ``spark-submit --class`` / JVM entry point.
+        if _is_scala_entry_point(node, base_targets, class_methods):
+            continue
+
+        # Re-exported from a package ``__init__.py`` or a ``export ... from``.
+        if not node.parent_name and _is_reexported(node, reexported_names):
+            continue
+
+        # Named by an inline handler string (``onclick="fn(...)"``).
+        if (
+            node.kind == "Function"
+            and not node.parent_name
+            and node.language in _HANDLER_LANGUAGES
+            and node.name in inline_handler_names
+        ):
             continue
 
         # Skip entry points (by name pattern or decorator, not just "uncalled").
@@ -2379,6 +2486,11 @@ def find_dead_code(
             if ("INHERITS" in incoming_kinds.get(node.name, ())
                     and _bare_files(node.name, node.language or "", "INHERITS")):
                 incoming.add("INHERITS")
+        if node.kind == "Class" and "REFERENCES" not in incoming and any(
+            _is_plausible_caller(file, node.file_path, node.name)
+            for file in _bare_files(node.name, node.language or "", "REFERENCES")
+        ):
+            incoming.add("REFERENCES")
         has_callers = "CALLS" in incoming
         has_test_refs = bool(outgoing_tb)
         has_importers = "IMPORTS_FROM" in incoming

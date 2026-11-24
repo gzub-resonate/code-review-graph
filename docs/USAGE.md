@@ -343,6 +343,12 @@ Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/
 Their imports, calls, and references alone do not keep application symbols alive in
 dead-code reports. Normal application callers and ordinary test evidence still count.
 
+Dead-code reports also count uses that no call names: a bare name passed as a value
+(`xs.map(fn)`), a type in a type position, a `Class.MEMBER` read, a name re-exported from an
+`__init__.py` or by `export { X } from` / `export * from`, a Scala `main` or `extends App`
+object, a handler string such as `onclick="fn(...)"`, and Terraform `resource`, `module`,
+`output` and `provider` blocks. Rebuild an existing graph once to record the new evidence.
+
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests, YamlPaths, DocSections, JsonPaths, Variables and Outputs (Liquid templates), plus Endpoints, Schedulers, Events and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, REQUESTS, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB, TRANSITIONS_TO)
 - **Confidence**: each `CALLS`, `REFERENCES` and `TESTED_BY` edge has a `confidence_tier`: `EXTRACTED` (1.0) when the source names a real node, `INFERRED` (0.8, or the resolver's own score) when a resolver chose it, `AMBIGUOUS` (0.4) when several nodes fit, and `UNRESOLVED` (0.2) when none does
