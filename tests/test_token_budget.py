@@ -1158,7 +1158,11 @@ class TestTruncationContract:
         assert result["results_omitted"] == result["total"] - 1
         assert f"showing 1 of {result['total']}" in result["summary"]
 
-    def test_large_functions_fetches_only_what_it_shows(self, repo, monkeypatch):
+    def test_large_functions_reads_each_kind_once_and_shows_only_a_page(
+        self, repo, monkeypatch,
+    ):
+        # Test, mock and generated files are filtered after the read, so the rows are read
+        # unbounded (once per kind) and only a page is returned.
         asked: list[int] = []
         real = GraphStore.get_nodes_by_size
 
@@ -1167,11 +1171,12 @@ class TestTruncationContract:
             return real(self, *args, **kwargs)
 
         monkeypatch.setattr(GraphStore, "get_nodes_by_size", spy)
-        _invoke(
+        reply = _invoke(
             crg_main.find_large_functions_tool,
             repo_root=repo["root"], min_lines=1, limit=HUGE,
         )
-        assert asked == [query._MAX_LARGE_FUNCTIONS_STANDARD]
+        assert asked == [-1]
+        assert len(reply["results"]) <= query._MAX_LARGE_FUNCTIONS_STANDARD
 
     def test_large_functions_minimal_costs_less_than_standard(self, repo):
         standard = _invoke(

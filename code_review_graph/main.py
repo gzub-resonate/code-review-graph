@@ -919,16 +919,20 @@ async def find_large_functions_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
-    """Find functions, classes, or files exceeding a line-count threshold.
+    """Find functions and methods exceeding a line-count threshold.
 
     Useful for decomposition audits, code quality checks, and enforcing
-    size limits during code review. Results are ordered by line count.
+    size limits during code review. Results are ordered by line count. By
+    default only functions and methods are ranked, and test, mock, story and
+    generated files are left out.
 
     Args:
         min_lines: Minimum line count to flag. Default: 50.
-        kind: Optional filter: Function, Class, File, Test, YamlPath, DocSection,
-            or JsonPath.
+        kind: Override the default (Function): one kind or a comma separated list
+            of Function, Class, File, Test, YamlPath, DocSection or JsonPath.
+            A class that spans its whole file is dropped when File is also asked for.
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results. Default: 50. At most 100, or 25 with
             detail_level "minimal". ``total`` always counts every match.
@@ -937,6 +941,8 @@ async def find_large_functions_tool(
             Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_tests: Also rank Test nodes and nodes in test, mock, story and
+            generated files. Default: false.
 
     Returns oversized nodes; ``next_cursor`` is present when more remain.
     """
@@ -946,6 +952,7 @@ async def find_large_functions_tool(
         lambda: find_large_functions(
             min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
             limit=limit, repo_root=root, detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )

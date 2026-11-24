@@ -1213,6 +1213,7 @@ def query_graph(
         results: list[dict[str, Any]] = []
         edges_out: list[dict[str, Any]] = []
         total_results = 0
+        handler_as_target = False
         # Results matched by a name or an unpinned call, not a traced edge.
         inferred_results = 0
         # (dedupe key, row, edge) for the call-site patterns, collected before
@@ -1827,6 +1828,16 @@ def query_graph(
                     add_result(node_to_dict(handler), edge)
                 else:
                     edges_out.append(edge_to_dict(edge))
+            if total_results == 0 and node is not None and node.kind != "Endpoint":
+                # The target is a handler, not an endpoint: answer with the
+                # endpoints it serves, as a reader who named it expects.
+                for edge in store.get_edges_by_source(qn):
+                    if edge.kind != "HANDLES":
+                        continue
+                    endpoint = store.get_node(edge.target_qualified)
+                    if endpoint and endpoint.kind == "Endpoint":
+                        add_result(node_to_dict(endpoint), edge)
+                        handler_as_target = True
 
         elif pattern == "endpoints_for":
             for edge in store.get_edges_by_source(qn):
@@ -1931,6 +1942,12 @@ def query_graph(
         confidence: str | None = None
         if total_results == 0:
             confidence = empty_query_confidence(store, root, pattern, target, node)
+        elif handler_as_target:
+            confidence = (
+                f"'{_sanitize_name(node.name if node else target)}' is a handler, not an "
+                "endpoint: handlers_of takes an endpoint, so these rows are the endpoints "
+                "it serves (what endpoints_for returns)"
+            )
         elif resolution == RESOLUTION_ALL:
             confidence = guessed_calls_confidence(resolution_split)
 
@@ -2425,6 +2442,38 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+#: What ``find_large_functions`` ranks when ``kind`` is not given: callables only. A File
+#: node is its file's size and a Class node that spans its file repeats it, so listing them
+#: by default fills the top of the list with the same file twice.
+_LARGE_DEFAULT_KINDS = ("Function",)
+_LARGE_KNOWN_KINDS = frozenset({
+    "Function", "Class", "File", "Test", "Type", "YamlPath", "DocSection", "JsonPath",
+})
+#: Mock, fixture and story directories and generated or baseline files: sized by hand-written
+#: data, not by logic a reviewer would split. Left out unless ``include_tests`` is true.
+_NON_PRODUCTION_PATH_RE = re.compile(
+    r"(^|/)(__mocks__|mocks?|msw|fixtures?|__generated__|generated)/"
+    r"|\.(stories|generated|min)\.|_pb2(_grpc)?\.py$|baseline[^/]*\.sql$",
+    re.IGNORECASE,
+)
+
+
+def _large_kinds(kind: str | None, include_tests: bool) -> tuple[str, ...]:
+    """The node kinds to rank: ``kind`` (comma separated) or the callable default."""
+    if kind:
+        kinds = tuple(k.strip() for k in kind.split(",") if k.strip())
+        if kinds:
+            return kinds
+    return _LARGE_DEFAULT_KINDS + (("Test",) if include_tests else ())
+
+
+def _is_non_production_file(path: str, root: str | Path) -> bool:
+    """Whether *path* is a test, mock, story or generated file."""
+    if is_test_file(path, root):
+        return True
+    return bool(_NON_PRODUCTION_PATH_RE.search(repo_relative_path(path, root) or path))
+
+
 def find_large_functions(
     min_lines: int = 50,
     kind: str | None = None,
@@ -2433,24 +2482,33 @@ def find_large_functions(
     repo_root: str | None = None,
     detail_level: str = "standard",
     cursor: str | None = None,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
-    """Find functions, classes, or files exceeding a line-count threshold.
+    """Find functions, or the node kinds you name, exceeding a line-count threshold.
 
     Useful for identifying decomposition targets, code-quality audits,
-    and enforcing size limits during code review.
+    and enforcing size limits during code review. By default only functions and
+    methods are ranked (a File node is just its file's size, and a Class that spans
+    its file repeats it), and test, mock, story and generated files are left out.
 
     Args:
         min_lines: Minimum line count to flag (default: 50).
-        kind: Filter by node kind: Function, Class, File, or Test.
+        kind: Override the default: one node kind or a comma separated list, e.g.
+            "Class", "File" or "Function,Class". When File and Class are both
+            requested, a class that spans its whole file is dropped in favour of the
+            File node.
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results (default: 50, at most 100, or 25 with
             detail_level "minimal").
         repo_root: Repository root path. Auto-detected if omitted.
-        detail_level: "standard" (full rows) or "minimal" (fewer, smaller rows).
+        detail_level: "standard" (full rows) or "minimal" (fewer, smaller rows, and a
+            summary that does not repeat them).
         cursor: ``next_cursor`` from the previous reply, to read the next page
             (the page size is ``limit`` and may change between pages). A cursor
-            is refused if ``min_lines``, ``kind``, ``file_path_pattern`` or the
-            graph differ from the call that made it.
+            is refused if ``min_lines``, ``kind``, ``file_path_pattern``,
+            ``include_tests`` or the graph differ from the call that made it.
+        include_tests: Also rank Test nodes and nodes in test, mock, story and
+            generated files. Default: false.
 
     Returns:
         Oversized nodes with line counts, ordered largest first and equal sizes
@@ -2464,37 +2522,50 @@ def find_large_functions(
         limit,
         _MAX_LARGE_FUNCTIONS_MINIMAL if minimal else _MAX_LARGE_FUNCTIONS_STANDARD,
     )
+    kinds = _large_kinds(kind, include_tests)
 
     store, root = _get_store(repo_root)
     try:
-        total = store.count_nodes_by_size(
-            min_lines=min_lines,
-            kind=kind,
-            file_path_pattern=file_path_pattern,
-        )
+        candidates = []
+        for k in kinds:
+            candidates.extend(store.get_nodes_by_size(
+                min_lines=min_lines, kind=k, file_path_pattern=file_path_pattern, limit=-1,
+            ))
+        if not include_tests:
+            candidates = [
+                n for n in candidates
+                if n.kind != "Test" and not n.is_test
+                and not _is_non_production_file(n.file_path, root)
+            ]
+
+        def _lines(n: Any) -> int:
+            return n.line_end - n.line_start + 1 if n.line_start and n.line_end else 0
+
+        if "File" in kinds and "Class" in kinds:
+            file_lines = {n.file_path: _lines(n) for n in candidates if n.kind == "File"}
+            candidates = [
+                n for n in candidates
+                if not (
+                    n.kind == "Class" and n.file_path in file_lines
+                    and _lines(n) >= file_lines[n.file_path] - 1
+                )
+            ]
+        candidates.sort(key=lambda n: (-_lines(n), n.id))
+        total = len(candidates)
+
         scope = make_scope(
             "find_large_functions_tool", min_lines=min_lines, kind=kind,
-            file_path_pattern=file_path_pattern,
+            file_path_pattern=file_path_pattern, include_tests=include_tests,
         )
         stamp = graph_stamp(store)
-        offset = _cursor_offset(cursor, scope, stamp)
-        nodes = store.get_nodes_by_size(
-            min_lines=min_lines,
-            kind=kind,
-            file_path_pattern=file_path_pattern,
-            limit=shown_limit,
-            offset=offset,
+        page = paginate(
+            candidates, shown_limit, shown_limit, cursor, scope=scope, stamp=stamp,
         )
-        page = _window_page(nodes, total, offset, shown_limit, shown_limit, cursor, scope, stamp)
 
         results = []
-        for n in nodes:
+        for n in page.items:
             d = node_to_dict(n)
-            d["line_count"] = (
-                (n.line_end - n.line_start + 1)
-                if n.line_start and n.line_end
-                else 0
-            )
+            d["line_count"] = _lines(n)
             # Make file_path relative for readability
             try:
                 d["relative_path"] = str(Path(n.file_path).relative_to(root))
@@ -2502,20 +2573,21 @@ def find_large_functions(
                 d["relative_path"] = n.file_path
             results.append(d)
 
+        kind_label = ",".join(kinds)
         summary_parts = [
-            f"Found {total} node(s) with >= {min_lines} lines"
-            + (f" (kind={kind})" if kind else "")
+            f"Found {total} {kind_label} node(s) with >= {min_lines} lines"
             + (f" matching '{file_path_pattern}'" if file_path_pattern else "")
             + shown_range(page)
-            + ":",
+            + (":" if not minimal else "; see results."),
         ]
-        for r in results[:10]:
-            summary_parts.append(
-                f"  {r['line_count']:>4} lines | {r['kind']:>8} | "
-                f"{r['name']} ({r['relative_path']}:{r['line_start']})"
-            )
-        if len(results) > 10:
-            summary_parts.append(f"  ... and {len(results) - 10} more")
+        if not minimal:
+            for r in results[:10]:
+                summary_parts.append(
+                    f"  {r['line_count']:>4} lines | {r['kind']:>8} | "
+                    f"{r['name']} ({r['relative_path']}:{r['line_start']})"
+                )
+            if len(results) > 10:
+                summary_parts.append(f"  ... and {len(results) - 10} more")
 
         if minimal:
             results = [
@@ -2536,6 +2608,8 @@ def find_large_functions(
             "results_omitted": total - len(results),
             "truncated": page.truncated,
             "min_lines": min_lines,
+            "kind": kind_label,
+            "include_tests": include_tests,
             "results": results,
             **page.fields(),
         }

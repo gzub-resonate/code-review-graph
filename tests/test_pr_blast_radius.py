@@ -392,3 +392,151 @@ def test_names_in_migration_rows_are_sanitised(pull_request):
     assert rows
     for row in rows:
         assert not any(ord(ch) < 32 or ord(ch) == 127 for ch in row["file"] + row["target"])
+
+
+# --- config paths, endpoints of a changed controller, a pull request already merged ---------
+
+YAML_BASE = (
+    "spring:\n  app:\n    client:\n      connect-timeout: 2000\n      logger-level: NONE\n"
+    "    old-key: gone\n"
+)
+YAML_PR = (
+    "spring:\n  app:\n    client:\n      connect-timeout: 2500\n      logger-level: NONE\n"
+    "      read-timeout: 10000\n"
+)
+PLAIN_BASE = "a:\n  b: 1  # note\n  c: x\n  d: keep\n"
+PLAIN_PR = "a:\n  b: 1  # another note\n  c: y\n  e: new\n  d: keep\n"
+JSON_BASE = '{"retries": 3, "name": "svc", "gone": true}'
+JSON_PR = '{"retries": 5, "name": "svc", "added": {"x": 1}}'
+CONTROLLER_BASE = """package a;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/v2/things")
+public class Ctl {
+
+    @GetMapping("/{id}")
+    public String one(@PathVariable String id) {
+        return id;
+    }
+
+    @PostMapping("/x")
+    public String two() {
+        return "x";
+    }
+}
+"""
+CONTROLLER_PR = CONTROLLER_BASE.replace(
+    "    @PostMapping",
+    '    @GetMapping("/{id}/file")\n    public String file(@PathVariable String id) {\n'
+    "        return id;\n    }\n\n    @PostMapping",
+)
+
+
+@pytest.fixture
+def config_pull_request(tmp_path, registry):
+    """A Spring-like service: YAML, JSON and a controller change on the PR branch."""
+    svc = (tmp_path / "svc").resolve()
+    svc.mkdir()
+    git(svc, "init", "-q", "-b", "main")
+    write(svc, "src/main/resources/application.yml", YAML_BASE)
+    write(svc, "settings.yml", PLAIN_BASE)
+    write(svc, "conf.json", JSON_BASE)
+    write(svc, "src/main/java/a/Ctl.java", CONTROLLER_BASE)
+    git(svc, "add", "-A")
+    git(svc, "commit", "-q", "-m", "base")
+    git(svc, "branch", "topic")
+    with GraphStore(get_db_path(svc)) as store:
+        full_build(svc, store)
+    git(svc, "checkout", "-q", "-b", "pr")
+    write(svc, "src/main/resources/application.yml", YAML_PR)
+    write(svc, "settings.yml", PLAIN_PR)
+    write(svc, "conf.json", JSON_PR)
+    write(svc, "src/main/java/a/Ctl.java", CONTROLLER_PR)
+    git(svc, "add", "-A")
+    git(svc, "commit", "-q", "-m", "pr")
+    git(svc, "checkout", "-q", "main")
+    write(svc, "later.txt", "later\n")
+    git(svc, "add", "-A")
+    git(svc, "commit", "-q", "-m", "later")
+    return svc
+
+
+def config_rows(result):
+    return {(r["file"].rsplit("/", 1)[-1], r["path"]): r["change"]
+            for r in result["config_changes"]}
+
+
+def test_spring_application_yml_changes_are_reported(config_pull_request):
+    rows = config_rows(run(config_pull_request))
+    assert rows[("application.yml", "spring.app.client.connectTimeout")] == "changed"
+    assert rows[("application.yml", "spring.app.client.readTimeout")] == "added"
+    assert rows[("application.yml", "spring.app.oldKey")] == "removed"
+    assert ("application.yml", "spring.app.client.loggerLevel") not in rows
+
+
+def test_plain_yaml_paths_compare_by_path_and_value_not_comments(config_pull_request):
+    rows = config_rows(run(config_pull_request))
+    assert rows[("settings.yml", "$.a.c")] == "changed"
+    assert rows[("settings.yml", "$.a.e")] == "added"
+    assert ("settings.yml", "$.a.b") not in rows  # only its trailing comment changed
+    assert ("settings.yml", "$.a.d") not in rows
+
+
+def test_minified_json_compares_values_per_path(config_pull_request):
+    rows = config_rows(run(config_pull_request))
+    assert rows[("conf.json", "$.retries")] == "changed"
+    assert rows[("conf.json", "$.gone")] == "removed"
+    assert rows[("conf.json", "$.added")] == "added"
+    assert ("conf.json", "$.name") not in rows
+
+
+def test_config_rows_carry_no_values_and_the_summary_counts_them(config_pull_request):
+    result = run(config_pull_request)
+    assert "2500" not in str(result["config_changes"])
+    assert "config path(s) changed" in result["summary"]
+    assert result["totals"]["config_paths_changed"] == len(result["config_changes"])
+    row = file_row(result, "application.yml")
+    assert row["config_changes"] == {"added": 1, "changed": 1, "removed": 1}
+
+
+def test_config_paths_are_capped_per_file(config_pull_request, monkeypatch):
+    monkeypatch.setattr(pbr, "MAX_CONFIG_PATHS_PER_FILE", 1)
+    result = run(config_pull_request)
+    assert result["config_changes_truncated"] is True
+    assert len([r for r in result["config_changes"] if r["file"].endswith("settings.yml")]) == 1
+
+
+def test_only_endpoints_whose_handler_changed_are_affected(config_pull_request):
+    result = run(config_pull_request)
+    affected = {(e["http_method"], e["route"]) for e in result["endpoints"]}
+    assert affected == {("GET", "/v2/things/{id}/file")}
+    others = {(e["http_method"], e["route"]) for e in result["same_file_endpoints"]}
+    assert others == {("GET", "/v2/things/{id}"), ("POST", "/v2/things/x")}
+    assert result["totals"]["endpoints"] == 1
+    assert result["totals"]["same_file_endpoints"] == 2
+    assert result["totals"]["external_callers"] == 0
+
+
+def test_an_edited_handler_makes_its_endpoint_affected(config_pull_request):
+    git(config_pull_request, "checkout", "-q", "pr")
+    text = CONTROLLER_PR.replace('return "x";', 'return "y";')
+    write(config_pull_request, "src/main/java/a/Ctl.java", text)
+    git(config_pull_request, "add", "-A")
+    git(config_pull_request, "commit", "-q", "-m", "edit")
+    git(config_pull_request, "checkout", "-q", "main")
+    affected = {e["route"] for e in run(config_pull_request)["endpoints"]}
+    assert affected == {"/v2/things/{id}/file", "/v2/things/x"}
+
+
+def test_a_head_that_is_an_ancestor_of_the_base_says_it_is_merged(config_pull_request):
+    result = run(config_pull_request, head="topic")
+    assert result["status"] == "ok" and result["total_files"] == 0
+    assert result["already_merged"] is True
+    assert "already merged into main" in result["summary"]
+    assert "graph already includes it" in result["summary"]
+
+
+def test_a_head_that_differs_is_not_called_merged(config_pull_request):
+    assert "already merged" not in run(config_pull_request)["summary"]

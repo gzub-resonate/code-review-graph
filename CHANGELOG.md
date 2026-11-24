@@ -12,9 +12,59 @@
   endpoints and `query_keys` on JavaScript calls, and the most specific handler whose conditions
   can hold is kept. Several handlers in one repository remain `matched` with all candidates
   (documented behavior); only a call whose query is unknown lists them all.
+- `find_large_functions_tool` ranks functions and methods by default. It used to list each file twice
+  (a File node and the Class node spanning it) and fill the top with test files, msw handlers,
+  `.stories.tsx` files and an 18,754-line SQL baseline. `kind` still overrides (one kind or a comma
+  list; a class spanning its file is dropped when File is also listed), `include_tests=true` (CLI
+  `--include-tests`) brings back tests, mocks and generated files, and with `detail_level="minimal"`
+  the summary no longer repeats the hits.
+- `semantic_search_nodes_tool` ranks YamlPath, JsonPath and DocSection nodes at half score unless the
+  query names configuration (a `$` path, `.yml`/`.json`, a dotted key, or such a `kind`), so a
+  workflow's `$.on.schedule` no longer outranks the code that does the scheduling.
+- A Spring mapping such as `@PostMapping(path = {"", "/"})` produced two identical Endpoint nodes
+  for one route, so `get_review_context_tool` listed the endpoint twice. It is now one endpoint
+  whose `path_variants` lists the spellings.
+- `pr_blast_radius_tool` and `detect_changes_tool` with `pr` or `head` now report the configuration
+  a pull request changes. A YAML, JSON or Spring `.properties` file of the pull request is parsed in
+  memory and compared with the base, path by path; each path the pull request adds, changes (its
+  value hash differs, so a comment or a reformatting is not a change) or removes is listed. A Spring
+  `application.yml` is indexed as `ConfigProperty` nodes, which `changed_yaml_paths` skipped, so an
+  8-line timeout change to it used to show `changed_yaml_path_count: 0`. `pr_blast_radius_tool`
+  adds `config_changes` (file, `change`, kind, path, line, value type; never the value), and
+  `detect_changes_tool` puts the same paths in `changed_yaml_paths` and `changed_json_paths` with a
+  `change` field. Lists are capped per file (200), in all (1000) and by files compared (50); the
+  result says when they are cut.
+- `pr_blast_radius_tool` no longer counts every endpoint of a changed file as affected. `endpoints`
+  and `external_callers` now cover a route the pull request adds or removes, an endpoint whose
+  handler it adds or changes (or whose own lines it edits) and one a changed symbol reaches. The
+  other endpoints of the same files come back in `same_file_endpoints` and their callers are not
+  counted.
+- A pull request that is already merged (its head commit is an ancestor of the base) is no longer a
+  bare "No files differ" or "No changed files detected". Both tools say "Pull request already merged
+  into <base>; the graph already includes it" and set `already_merged`. It is read from Git's merge
+  base, not from GitHub.
 
 ### Added
 
+- Step Functions state machines now start flows. The `StartAt` state of each machine is a flow entry
+  point, and the flow follows `TRANSITIONS_TO` (next, choice, catch, Parallel branch, Map
+  processor) and the inferred link from a Task state to its Terraform Lambda or ECS task
+  definition. The flow is named by the machine. Machine and state nodes keep their kinds (`Class`
+  and `Function`: no new kind, no schema change) but now record `asl_role`, `state_machine`,
+  `state_path`, `is_machine_start`, `display_name` (`orders/Notify Failure`, `statemachine orders`)
+  and an indexed `docstring` naming the machine, so identical state names from different machines
+  can be told apart in search. Responses carry `display_name` for ASL nodes.
+
+- Terraform and Terragrunt flows. A root module (a directory with `terragrunt.hcl`, or `.tf` files that
+  no other directory calls) is now a flow entry point, named `terraform:<dir>`. The flow follows each
+  `module "x" { source = "./path" }` call, and a Terragrunt `terraform { source = ... }`, into the
+  called directory, and ends at the `resource`, `data` and `module` blocks they declare. Variables,
+  outputs, locals and providers are not steps. A root that creates many resources ranks high (resource
+  count replaces the external-call weight in its criticality). Nothing is added to the schema: the
+  schema version is unchanged and the node kinds stay `Class` and `Function`. The block type is read
+  from the `extra.hcl_type` the parser already wrote (`resource`, `data`, `module`, `variable`,
+  `output`, `local`, `provider`) and is now returned as `hcl_type` by node results and by the steps of
+  `get_flow`. On a copy of resonate-terraform the flow count went from 100 to 1067.
 - `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has
   no callers in the graph, so it used to look safe: a pull request adding 75 production symbols
   reported one changed function. `pull_request.new_code` gives the totals (symbols added, tests
@@ -329,6 +379,18 @@
 
 ### Fixed
 
+- Dunder methods (`__init__`, `__repr__`) are no longer flow entry points just because nothing calls
+  them by name. A framework decorator or an entry name such as `__main__` still makes one.
+- `query_graph_tool` `handlers_of` on a FastAPI handler (for example `token_endpoint`) returned 0
+  with "a real absence", because `handlers_of` takes an endpoint and HANDLES edges run from the
+  handler to it. Given a handler, it now returns the endpoints that handler serves and says so in
+  `confidence`. An empty `handlers_of` or `endpoints_for` for a decorated or handler-like function
+  no longer says "a real absence": it says the route may not be statically visible and names what
+  was checked.
+- Python route detection takes `@router.websocket(...)` (method `WEBSOCKET`), the decorator-free
+  `add_api_route`, `add_api_websocket_route` and `add_url_rule` registrations (including Flask
+  `View.as_view(...)`) and `include_router(router=...)`. A decorator on an imported object that does
+  not read as a router (`@cache.get(...)` with `from app.cache import cache`) is no longer a route.
 - A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
   declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
   unresolved unless the base class was imported, so `callers_of` and impact radius missed every

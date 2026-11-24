@@ -131,7 +131,7 @@ code-review-graph flow --id ID | --name NAME [--source]
 code-review-graph communities [--sort size] [--min-size N]
 code-review-graph community --id ID | --name NAME [--members]
 code-review-graph architecture [--detail-level minimal|standard]
-code-review-graph large-functions [--min-lines N] [--kind Function] [--path SUBSTR] [--limit N]
+code-review-graph large-functions [--min-lines N] [--kind Function] [--path SUBSTR] [--limit N] [--include-tests]
 code-review-graph refactor rename --old-name A --new-name B
 code-review-graph refactor dead_code [--kind Function] [--path SUBSTR]
 code-review-graph refactor suggest
@@ -648,7 +648,9 @@ expand_neighbors: bool = False   # With include_source: also the top hits' calle
 max_source_lines: int = 60       # Lines per snippet (1-60)
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 ```
-Search ranks three times what it shows. `total` and `result_count` count the
+Search ranks three times what it shows. YamlPath, JsonPath and DocSection hits score half
+(`_CONFIG_RANK_FACTOR`) unless the query names configuration: a `$` path, a file name such
+as `.yml` or `.json`, a dotted key such as `spring.datasource.url`, or one of those kinds in `kind`. `total` and `result_count` count the
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
 says there may be more.
 
@@ -683,14 +685,21 @@ repo_root: str | None
 #### `find_large_functions_tool`
 ```
 min_lines: int = 50                # Minimum line count
-kind: str | None                   # File, Class, Function, Test, YamlPath, DocSection, or JsonPath
+kind: str | None                   # Default Function. One kind or a comma list: Function, Class,
+                                   # File, Test, YamlPath, DocSection, JsonPath
 file_path_pattern: str | None      # File path substring
 limit: int = 50                    # At most 100; at most 25 with detail_level "minimal"
 repo_root: str | None
 detail_level: str = "standard"     # "minimal" gives fewer, smaller rows
 cursor: str | None                 # next_cursor of the previous reply (see Paging)
+include_tests: bool = False        # Also rank Test nodes and test, mock, story, generated files
 ```
-`total` and `result_count` count every match before the cut.
+`total` and `result_count` count every match before the cut. Without `kind` only functions and
+methods are ranked: a File node is only its file's size and a Class that spans its file repeats
+it. With `kind="File,Class"` a class that spans its whole file is dropped in favour of the File
+node. Unless `include_tests` is true, Test nodes and nodes in test files, `mocks/`, `msw/`,
+`fixtures/` and generated directories, `.stories.` files and baseline `.sql` dumps are left out.
+With `detail_level="minimal"` the summary is one line; the hits are in `results` only.
 
 #### `get_docs_section_tool`
 ```
@@ -855,6 +864,9 @@ head: str = None             # Or a ref/commit to read the changed files from; b
                              # `pull_request.new_code` scores the production symbols the pull request adds (totals; and
                              # beyond minimal, scored rows with `coverage`, `reasons` and linked `tests`), and the
                              # overall `risk_score` becomes the higher of that and the changed symbols' (`risk_breakdown`)
+                             # Config paths the pull request adds, changes or removes (YAML, JSON, Spring properties) are
+                             # in `changed_yaml_paths` / `changed_json_paths`, each with `change`. A pull request already
+                             # merged (head is an ancestor of the base) says so and sets `already_merged`.
 ```
 Main tool for code review. Maps changed files to affected functions, YAML and JSON
 paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and
@@ -1084,8 +1096,16 @@ exact route fits; a catch-all at the root matches nothing. Its candidate has
 Python servers are indexed too, so a frontend or another service can reach
 them. FastAPI and Starlette-style routers (`APIRouter`, `FastAPI`) and Flask
 (`Flask`, `Blueprint`) routes are read from `@router.get/post/put/patch/delete/head/options`,
-`@app.api_route(path, methods=[...])` and `@app.route(path, methods=[...])`
-(default `GET`), with Flask `<int:id>` turned into `{id}` and a trailing
+`@router.websocket(path)` (method `WEBSOCKET`), `@app.api_route(path, methods=[...])` and
+`@app.route(path, methods=[...])` (default `GET`), and from the decorator-free
+`router.add_api_route(path, handler)`, `add_api_websocket_route` and
+`add_url_rule(rule, view_func=...)` (a `View.as_view(...)` handler is the class) when the handler is
+defined in the same file. The receiver must be a router: one built by `APIRouter`, `FastAPI`,
+`Blueprint` or `Flask` in the file, or an imported name that reads as one (`app`, `router`,
+`oauth_router`, `bp`), so `@cache.get(...)` is not a route. `handlers_of` takes an endpoint; given a
+handler it returns the endpoints it serves and says so in `confidence`. An empty `endpoints_for` for a
+decorated or handler-like function says the route may not be statically visible rather than a real
+absence. Flask `<int:id>` turned into `{id}` and a trailing
 `{name:path}` or `<path:name>` read as a catch-all. A route's full path is the
 prefix of every router above it plus its own path: `APIRouter(prefix=...)`,
 `Blueprint(url_prefix=...)` and the `prefix=` or `url_prefix=` of
@@ -1182,7 +1202,12 @@ new file has it) and **removed** (only the base graph has it), `reached` (what d
 over the same edge kinds the impact radius follows, `depth` hops out; `reached_tests` counts the tests among them
 separately), `same_repo_files` and the changed members no test
 names (`untested`). `contract_changes` lists routes the pull request adds or removes. `endpoints` lists the endpoints it
-adds, removes or reaches, each with `external_callers`; `external_callers` lists the client calls in the other registered
+adds, removes or reaches, or whose handler it adds or changes, each with `external_callers`; `same_file_endpoints` lists
+the other endpoints of the changed files, which are not affected and whose callers are not counted. `config_changes`
+lists the YAML, JSON and Spring `.properties` paths the pull request adds, changes or removes (`change`, `kind`, `path`,
+`line`, `value_type`; values are compared by hash and never returned; at most 200 per file, 1000 in all, 50 files, with
+`config_changes_truncated`). A pull request whose head is already an ancestor of the base answers `already_merged: true`
+and a summary saying the graph already includes it. `external_callers` lists the client calls in the other registered
 repos (Feign, JavaScript and TypeScript) that reach them, read from each repo's stored endpoint index. `schema_changes`
 lists the DDL in migration files the pull request adds or changes. `notes` states what the answer rests on: a stacked
 pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow
