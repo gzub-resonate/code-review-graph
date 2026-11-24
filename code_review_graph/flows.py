@@ -645,6 +645,55 @@ def _matches_entry_name(node: GraphNode) -> bool:
     return False
 
 
+_DUNDER_NAME = re.compile(r"^__\w+__$")
+
+
+def _not_a_flow_root(node: GraphNode) -> bool:
+    """Whether *node* must not start a flow just because nothing calls it.
+
+    * A dunder method (``__init__``, ``__repr__``) is called by the runtime, never by name,
+      so "no incoming CALLS" says nothing about it; it stays an entry only through a
+      framework decorator or an entry name such as ``__main__``.
+    * A Step Functions state has no CALLS edges, so every one would be a root. Only the
+      ``StartAt`` state of a machine is (see :func:`_add_asl_edges`).
+    """
+    if node.language == "asl":
+        return not node.extra.get("is_machine_start")
+    return bool(
+        _DUNDER_NAME.match(node.name)
+        and not _matches_entry_name(node)
+        and not _has_framework_decorator(node)
+    )
+
+
+def _add_asl_edges(store: GraphStore, adj: FlowAdjacency) -> None:
+    """Let a flow follow a Step Functions state to the next state and to what a Task runs.
+
+    ``TRANSITIONS_TO`` (next, choice, catch, Parallel branch, Map processor) and the inferred
+    ``REFERENCES`` from a Task state to its Terraform Lambda or ECS task definition are added
+    to the adjacency as call edges, for ``asl`` sources only. They are not ``CALLS`` in the
+    store, so every other consumer of ``CALLS`` is unaffected.
+    """
+    rows = store._conn.execute(
+        "SELECT source_qualified, target_qualified FROM edges WHERE kind = 'TRANSITIONS_TO' "
+        "OR (kind = 'REFERENCES' AND json_valid(extra) "
+        "AND json_extract(extra, '$.resolution') = 'asl_name_convention') ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        source = adj.nodes_by_qn.get(row[0])
+        if source is None or source.language != "asl":
+            continue
+        targets = adj.calls_out.setdefault(row[0], [])
+        if row[1] not in targets:
+            targets.append(row[1])
+
+
+def _flow_name(entry: GraphNode) -> str:
+    """The flow's name: the machine for a state machine's start state, else the entry's name."""
+    machine = entry.extra.get("state_machine") if entry.language == "asl" else None
+    return _sanitize_name(machine if isinstance(machine, str) and machine else entry.name)
+
+
 def detect_entry_points(
     store: GraphStore,
     include_tests: bool = False,
@@ -691,7 +740,7 @@ def detect_entry_points(
             node.is_test or _is_test_file(node.file_path, repo_root)
         ):
             continue
-        if node.extra.get("verilog_kind"):
+        if node.extra.get("verilog_kind") or _not_a_flow_root(node):
             continue
 
         # True root: no one calls this function.
@@ -781,7 +830,7 @@ def _trace_single_flow(
     })
 
     flow: dict = {
-        "name": _sanitize_name(adj.flow_names.get(ep.qualified_name, ep.name)),
+        "name": _sanitize_name(adj.flow_names.get(ep.qualified_name) or _flow_name(ep)),
         "entry_point": ep.qualified_name,
         "entry_point_id": ep.id,
         "path": path_ids,
@@ -818,6 +867,7 @@ def trace_flows(
         return []
 
     adj = load_flow_adjacency(store)
+    _add_asl_edges(store, adj)
     flows: list[dict] = []
 
     for ep in entry_points:
@@ -1136,6 +1186,7 @@ def incremental_trace_flows(
     new_flows: list[dict] = []
     if relevant_eps:
         adj = load_flow_adjacency(store)
+        _add_asl_edges(store, adj)
         for ep in relevant_eps:
             flow = _trace_single_flow(adj, ep, max_depth)
             if flow is not None:

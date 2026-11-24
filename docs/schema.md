@@ -250,6 +250,20 @@ holding the external target it stands for. The external edge stays, so a functio
 repository, or one whose name does not match, keeps it. Every pass removes these links and makes
 them again, so an update gives what a full build does.
 
+Machines and states keep the `Class` and `Function` kinds: a new kind would need every filter on
+`kind` (impact radius, risk scoring, dead code, communities, flows, search) to learn it, and the
+schema allows none without a migration. The role is in `extra` instead: `asl_role`
+(`state_machine` or `state`), and for a state `state_machine`, `state_path` (`Fan Out[0]/Ship`),
+`is_machine_start` (the machine's own `StartAt`, not a branch's) and `display_name`
+(`<machine>/<path>`; `statemachine <machine>` for the machine). `docstring` names the machine and is
+indexed, so a search for a state name finds the machine it is in. Responses add `display_name` for
+`asl` nodes.
+
+Flows: the `StartAt` state of each machine is a flow entry point, named by the machine, and the
+flow follows `TRANSITIONS_TO` and the inferred Task-to-Terraform `REFERENCES` link. No other state
+is an entry point. These edges are added to the flow's in-memory adjacency only; the store keeps
+no `CALLS` edge for a state.
+
 `CONTAINS` joins the file to the machine, the machine to its top-level states, and a Parallel or
 Map state to the states of its branches and processor.
 

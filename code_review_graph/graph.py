@@ -5932,6 +5932,9 @@ def node_to_dict(n: GraphNode) -> dict:
         "parent_name": _sanitize_name(n.parent_name) if n.parent_name else n.parent_name,
         "is_test": n.is_test,
     }
+    if n.language == "asl" and isinstance(n.extra.get("display_name"), str):
+        # A state name repeats across machines; this names the machine it is in.
+        result["display_name"] = _sanitize_name(n.extra["display_name"])
     hcl_type = n.extra.get("hcl_type") if n.language == "hcl" else None
     if isinstance(hcl_type, str):
         # Terraform block type (resource, data, module, variable, output, local, provider);

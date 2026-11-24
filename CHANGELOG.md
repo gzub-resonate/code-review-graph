@@ -26,6 +26,15 @@
 
 ### Added
 
+- Step Functions state machines now start flows. The `StartAt` state of each machine is a flow entry
+  point, and the flow follows `TRANSITIONS_TO` (next, choice, catch, Parallel branch, Map
+  processor) and the inferred link from a Task state to its Terraform Lambda or ECS task
+  definition. The flow is named by the machine. Machine and state nodes keep their kinds (`Class`
+  and `Function`: no new kind, no schema change) but now record `asl_role`, `state_machine`,
+  `state_path`, `is_machine_start`, `display_name` (`orders/Notify Failure`, `statemachine orders`)
+  and an indexed `docstring` naming the machine, so identical state names from different machines
+  can be told apart in search. Responses carry `display_name` for ASL nodes.
+
 - Terraform and Terragrunt flows. A root module (a directory with `terragrunt.hcl`, or `.tf` files that
   no other directory calls) is now a flow entry point, named `terraform:<dir>`. The flow follows each
   `module "x" { source = "./path" }` call, and a Terragrunt `terraform { source = ... }`, into the
@@ -350,6 +359,8 @@
 
 ### Fixed
 
+- Dunder methods (`__init__`, `__repr__`) are no longer flow entry points just because nothing calls
+  them by name. A framework decorator or an entry name such as `__main__` still makes one.
 - `query_graph_tool` `handlers_of` on a FastAPI handler (for example `token_endpoint`) returned 0
   with "a real absence", because `handlers_of` takes an endpoint and HANDLES edges run from the
   handler to it. Given a handler, it now returns the endpoints that handler serves and says so in

@@ -80,7 +80,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **22 MCP tools** (up from 9): 13 new tools for flows, communities, architecture, refactoring, wiki, multi-repo, and risk-scored change detection.
 - **5 MCP prompts**: `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`.
 - **18 languages** (up from 15): added Dart, R, Perl.
-- **Execution flows**: trace call chains from entry points (HTTP handlers, CLI commands, tests), sorted by criticality score.
+- **Execution flows**: trace call chains from entry points (HTTP handlers, CLI commands, tests), sorted by criticality score. A Step Functions state machine starts a flow at its `StartAt` state, named by the machine.
 - **Community detection**: cluster related code with the Leiden algorithm (igraph) or file-based grouping.
 - **Architecture overview**: architecture map with module summaries and cross-community coupling warnings.
 - **Risk-scored change detection**: `detect_changes` maps git diffs to affected functions, flows, communities and test coverage gaps, in priority order.
