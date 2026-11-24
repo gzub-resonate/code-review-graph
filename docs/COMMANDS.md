@@ -1077,8 +1077,16 @@ exact route fits; a catch-all at the root matches nothing. Its candidate has
 Python servers are indexed too, so a frontend or another service can reach
 them. FastAPI and Starlette-style routers (`APIRouter`, `FastAPI`) and Flask
 (`Flask`, `Blueprint`) routes are read from `@router.get/post/put/patch/delete/head/options`,
-`@app.api_route(path, methods=[...])` and `@app.route(path, methods=[...])`
-(default `GET`), with Flask `<int:id>` turned into `{id}` and a trailing
+`@router.websocket(path)` (method `WEBSOCKET`), `@app.api_route(path, methods=[...])` and
+`@app.route(path, methods=[...])` (default `GET`), and from the decorator-free
+`router.add_api_route(path, handler)`, `add_api_websocket_route` and
+`add_url_rule(rule, view_func=...)` (a `View.as_view(...)` handler is the class) when the handler is
+defined in the same file. The receiver must be a router: one built by `APIRouter`, `FastAPI`,
+`Blueprint` or `Flask` in the file, or an imported name that reads as one (`app`, `router`,
+`oauth_router`, `bp`), so `@cache.get(...)` is not a route. `handlers_of` takes an endpoint; given a
+handler it returns the endpoints it serves and says so in `confidence`. An empty `endpoints_for` for a
+decorated or handler-like function says the route may not be statically visible rather than a real
+absence. Flask `<int:id>` turned into `{id}` and a trailing
 `{name:path}` or `<path:name>` read as a catch-all. A route's full path is the
 prefix of every router above it plus its own path: `APIRouter(prefix=...)`,
 `Blueprint(url_prefix=...)` and the `prefix=` or `url_prefix=` of
