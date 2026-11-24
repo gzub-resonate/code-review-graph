@@ -695,7 +695,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum callees followed per hop when `tests_for` and `detect-changes` look for tests. The first by name are kept, so one graph always gives one answer | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | Hops to walk up incoming `CALLS` when looking for a tested caller of an untested changed symbol. Reported as a note, never as coverage | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |
-| `CRG_CROSS_REPO_BUDGET_SECONDS` | Seconds one `cross_repo_search_tool` or `cross_repo_requests_tool` call may run before it stops starting new repos and lists the rest in `skipped_repos`. `0` means no limit | `60` |
+| `CRG_CROSS_REPO_BUDGET_SECONDS` | Seconds one `cross_repo_search_tool` or `cross_repo_requests_tool` call may run before it stops starting new repos and lists the rest in `skipped_repos`. `0` means no limit | `300` |
 | `CRG_TOOL_TIMEOUT` | Timeout in seconds for read-only MCP tools (`0` disables). Does not bound the tools that write: build, postprocess, embed, wiki and apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | Window for `detect-changes --churn` commit counts | `90` |
 | `CRG_CONTEXT_HISTORY` | Set to `1` to keep a local log of each `context_savings` estimate in `.code-review-graph/context-history.jsonl`; read it with `code-review-graph context-history`. Holds token counts, tool names, a timestamp, a detail level and file and depth counts, never file names, paths or source text, and is never sent anywhere | - |

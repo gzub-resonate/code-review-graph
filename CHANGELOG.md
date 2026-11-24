@@ -5,10 +5,13 @@
 ### Added
 
 - `cross_repo_search_tool` and `cross_repo_requests_tool` stop after
-  `CRG_CROSS_REPO_BUDGET_SECONDS` (default 60, `0` = no limit) instead of running for minutes over a
+  `CRG_CROSS_REPO_BUDGET_SECONDS` (default 300, `0` = no limit) instead of running for minutes over a
   large registry. When the time is spent no new repo is started; the ones left come back in
   `skipped_repos` (with `skipped_repos_total`), `truncated` is set and the summary says so. A cursor
-  made on such a partial answer is refused unless the same repos are skipped again.
+  made on such a partial answer is refused unless the same repos are skipped again. The repos left
+  out of the full search still get a plain exact-name lookup (at most 30 s in all), so an exact
+  match in a late repo is returned instead of lost to the time limit (`exact_lookup_repos_total`
+  counts them); their fuzzy matches are not searched.
 - Every `cross_repo_search_tool` row has a `match` field: `exact`, `exact_ci`, `qualified`, `prefix`,
   `tokens` or `fuzzy`.
 - `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The

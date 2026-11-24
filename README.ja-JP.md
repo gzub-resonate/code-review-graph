@@ -686,7 +686,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for` と `detect-changes` がテストを探すとき、1 ホップでたどる呼び出し先の最大数。名前順で先頭のものを残すので、同じグラフからは常に同じ答えが出る | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | テストのない変更シンボルについて、テスト済みの呼び出し元を探して `CALLS` を遡るホップ数。カバレッジではなく注記として報告されます | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |
-| `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` または `cross_repo_requests_tool` の1回の呼び出しが、新しいリポジトリの開始を止めて残りを `skipped_repos` に列挙するまでの秒数。`0` は無制限 | `60` |
+| `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` または `cross_repo_requests_tool` の1回の呼び出しが、新しいリポジトリの開始を止めて残りを `skipped_repos` に列挙するまでの秒数。`0` は無制限 | `300` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` のコミット数を数える期間 | `90` |
 | `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数、ツール名、タイムスタンプ、詳細レベル、ファイル数と深さで、ファイル名、パス、ソースコードは記録せず、外部にも送信しません | - |

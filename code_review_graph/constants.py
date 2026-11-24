@@ -210,7 +210,7 @@ def discovery_timeout() -> float:
 #: Seconds one ``cross_repo_search_tool`` or ``cross_repo_requests_tool`` call may
 #: spend before it stops starting new repositories. ``0`` means no limit.
 CROSS_REPO_BUDGET_ENV = "CRG_CROSS_REPO_BUDGET_SECONDS"
-CROSS_REPO_BUDGET_DEFAULT = 60.0
+CROSS_REPO_BUDGET_DEFAULT = 300.0
 
 
 def cross_repo_budget_seconds() -> float:

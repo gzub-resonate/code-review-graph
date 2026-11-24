@@ -216,8 +216,8 @@ def test_cursor_from_a_partial_answer_is_tied_to_the_same_skipped_repos(five_rep
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        (None, 60.0), ("", 60.0), ("5", 5.0), ("2.5", 2.5), ("0", 0.0), (" 30 ", 30.0),
-        ("abc", 60.0), ("-1", 60.0), ("nan", 60.0), ("inf", 60.0),
+        (None, 300.0), ("", 300.0), ("5", 5.0), ("2.5", 2.5), ("0", 0.0), (" 30 ", 30.0),
+        ("abc", 300.0), ("-1", 300.0), ("nan", 300.0), ("inf", 300.0),
     ],
 )
 def test_budget_env_validation(monkeypatch, raw, expected):
@@ -267,3 +267,63 @@ def test_requests_cursor_on_a_partial_answer_is_refused_for_a_full_one(clients, 
     monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "0")
     refused = cross_repo_requests_func(origin="js", limit=1, max_results=1, cursor=cursor)
     assert refused["status"] == "error"
+
+
+def test_default_budget_is_five_minutes(registry):
+    assert constants.cross_repo_budget_seconds() == 300.0
+
+
+@pytest.fixture
+def late_exact_repos(tmp_path, registry, monkeypatch):
+    """Two searched repos with only fuzzy hits, then three the budget keeps out of the search."""
+    named_repo(tmp_path, registry, "a", WEAK)
+    named_repo(tmp_path, registry, "b", WEAK)
+    named_repo(tmp_path, registry, "c", [*WEAK, "getMetricsBatch"])
+    named_repo(tmp_path, registry, "d", ["getMetricsBatchV9"])
+    named_repo(tmp_path, registry, "e", ["getMetricsBatch"])
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    monkeypatch.setattr(registry_tools, "_EXACT_PASS_SECONDS", 1e9)
+
+
+def test_an_exact_name_in_a_repo_the_budget_skipped_is_still_found(late_exact_repos):
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == ["a", "b"]
+    assert reply["skipped_repos"] == ["c", "d", "e"]
+    assert reply["exact_lookup_repos_total"] == 3
+    exact = [(row["repo"], row["name"], row["match"]) for row in reply["results"]
+             if row["match"] == "exact"]
+    assert exact == [("c", "getMetricsBatch", "exact"), ("e", "getMetricsBatch", "exact")]
+    # The exact rows lead, ahead of the fuzzier hits of the repos that were searched.
+    assert [row["match"] for row in reply["results"][:2]] == ["exact", "exact"]
+
+
+def test_a_skipped_repo_contributes_only_its_exact_rows(late_exact_repos):
+    reply = search(query="getMetricsBatch")
+    from_skipped = [row for row in reply["results"] if row["repo"] in {"c", "d", "e"}]
+    assert {row["repo"] for row in from_skipped} == {"c", "e"}
+    assert {row["match"] for row in from_skipped} == {"exact"}
+
+
+def test_the_exact_lookup_respects_the_kind_filter(late_exact_repos):
+    reply = search(query="getMetricsBatch", kind="Class")
+    assert [row for row in reply["results"] if row["repo"] in {"c", "d", "e"}] == []
+
+
+def test_the_exact_pass_is_bounded_by_its_own_time_limit(late_exact_repos, monkeypatch):
+    monkeypatch.setattr(registry_tools, "_EXACT_PASS_SECONDS", 15)
+    reply = search(query="getMetricsBatch")
+    assert reply["exact_lookup_repos_total"] == 1
+    assert {row["repo"] for row in reply["results"] if row["match"] == "exact"} == {"c"}
+    assert reply["skipped_repos"] == ["c", "d", "e"]
+
+
+def test_no_exact_lookup_when_nothing_was_skipped(five_repos):
+    reply = search(query="getMetricsBatch")
+    assert reply["exact_lookup_repos_total"] == 0
+    assert "exact names were still looked up" not in reply["summary"]
+
+
+def test_the_summary_says_how_many_skipped_repos_got_the_exact_lookup(late_exact_repos):
+    reply = search(query="getMetricsBatch")
+    assert "exact names were still looked up in 3 of them" in reply["summary"]
