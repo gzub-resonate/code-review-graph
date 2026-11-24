@@ -1069,7 +1069,7 @@ route: str | None            # Only calls whose route equals this or lies below 
 status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
-origin: str | None           # feign | js | terraform; default: feign and js
+origin: str | None           # feign | js | terraform | workflow; default: feign and js
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
 ```
@@ -1078,6 +1078,15 @@ repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is
 registered repo and folder each one resolves to. `service` filters by module repo name, `route` by module folder
 prefix, and `status` is `matched`, `module_not_found`, `ambiguous` or `repo_not_registered`. Run it with
 `service=<module repo>` to see which stacks use a module.
+
+`origin="workflow"` does the same for GitHub Actions: each `uses: org/repo/path@ref` of a workflow or composite
+action (a reusable workflow at job level, an action at step level) that names another repo is joined to the
+registered repo called `repo` (the part after `org/`) and the file or folder `path` in its graph. Rows carry the
+using repo, file and line, `target_repo`, `target_path`, `ref` and `kind` (`reusable_workflow` or `action`).
+`service` filters by target repo name, `route` by path prefix, and `status` is `matched`, `path_not_found`,
+`ambiguous` or `repo_not_registered`. Local `./` and `docker://` references and expression-valued ones are not
+listed. An action at a repo's root has an empty path and is `matched` once the repo is registered. A path the
+target graph does not index (an action folder outside `.github`) reads as `path_not_found`.
 
 Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
 call, to the server endpoint it reaches in another registered repository. The join is computed on every call from the

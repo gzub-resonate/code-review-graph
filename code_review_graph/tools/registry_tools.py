@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from .. import feign_links as fl
 from .. import terraform_links as tl
+from .. import workflow_links as wl
 from ..constants import cross_repo_budget_seconds, cross_repo_workers
 from ..endpoint_index import attach as attach_endpoints
 from ..endpoint_index import extract_endpoints, read_endpoint_index
@@ -668,10 +669,48 @@ def _terraform_links(
     max_results: int,
 ) -> dict[str, Any]:
     """The ``origin="terraform"`` branch: remote module sources joined to registered repos."""
+    return _infra_links(
+        "terraform", "remote Terraform module source(s)", tl.STATUSES, tl.read_module_edges,
+        tl.module_folder_exists, tl.resolve_links, "module_repo", "module_path",
+        repos, module_repo, module_path, status, max_results,
+    )
+
+
+def _workflow_links(
+    repos: list[str] | None,
+    target_repo: str | None,
+    target_path: str | None,
+    status: str | None,
+    max_results: int,
+) -> dict[str, Any]:
+    """The ``origin="workflow"`` branch: GitHub Actions ``uses`` joined to registered repos."""
+    return _infra_links(
+        "workflow", "GitHub Actions reference(s)", wl.STATUSES, wl.read_uses_edges,
+        wl.path_exists, wl.resolve_links, "target_repo", "target_path",
+        repos, target_repo, target_path, status, max_results,
+    )
+
+
+def _infra_links(
+    origin: str,
+    noun: str,
+    statuses: tuple[str, ...],
+    read_edges: Any,
+    exists_in_repo: Any,
+    resolve: Any,
+    repo_key: str,
+    path_key: str,
+    repos: list[str] | None,
+    target_repo: str | None,
+    target_path: str | None,
+    status: str | None,
+    max_results: int,
+) -> dict[str, Any]:
+    """Shared body of the ``terraform`` and ``workflow`` origins (one read-only join each)."""
     from ..registry import Registry
 
-    if status is not None and status not in tl.STATUSES:
-        raise ValueError(f"status must be one of: {', '.join(tl.STATUSES)}")
+    if status is not None and status not in statuses:
+        raise ValueError(f"status must be one of: {', '.join(statuses)}")
     all_repos = Registry().list_repos()
     selected: list[dict[str, Any]] = all_repos
     unknown_shown: list[str] = []
@@ -693,9 +732,9 @@ def _terraform_links(
             unreadable.append(_sanitize_name(_repo_label(entry)))
             continue
         try:
-            found = tl.read_module_edges(store)
+            found = read_edges(store)
         except (sqlite3.Error, GraphStoreError) as exc:
-            logger.warning("Cannot read module sources of %s: %s", entry["path"], exc)
+            logger.warning("Cannot read %s references of %s: %s", origin, entry["path"], exc)
             unreadable.append(_sanitize_name(_repo_label(entry)))
             continue
         finally:
@@ -712,24 +751,24 @@ def _terraform_links(
         if store is None:
             return False
         try:
-            return tl.module_folder_exists(store, Path(all_repos[index]["path"]), subdir)
+            return exists_in_repo(store, Path(all_repos[index]["path"]), subdir)
         except sqlite3.Error:
             return False
 
     try:
-        rows = tl.resolve_links(edges_by_repo, all_repos, folder_exists)
+        rows = resolve(edges_by_repo, all_repos, folder_exists)
     finally:
         for opened in stores.values():
             if opened is not None:
                 opened.close()
-    if module_repo:
-        rows = [r for r in rows if r["module_repo"] == module_repo]
-    if module_path:
-        wanted = module_path.strip("/")
+    if target_repo:
+        rows = [r for r in rows if r[repo_key] == target_repo]
+    if target_path:
+        wanted = target_path.strip("/")
         rows = [
             r for r in rows
-            if (r["module_path"] or "") == wanted
-            or (r["module_path"] or "").startswith(wanted + "/")
+            if (r[path_key] or "") == wanted
+            or (r[path_key] or "").startswith(wanted + "/")
         ]
     counts: dict[str, int] = {}
     for r in rows:
@@ -738,13 +777,13 @@ def _terraform_links(
         rows = [r for r in rows if r["status"] == status]
     shown, total, truncated = _bounded(rows, max_results, 100)
     for r in shown:
-        for key in ("repo", "file", "module_repo", "module_path", "ref"):
+        for key in ("repo", "file", repo_key, path_key, "ref"):
             if isinstance(r.get(key), str):
                 r[key] = _sanitize_name(r[key])
     result: dict[str, Any] = {
         "status": "ok",
-        "summary": f"{total} remote Terraform module source(s) across {len(selected)} repo(s)",
-        "origin": "terraform",
+        "summary": f"{total} {noun} across {len(selected)} repo(s)",
+        "origin": origin,
         "results": shown,
         "counts": counts,
         "total": total,
@@ -807,7 +846,12 @@ def cross_repo_requests_func(
             lists the remote Terraform module sources the repos name instead (see
             below); ``service`` then filters by module repo name, ``route`` by
             module folder prefix, and ``status`` is one of ``matched``,
-            ``module_not_found``, ``ambiguous`` or ``repo_not_registered``.
+            ``module_not_found``, ``ambiguous`` or ``repo_not_registered``. ``workflow``
+            lists the GitHub Actions ``uses`` references (reusable workflows and actions)
+            that point at another repo; ``service`` then filters by the target repo name,
+            ``route`` by path prefix inside it, and ``status`` is one of ``matched``,
+            ``path_not_found``, ``ambiguous`` or ``repo_not_registered``. Local
+            (``./``) and ``docker://`` references are not listed.
 
     The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 300,
     0 = unlimited). Once spent, no further client repo is started; those left are
@@ -827,12 +871,14 @@ def cross_repo_requests_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
-    if status is not None and origin != "terraform" and status not in fl.STATUSES:
+    if status is not None and origin not in ("terraform", "workflow") and status not in fl.STATUSES:
         raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
-    if origin is not None and origin not in ("feign", "js", "terraform"):
-        raise ValueError("origin must be one of: feign, js, terraform")
+    if origin is not None and origin not in ("feign", "js", "terraform", "workflow"):
+        raise ValueError("origin must be one of: feign, js, terraform, workflow")
     if origin == "terraform":
         return _terraform_links(repos, service, route, status, max_results)
+    if origin == "workflow":
+        return _workflow_links(repos, service, route, status, max_results)
 
     try:
         all_repos = Registry().list_repos()
