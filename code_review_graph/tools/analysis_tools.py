@@ -169,6 +169,7 @@ def get_bridge_nodes_func(
     detail_level: str = "standard",
     cursor: str | None = None,
     include_tests: bool = False,
+    include_config: bool = False,
 ) -> dict[str, Any]:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -188,6 +189,9 @@ def get_bridge_nodes_func(
         include_tests: Include test nodes (default False). Tests are left out
             before ranking, so ``total`` and ``next_cursor`` describe the
             filtered list. A cursor is only valid for the value it was made with.
+        include_config: Include JSON, YAML, output and property document nodes
+            (default False). Left out before ranking, like tests. A cursor is
+            only valid for the value it was made with.
 
     Returns:
         Ranked bridges. ``total`` reports the untruncated candidate count and
@@ -198,16 +202,31 @@ def get_bridge_nodes_func(
 
     store, root = _get_store(repo_root or None)
     try:
+        ranked = find_bridge_nodes(
+            store, top_n=_FETCH_ALL, include_tests=include_tests,
+            include_config=include_config,
+        )
+        # A repository of data files has no bridge but config nodes; rank those
+        # instead of returning nothing, and say so.
+        config_only = False
+        if not include_config and not ranked:
+            with_config = find_bridge_nodes(
+                store, top_n=_FETCH_ALL, include_tests=include_tests, include_config=True,
+            )
+            if with_config:
+                ranked, config_only = with_config, True
         page = paginate(
-            find_bridge_nodes(store, top_n=_FETCH_ALL, include_tests=include_tests),
-            top_n, _MAX_BRIDGE_NODES, cursor,
-            scope=make_scope("get_bridge_nodes_tool", include_tests=include_tests),
+            ranked, top_n, _MAX_BRIDGE_NODES, cursor,
+            scope=make_scope(
+                "get_bridge_nodes_tool", include_tests=include_tests,
+                include_config=include_config or config_only,
+            ),
             stamp=graph_stamp(store),
         )
         bridges, total = page.items, page.total
         if detail_level == "minimal":
             bridges = _minimal(bridges, _MINIMAL_BRIDGE_FIELDS, root)
-        return {
+        result: dict[str, Any] = {
             "status": "ok",
             "summary": (
                 f"{total} bridge node(s) ranked by betweenness"
@@ -224,6 +243,12 @@ def get_bridge_nodes_func(
                 "detect_changes_tool -- see if bridges are affected",
             ],
         }
+        if config_only:
+            result["note"] = (
+                "This repository has no bridge but config document nodes, so they are "
+                "ranked. Pass include_config=true to ask for them explicitly."
+            )
+        return result
     finally:
         store.close()
 

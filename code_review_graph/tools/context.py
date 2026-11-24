@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 from typing import Any
 
+from ..communities import config_community_ids
 from ..errors import ChangeDiscoveryError
 from ..incremental import (
     discover_review_changes,
@@ -146,9 +147,13 @@ def get_minimal_context(
         communities: list[str] = []
         try:
             rows = store._conn.execute(
-                "SELECT name FROM communities ORDER BY size DESC LIMIT 3"
+                "SELECT id, name FROM communities ORDER BY size DESC, id"
             ).fetchall()
-            communities = [r[0] for r in rows]
+            # Config document communities (data files) lead a repository of data
+            # and say nothing about its code; they are used only when nothing else is.
+            config_ids = config_community_ids(store)
+            code_rows = [r for r in rows if r[0] not in config_ids]
+            communities = [r[1] for r in (code_rows or rows)[:3]]
         except sqlite3.OperationalError:  # nosec B110 — table may not exist yet
             logger.debug("communities table not yet populated")
 
