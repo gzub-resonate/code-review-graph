@@ -260,6 +260,14 @@
 - `cross_repo_search_tool` orders its merged results by match tier first (exact name, exact name
   ignoring case, qualified-name suffix, prefix, every query word in the name, everything else), then
   by each repo's rank, then registry order.
+- `get_hub_nodes_tool`, `get_bridge_nodes_tool`, `get_surprising_connections_tool`,
+  `get_suggested_questions_tool` and `get_knowledge_gaps_tool` now leave test code out by default, so
+  test methods no longer crowd the ranking. Pass `include_tests=true` to get the old output back.
+  Tests are removed before ranking, so `total`, `next_cursor` and the summaries describe the list
+  without them, and a paging cursor made with one `include_tests` value is refused for the other.
+  `get_knowledge_gaps_tool` also stops listing configuration keys (JSON and YAML paths, Liquid outputs,
+  Spring properties) as isolated nodes, whatever `include_tests` says.
+
 - `detect_changes_tool` on a `serve --multi-repo` server refuses a call that names no pull request,
   head or changed files. The server holds each repository's default branch with no working tree, so
   such a call used to review that branch's last commit as if it were the change. The error says to
