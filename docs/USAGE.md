@@ -410,6 +410,23 @@ A bad value is an error, not a silent skip: more than 200 patterns, a pattern lo
 characters, a control character, or a `!` entry stops the command with a message naming the
 variable.
 
+### Bundled and minified JavaScript
+
+Compiled bundles (for example a GitHub Action's `dist/index.js` built by ncc or webpack) are
+left out of the graph, because their vendored functions would dominate the architecture
+overview and the large-function lists. A JavaScript or TypeScript file is skipped when:
+
+- it sits below a `dist`, `build`, `out` or `bundle` folder (at any depth) and its first 2 KB or
+  last 1 KB carries a bundler signature: `__webpack_require__`, `__nccwpck_require__`,
+  `webpackBootstrap`, `/******/`, `//# sourceMappingURL=`, `/*! For license`, or an esbuild-style
+  `// ... bundled` header; or
+- it is minified: at least 4 KB with an average line length above 500 characters; or
+- the repository's root `.gitattributes` marks it `linguist-generated`.
+
+Hand-written source, and a committed `dist/` without any of those signs, stays in the graph.
+The build logs the number of skipped files at info level. Set `CRG_SKIP_BUNDLED_JS=0` to index
+such files anyway; `update` and the next full build then pick them up.
+
 In git repositories, indexing is based on tracked files plus untracked files git does not ignore (`git ls-files` and `git ls-files --others --exclude-standard`), so gitignored files are skipped. Use `.code-review-graphignore` to exclude other files or when git is not available.
 
 ## Symlinked Folders

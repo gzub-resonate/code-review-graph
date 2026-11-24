@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 
 from . import install_plan
 from .build_state import advance_to_postprocess_pending
+from .bundled_js import is_bundled_js
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
 from .constants import (
     default_ignore_patterns,
@@ -2253,8 +2254,13 @@ def _keep_candidate(
     rel_path: str,
     ignore_patterns: list[str],
     parser: CodeParser,
+    bundled: list[str] | None = None,
 ) -> bool:
-    """Return whether one inventory path is a file the graph should hold."""
+    """Return whether one inventory path is a file the graph should hold.
+
+    A bundled or minified JavaScript file is left out and, when *bundled* is
+    given, its path is appended so the caller can report the count.
+    """
     if _should_ignore(rel_path, ignore_patterns):
         return False
     # Skip paths that would exceed OS filename limits (macOS: 255 bytes
@@ -2278,6 +2284,10 @@ def _keep_candidate(
     if parser.detect_language(full_path) is None:
         return False
     if _is_binary(full_path):
+        return False
+    if is_bundled_js(repo_root, rel_path):
+        if bundled is not None:
+            bundled.append(rel_path)
         return False
     return True
 
@@ -2552,11 +2562,19 @@ def _collect_files(
     ignore_patterns = _load_ignore_patterns(repo_root)
     parser = _get_code_parser_cls()(repo_root)
     candidates = _inventory_candidates(repo_root, recurse_submodules)
+    bundled: list[str] = []
     files = [
         rel_path
         for rel_path in candidates
-        if _keep_candidate(repo_root, rel_path, ignore_patterns, parser)
+        if _keep_candidate(repo_root, rel_path, ignore_patterns, parser, bundled)
     ]
+    if bundled:
+        logger.info(
+            "Skipped %d bundled or minified JavaScript file(s) (CRG_SKIP_BUNDLED_JS=0 keeps "
+            "them), e.g. %s",
+            len(bundled),
+            bundled[0],
+        )
     if not follow_symlinks_enabled(follow_symlinks):
         return files, [], {}
     followed, tree = _followed_extra_files(repo_root, candidates, ignore_patterns, parser)
@@ -2818,6 +2836,7 @@ def _reconcile_stale_files(
                 path.is_file()
                 and not path.is_symlink()
                 and not _should_ignore(relative, ignore_patterns)
+                and not is_bundled_js(repo_root, relative)
                 and parser.detect_language(path) is not None
                 and (
                     (known_text is not None and stored_file in known_text)
@@ -3510,6 +3529,7 @@ def incremental_update(
     total_edges = 0
     errors = []
     missing_paths: set[str] = set()
+    skipped_bundled = 0
 
     # Separate deleted/unparseable files from files that need re-parsing
     to_parse: list[str] = []
@@ -3547,6 +3567,10 @@ def incremental_update(
             continue
         if parser.detect_language(abs_path) is None:
             continue
+        if is_bundled_js(repo_root, rel_path):
+            # Counted in the summary below; reconciliation drops stored nodes.
+            skipped_bundled += 1
+            continue
         # Quick hash check to skip unchanged files
         normalized_path = normalize_file_path(rel_path)
         fhash = current_hashes.get(normalized_path)
@@ -3572,6 +3596,9 @@ def incremental_update(
         except (OSError, PermissionError):
             pass
         to_parse.append(rel_path)
+
+    if skipped_bundled:
+        logger.info("Skipped %d changed bundled or minified JavaScript file(s)", skipped_bundled)
 
     # Capture flow/community memberships BEFORE node replacement or permanent
     # deletion. After nodes are removed/recreated the old IDs are gone, so
