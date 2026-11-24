@@ -260,6 +260,11 @@
 - `cross_repo_search_tool` orders its merged results by match tier first (exact name, exact name
   ignoring case, qualified-name suffix, prefix, every query word in the name, everything else), then
   by each repo's rank, then registry order.
+- `detect_changes_tool` on a `serve --multi-repo` server refuses a call that names no pull request,
+  head or changed files. The server holds each repository's default branch with no working tree, so
+  such a call used to review that branch's last commit as if it were the change. The error says to
+  pass `pr`, `head` or `changed_files`. The bundled `review-pr` reference now describes the
+  pull-request route (`pr` on `detect_changes_tool` and `pr_blast_radius_tool`) for a shared server.
 - Pull request fetches no longer write into the checkout. `pr_blast_radius_tool` and
   `detect_changes_tool` fetch into a throwaway repository that borrows the checkout's objects and
   is deleted when the call ends (leftovers of a killed call are swept on the next one). The

@@ -163,6 +163,24 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
     return repo_root if repo_root else _default_repo_root
 
 
+def _require_a_named_change(
+    changed_files: Optional[list[str]], pr: Optional[int], head: Optional[str],
+) -> None:
+    """Refuse a review that names no change when the server has no working tree to diff.
+
+    ``serve --multi-repo`` serves checkouts of each default branch. A call with no ``pr``,
+    ``head`` or ``changed_files`` would diff the checkout's last commit and present that as
+    the review, so it is refused with what to pass instead.
+    """
+    if _multi_repo and pr is None and not head and changed_files is None:
+        raise ToolError(
+            "This server holds each repository's default branch, so there is no working tree "
+            "to diff and a call without a change would review the last commit on that branch. "
+            "Pass pr=<number> (or head=<ref or commit>, with base=<parent branch> for a "
+            "stacked pull request), or changed_files=[...]."
+        )
+
+
 def _registered_repo_root(repo_root: Optional[str]) -> str:
     """Return the registered repository a ``--multi-repo`` call names.
 
@@ -1235,8 +1253,12 @@ async def detect_changes_tool(
         are on the first page only. For a pull request, ``pull_request`` lists
         at most ``max_results`` added and removed symbols a page, and the same
         ``next_cursor`` reads the next page of both lists.
+
+        On a ``serve --multi-repo`` server a call naming no pull request, head or
+        changed files is refused, since the checkout has no working tree to diff.
     """
     root = _resolve_repo_root(repo_root)
+    _require_a_named_change(changed_files, pr, head)
     return await _offload(
         "detect_changes_tool",
         lambda: detect_changes_func(
