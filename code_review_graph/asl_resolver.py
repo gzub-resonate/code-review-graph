@@ -88,8 +88,8 @@ _RESOURCE_NAME = re.compile(r"^resource\.(?P<type>[A-Za-z0-9_]+)\.(?P<label>[^.]
 _LAMBDA_PREFIX = "external:aws-lambda:"
 #: File extensions a ``module.function`` handler's module may have, in order.
 _HANDLER_EXTENSIONS = (".py", ".js", ".mjs", ".cjs", ".ts")
-_INFERRED = {"confidence": 0.6, "confidence_tier": "INFERRED"}
-_EXTRACTED = {"confidence": 1.0, "confidence_tier": "EXTRACTED"}
+_INFERRED: dict[str, Any] = {"confidence": 0.6, "confidence_tier": "INFERRED"}
+_EXTRACTED: dict[str, Any] = {"confidence": 1.0, "confidence_tier": "EXTRACTED"}
 
 
 def _fold(name: str) -> str:
@@ -274,7 +274,7 @@ def _resolve_name_convention(store: GraphStore, stats: dict[str, int]) -> None:
         if not found:
             continue
         original = _json(row["extra"])
-        extra = {
+        extra: dict[str, Any] = {
             key: original[key] for key in ("resource_kind", "target_kind") if key in original
         }
         extra.update({"resolution": RESOLUTION, "external_target": target, **_INFERRED})
