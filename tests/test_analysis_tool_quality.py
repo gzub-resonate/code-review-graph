@@ -159,6 +159,7 @@ def test_minimal_surprise_rows_carry_both_ends_location(tmp_path, store):
     assert set(row) == {
         "source", "source_qualified", "source_file",
         "target", "target_qualified", "target_file", "edge_kind", "surprise_score",
+        "group_count",
     }
     assert row["source_file"] == "/r/a.py"  # outside the repo root: as stored
 

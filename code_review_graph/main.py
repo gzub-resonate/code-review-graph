@@ -643,6 +643,7 @@ async def query_graph_tool(
     to: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: Optional[int] = None,
+    file_hint: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -696,6 +697,10 @@ async def query_graph_tool(
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             rows. Omit it for the first page. Not available for path_to.
         limit: Alias of ``max_results`` (most other tools call it that); wins when both are given.
+        file_hint: A substring of a file path (case-insensitive). When a bare name matches
+            several symbols and the hint leaves exactly one, that one is used; otherwise the
+            answer is "ambiguous" as usual. ``tests_for`` replies carry ``tests_direct`` and
+            ``tests_inferred`` counts.
 
     Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
@@ -706,7 +711,7 @@ async def query_graph_tool(
             pattern=pattern, target=target, repo_root=root,
             detail_level=detail_level,
             max_results=limit if limit is not None else max_results,
-            resolution=resolution, to=to, cursor=cursor,
+            resolution=resolution, to=to, cursor=cursor, file_hint=file_hint,
         ),
         root,
     )
@@ -1494,6 +1499,7 @@ async def get_hub_nodes_tool(
     include_tests: bool = False,
     exclude_leaf_primitives: bool = False,
     include_config: bool = False,
+    include_generated: bool = False,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1516,6 +1522,13 @@ async def get_hub_nodes_tool(
         include_config: Include JSON, YAML, output and property document
             nodes. Default: false, so they are left out before ranking, totals
             and paging. A cursor made with one value is refused for the other.
+        include_generated: Include generated code such as jOOQ or protobuf output.
+            Default: false, so generated files are left out before ranking, totals
+            and paging; ``generated_excluded`` says how many that removed. A cursor
+            made with one value is refused for the other.
+
+    Rows are ordered by ``ranking_degree`` (name-matched edges damped), so the raw
+    ``total_degree`` shown beside it is not strictly descending.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1524,7 +1537,7 @@ async def get_hub_nodes_tool(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
             include_tests=include_tests,
             exclude_leaf_primitives=exclude_leaf_primitives,
-            include_config=include_config,
+            include_config=include_config, include_generated=include_generated,
         ),
         root,
     )
@@ -1538,6 +1551,7 @@ async def get_bridge_nodes_tool(
     cursor: Optional[str] = None,
     include_tests: bool = False,
     include_config: bool = False,
+    include_generated: bool = False,
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -1558,6 +1572,10 @@ async def get_bridge_nodes_tool(
         include_config: Include JSON, YAML, output and property document
             nodes. Default: false, so they are left out before ranking, totals
             and paging. A cursor made with one value is refused for the other.
+        include_generated: Include generated code such as jOOQ or protobuf output.
+            Default: false, so generated files are left out before ranking, totals
+            and paging; ``generated_excluded`` says how many that removed. A cursor
+            made with one value is refused for the other.
 
     Returns:
         Ranked bridges. When more remain the reply carries ``next_cursor``.
@@ -1568,6 +1586,7 @@ async def get_bridge_nodes_tool(
         lambda: get_bridge_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
             include_tests=include_tests, include_config=include_config,
+            include_generated=include_generated,
         ),
         root,
     )
@@ -1581,6 +1600,7 @@ async def get_knowledge_gaps_tool(
     cursor: Optional[str] = None,
     include_tests: bool = False,
     include_non_code: bool = False,
+    include_generated: bool = False,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1609,6 +1629,10 @@ async def get_knowledge_gaps_tool(
             Functions (ASL) states as untested hotspots and the dunder methods
             of a class (``__init__``, ``__repr__``) as isolated nodes.
             Default: false.
+        include_generated: Include generated code such as jOOQ or protobuf output.
+            Default: false, so generated files are left out before ranking, totals
+            and paging; ``generated_excluded`` says how many that removed. A cursor
+            made with one value is refused for the other.
 
     Returns:
         Gaps by category. When any category has more rows the reply carries
@@ -1621,6 +1645,7 @@ async def get_knowledge_gaps_tool(
             repo_root=root, max_per_category=max_per_category,
             detail_level=detail_level, cursor=cursor,
             include_tests=include_tests, include_non_code=include_non_code,
+            include_generated=include_generated,
         ),
         root,
     )
@@ -1633,6 +1658,7 @@ async def get_surprising_connections_tool(
     detail_level: str = "standard",
     cursor: Optional[str] = None,
     include_tests: bool = False,
+    include_generated: bool = False,
 ) -> dict:
     """Find unexpected architectural coupling via composite surprise scoring.
 
@@ -1650,9 +1676,15 @@ async def get_surprising_connections_tool(
         include_tests: Include test methods and test files. Default: false,
             so tests are left out before ranking, totals and paging. A cursor
             made with one value is refused for the other.
+        include_generated: Include generated code such as jOOQ or protobuf output.
+            Default: false, so generated files are left out before ranking, totals
+            and paging; ``generated_excluded`` says how many that removed. A cursor
+            made with one value is refused for the other.
 
     Returns:
-        Ranked surprising edges. When more remain the reply carries
+        Ranked surprising edges. Equal scores are ordered by combined endpoint degree,
+        and ``group_count`` counts repeated source -> target-class families without
+        dropping rows. When more remain the reply carries
         ``next_cursor``.
     """
     root = _resolve_repo_root(repo_root)
@@ -1660,7 +1692,7 @@ async def get_surprising_connections_tool(
         "get_surprising_connections_tool",
         lambda: get_surprising_connections_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
-            include_tests=include_tests,
+            include_tests=include_tests, include_generated=include_generated,
         ),
         root,
     )
@@ -1671,6 +1703,7 @@ async def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
     include_tests: bool = False,
     detail_level: str = "standard",
+    include_generated: bool = False,
 ) -> dict:
     """Auto-generate review questions from graph analysis.
 
@@ -1685,12 +1718,14 @@ async def get_suggested_questions_tool(
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
+        include_generated: Include generated code such as jOOQ or protobuf output.
+            Default: false; ``generated_excluded`` says how many nodes and edges that removed.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_suggested_questions_tool",
         lambda: get_suggested_questions_func(
-            repo_root=root, include_tests=include_tests,
+            repo_root=root, include_tests=include_tests, include_generated=include_generated,
         ),
         root,
     )

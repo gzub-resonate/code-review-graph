@@ -30,13 +30,13 @@ _MAX_BRIDGE_NODES = 100
 _MAX_SURPRISING = 100
 _MAX_GAPS_PER_CATEGORY = 50
 
-_MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree")
+_MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree", "ranking_degree")
 # Two rows can share a bare name, so a minimal row also says where it is.
 _MINIMAL_BRIDGE_FIELDS = ("name", "qualified_name", "file", "kind", "betweenness")
 _MINIMAL_SURPRISE_FIELDS = (
     "source", "source_qualified", "source_file",
     "target", "target_qualified", "target_file",
-    "edge_kind", "surprise_score",
+    "edge_kind", "surprise_score", "group_count",
 )
 # Fields holding a path, or a qualified name that starts with one.
 _PATH_FIELDS = (
@@ -46,6 +46,14 @@ _PATH_FIELDS = (
 _MINIMAL_GAP_FIELDS = (
     "name", "qualified_name", "community_id", "size", "degree", "load_time",
 )
+
+
+def _generated_note(include_generated: bool, stats: dict[str, int]) -> str:
+    """Summary suffix naming what generated-code filtering removed."""
+    excluded = stats.get("generated_excluded", 0)
+    if include_generated or not excluded:
+        return ""
+    return f"; {excluded} generated node(s) excluded (include_generated=true keeps them)"
 
 
 def _project(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -74,6 +82,7 @@ def get_hub_nodes_func(
     include_tests: bool = False,
     exclude_leaf_primitives: bool = False,
     include_config: bool = False,
+    include_generated: bool = False,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -99,20 +108,28 @@ def get_hub_nodes_func(
         include_config: Include JSON, YAML, output and property document nodes
             (default False). Left out before ranking, like tests. A cursor is
             only valid for the value it was made with.
+        include_generated: Include generated code such as jOOQ or protobuf output
+            (default False). Generated files are left out before ranking, like tests,
+            so ``total`` and ``next_cursor`` describe the filtered list and
+            ``generated_excluded`` reports how many nodes that removed. A cursor is
+            only valid for the value it was made with.
 
     Returns:
-        Ranked hubs. ``total`` reports the untruncated candidate count and
-        ``truncated`` marks that ``top_n`` or the ceiling cut the list; then
+        Ranked hubs. Rows are ordered by ``ranking_degree`` (name-matched edges are damped),
+        so ``total_degree`` (the raw count) is not strictly descending. ``total`` reports
+        the untruncated candidate count and ``truncated`` marks that ``top_n`` or the
+        ceiling cut the list; then
         ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     _validate_positive_int(top_n, "top_n")
 
     store, _root = _get_store(repo_root or None)
     try:
+        stats: dict[str, int] = {}
         ranked = find_hub_nodes(
             store, top_n=_FETCH_ALL, include_tests=include_tests,
             exclude_leaf_primitives=exclude_leaf_primitives,
-            include_config=include_config,
+            include_config=include_config, include_generated=include_generated, stats=stats,
         )
         # A repository of data files has no hub but its config nodes. Hiding them
         # would leave an empty ranking, so they are ranked instead and the reply says so.
@@ -121,6 +138,7 @@ def get_hub_nodes_func(
             with_config = find_hub_nodes(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
                 exclude_leaf_primitives=exclude_leaf_primitives, include_config=True,
+                include_generated=include_generated, stats=stats,
             )
             if with_config:
                 ranked, config_only = with_config, True
@@ -130,6 +148,7 @@ def get_hub_nodes_func(
                 "get_hub_nodes_tool", include_tests=include_tests,
                 exclude_leaf_primitives=exclude_leaf_primitives,
                 include_config=include_config or config_only,
+                include_generated=include_generated,
             ),
             stamp=graph_stamp(store),
         )
@@ -139,9 +158,12 @@ def get_hub_nodes_func(
         result: dict[str, Any] = {
             "status": "ok",
             "summary": (
-                f"{total} hub node(s) ranked by degree"
+                f"{total} hub node(s) ranked by ranking_degree (name-matched edges damped, "
+                "so total_degree is not strictly descending)"
                 + shown_range(page)
+                + _generated_note(include_generated, stats)
             ),
+            "generated_excluded": stats.get("generated_excluded", 0),
             "hub_nodes": hubs,
             "count": len(hubs),
             "total": total,
@@ -170,6 +192,7 @@ def get_bridge_nodes_func(
     cursor: str | None = None,
     include_tests: bool = False,
     include_config: bool = False,
+    include_generated: bool = False,
 ) -> dict[str, Any]:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -192,6 +215,11 @@ def get_bridge_nodes_func(
         include_config: Include JSON, YAML, output and property document nodes
             (default False). Left out before ranking, like tests. A cursor is
             only valid for the value it was made with.
+        include_generated: Include generated code such as jOOQ or protobuf output
+            (default False). Generated files are left out before ranking, like tests,
+            so ``total`` and ``next_cursor`` describe the filtered list and
+            ``generated_excluded`` reports how many nodes that removed. A cursor is
+            only valid for the value it was made with.
 
     Returns:
         Ranked bridges. ``total`` reports the untruncated candidate count and
@@ -202,9 +230,10 @@ def get_bridge_nodes_func(
 
     store, root = _get_store(repo_root or None)
     try:
+        stats: dict[str, int] = {}
         ranked = find_bridge_nodes(
             store, top_n=_FETCH_ALL, include_tests=include_tests,
-            include_config=include_config,
+            include_config=include_config, include_generated=include_generated, stats=stats,
         )
         # A repository of data files has no bridge but config nodes; rank those
         # instead of returning nothing, and say so.
@@ -212,6 +241,7 @@ def get_bridge_nodes_func(
         if not include_config and not ranked:
             with_config = find_bridge_nodes(
                 store, top_n=_FETCH_ALL, include_tests=include_tests, include_config=True,
+                include_generated=include_generated, stats=stats,
             )
             if with_config:
                 ranked, config_only = with_config, True
@@ -220,6 +250,7 @@ def get_bridge_nodes_func(
             scope=make_scope(
                 "get_bridge_nodes_tool", include_tests=include_tests,
                 include_config=include_config or config_only,
+                include_generated=include_generated,
             ),
             stamp=graph_stamp(store),
         )
@@ -231,7 +262,9 @@ def get_bridge_nodes_func(
             "summary": (
                 f"{total} bridge node(s) ranked by betweenness"
                 + shown_range(page)
+                + _generated_note(include_generated, stats)
             ),
+            "generated_excluded": stats.get("generated_excluded", 0),
             "bridge_nodes": bridges,
             "count": len(bridges),
             "total": total,
@@ -260,6 +293,7 @@ def get_knowledge_gaps_func(
     cursor: str | None = None,
     include_tests: bool = False,
     include_non_code: bool = False,
+    include_generated: bool = False,
 ) -> dict[str, Any]:
     """Identify structural weaknesses in the codebase.
 
@@ -290,6 +324,12 @@ def get_knowledge_gaps_func(
             keys and Step Functions (ASL) states as untested hotspots and the
             dunder methods of a class (``__init__``, ``__repr__``) as isolated
             nodes (default False).
+        include_generated: Include generated code such as jOOQ or protobuf output
+            (default False). Generated files are left out before ranking, like tests,
+            so ``summary`` and ``next_cursor`` describe the filtered list and
+            ``generated_excluded`` reports the isolated nodes and hotspot candidates that
+            removed (candidates are counted before their test coverage is looked up).
+            A cursor is only valid for the value it was made with.
 
     Returns:
         Gaps by category. ``summary`` maps each category to its untruncated
@@ -301,9 +341,11 @@ def get_knowledge_gaps_func(
 
     store, root = _get_store(repo_root or None)
     try:
+        stats: dict[str, int] = {}
         raw = find_knowledge_gaps(
             store, repo_root=root, max_isolated=None, max_untested=None,
             include_tests=include_tests, include_non_code=include_non_code,
+            include_generated=include_generated, stats=stats,
         )
         # Totals must come from the untruncated lists: the summary counts are
         # the whole point of the tool, and capping them would hide the gap.
@@ -313,7 +355,7 @@ def get_knowledge_gaps_func(
             raw, max_per_category, _MAX_GAPS_PER_CATEGORY, cursor,
             scope=make_scope(
                 "get_knowledge_gaps_tool", include_tests=include_tests,
-                include_non_code=include_non_code,
+                include_non_code=include_non_code, include_generated=include_generated,
             ),
             stamp=graph_stamp(store),
         )
@@ -327,6 +369,12 @@ def get_knowledge_gaps_func(
             "summary": totals,
             "gaps": gaps,
             "total_gaps": total,
+            "generated_excluded": {
+                "isolated_nodes": stats.get("generated_isolated_excluded", 0),
+                "untested_hotspot_candidates": stats.get(
+                    "generated_hotspot_candidates_excluded", 0,
+                ),
+            },
             "truncated": truncated,
             **page.fields(),
             "next_tool_suggestions": [
@@ -345,6 +393,7 @@ def get_surprising_connections_func(
     detail_level: str = "standard",
     cursor: str | None = None,
     include_tests: bool = False,
+    include_generated: bool = False,
 ) -> dict[str, Any]:
     """Find unexpected architectural coupling in the codebase.
 
@@ -364,22 +413,34 @@ def get_surprising_connections_func(
         include_tests: Include test nodes (default False). Tests are left out
             before ranking, so ``total`` and ``next_cursor`` describe the
             filtered list. A cursor is only valid for the value it was made with.
+        include_generated: Include generated code such as jOOQ or protobuf output
+            (default False). Generated files are left out before ranking, like tests,
+            so ``total`` and ``next_cursor`` describe the filtered list and
+            ``generated_excluded`` reports how many edges that removed. A cursor is
+            only valid for the value it was made with.
 
     Returns:
-        Ranked surprising edges. ``total`` reports the untruncated count and
-        ``truncated`` marks that ``top_n`` or the ceiling cut the list; then
+        Ranked surprising edges. Equal scores are ordered by the combined degree of the two
+        endpoints, then by name. ``group_count`` is the size of the source -> target-class
+        family a row belongs to (no row is dropped for it). ``total`` reports the untruncated
+        count and ``truncated`` marks that ``top_n`` or the ceiling cut the list; then
         ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     _validate_positive_int(top_n, "top_n")
 
     store, root = _get_store(repo_root or None)
     try:
+        stats: dict[str, int] = {}
         page = paginate(
             find_surprising_connections(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
+                include_generated=include_generated, stats=stats,
             ),
             top_n, _MAX_SURPRISING, cursor,
-            scope=make_scope("get_surprising_connections_tool", include_tests=include_tests),
+            scope=make_scope(
+                "get_surprising_connections_tool", include_tests=include_tests,
+                include_generated=include_generated,
+            ),
             stamp=graph_stamp(store),
         )
         surprises, total = page.items, page.total
@@ -388,9 +449,12 @@ def get_surprising_connections_func(
         return {
             "status": "ok",
             "summary": (
-                f"{total} surprising connection(s) ranked by surprise score"
+                f"{total} surprising connection(s) ranked by surprise score, ties by "
+                "combined endpoint degree"
                 + shown_range(page)
+                + _generated_note(include_generated, stats)
             ),
+            "generated_excluded": stats.get("generated_excluded", 0),
             "surprising_connections": surprises,
             "count": len(surprises),
             "total": total,
@@ -409,6 +473,7 @@ def get_surprising_connections_func(
 def get_suggested_questions_func(
     repo_root: str | None = None,
     include_tests: bool = False,
+    include_generated: bool = False,
 ) -> dict[str, Any]:
     """Auto-generate review questions from graph analysis.
 
@@ -424,10 +489,16 @@ def get_suggested_questions_func(
         repo_root: Repository root (auto-detected if omitted).
         include_tests: Include test nodes (default False), so the questions
             are about production code unless this is set.
+        include_generated: Include generated code such as jOOQ output (default False).
+            ``generated_excluded`` reports how many nodes and edges that removed.
     """
     store, _root = _get_store(repo_root or None)
     try:
-        questions = generate_suggested_questions(store, include_tests=include_tests)
+        stats: dict[str, int] = {}
+        questions = generate_suggested_questions(
+            store, include_tests=include_tests,
+            include_generated=include_generated, stats=stats,
+        )
         by_priority: dict[str, list[dict[str, Any]]] = {
             "high": [], "medium": [], "low": [],
         }
@@ -438,6 +509,7 @@ def get_suggested_questions_func(
         return {
             "questions": questions,
             "count": len(questions),
+            "generated_excluded": stats.get("generated_excluded", 0),
             "by_priority": {
                 k: len(v) for k, v in by_priority.items()
             },
