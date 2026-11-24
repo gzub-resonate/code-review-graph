@@ -2272,6 +2272,142 @@ def _used_as_jsx_value(
     return False
 
 
+# --- Next.js conventions, tooling-run files, same-file value references -------------------
+
+_NEXT_CONFIG_NAMES = ("next.config.js", "next.config.mjs", "next.config.ts")
+_NEXT_ROUTE_FILE = re.compile(
+    r"^(?:src/)?app/(?:.+/)?"
+    r"(?:page|layout|template|loading|error|global-error|not-found|default|route)"
+    r"\.(?:ts|tsx|js|jsx)$"
+)
+_NEXT_PAGES_FILE = re.compile(r"^(?:src/)?pages/.+\.(?:ts|tsx|js|jsx)$")
+_NEXT_ROOT_FILE = re.compile(
+    r"^(?:src/)?(?:middleware|proxy|instrumentation|instrumentation-client)\.(?:ts|js|mjs)$"
+)
+_NEXT_CONFIG_FILE = re.compile(r"^next\.config\.(?:js|mjs|ts)$")
+_NEXT_HTTP_VERBS = frozenset(
+    {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+)
+_NEXT_ROUTE_EXPORTS = frozenset(
+    {"generateMetadata", "generateStaticParams", "generateViewport", "metadata", "viewport"}
+)
+_NEXT_PAGES_EXPORTS = frozenset({"getServerSideProps", "getStaticProps", "getStaticPaths"})
+_NEXT_ROOT_EXPORTS = frozenset(
+    {"middleware", "proxy", "register", "onRequestError", "onRouterTransitionStart"}
+)
+_JS_TS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+_TOOLING_DIR_RE = re.compile(r"(?:^|/)(?:scripts|public|vendor|codemods)/")
+_TOOLING_GLOBAL_RE = re.compile(
+    r"(?:^|/)(?:global-setup|global-teardown|globalSetup|globalTeardown)\.[A-Za-z]+$"
+)
+_TOOLING_CONFIG_RE = re.compile(r"(?:^|/)(?:playwright[^/]*|vitest)\.config\.[A-Za-z]+$")
+_TEST_SUPPORT_RE = re.compile(
+    r"(?:^|/)(?:e2e|stories|__mocks__|\.storybook|cypress)/|\.(?:stories|spec|test)\.[^/]+$"
+)
+
+
+def is_test_support_path(file_path: str) -> bool:
+    """True for e2e/story/mock/spec paths, so a reviewer can triage them."""
+    return _TEST_SUPPORT_RE.search(file_path.replace("\\", "/")) is not None
+
+
+def _has_default_export(
+    node: GraphNode, cache: dict[str, Optional[list[str]]],
+) -> bool:
+    """True if the file default-exports *node* (``export default function Name``)."""
+    lines = _read_lines(node.file_path, cache)
+    if not lines:
+        return False
+    name = re.escape(node.name)
+    direct = re.compile(
+        rf"^\s*export\s+default\s+(?:async\s+)?(?:function\s*\*?|class|abstract\s+class)\s+{name}\b"
+    )
+    indirect = re.compile(rf"^\s*export\s+default\s+{name}\s*;?\s*$")
+    named = re.compile(rf"^\s*export\s*\{{[^}}]*\b{name}\s+as\s+default\b")
+    return any(direct.match(ln) or indirect.match(ln) or named.match(ln) for ln in lines)
+
+
+def _make_tooling_checker(
+    root: Optional[Union[str, Path]], cache: dict[str, Optional[list[str]]],
+):
+    """Return ``is_tooling_entry(node)`` for Next.js conventions and tooling-run files.
+
+    Next.js rules apply only when *root* holds ``next.config.{js,mjs,ts}`` (checked once).
+    Tooling rules (``scripts/``, ``public/``, ``vendor/``, ``codemods/``, Playwright and
+    Vitest config / global setup) apply to every JS/TS repo.  Any rule that must inspect
+    source reads it through *cache* and does not suppress when the file is unreadable.
+    """
+    has_next: list[bool] = []
+
+    def next_repo() -> bool:
+        if not has_next:
+            has_next.append(
+                root is not None and any((Path(root) / n).is_file() for n in _NEXT_CONFIG_NAMES)
+            )
+        return has_next[0]
+
+    def is_tooling_entry(node: GraphNode) -> bool:
+        if node.language not in _JS_TS_LANGUAGES:
+            return False
+        rel = _repo_relative(node.file_path, root) if root is not None else None
+        rel = (rel or "").replace("\\", "/")
+        if not rel:
+            return False
+        if _TOOLING_DIR_RE.search(rel) or _TOOLING_CONFIG_RE.search(rel):
+            return True
+        if _TOOLING_GLOBAL_RE.search(rel):
+            return _has_default_export(node, cache)
+        if not next_repo():
+            return False
+        if _NEXT_CONFIG_FILE.match(rel):
+            return True
+        if _NEXT_ROUTE_FILE.match(rel):
+            if node.name in _NEXT_HTTP_VERBS or node.name in _NEXT_ROUTE_EXPORTS:
+                return True
+            return _has_default_export(node, cache)
+        if _NEXT_PAGES_FILE.match(rel):
+            if node.name in _NEXT_PAGES_EXPORTS:
+                return True
+            return _has_default_export(node, cache)
+        if _NEXT_ROOT_FILE.match(rel):
+            return node.name in _NEXT_ROOT_EXPORTS or _has_default_export(node, cache)
+        return False
+
+    return is_tooling_entry
+
+
+def _used_as_value(
+    node: GraphNode, cache: dict[str, Optional[list[str]]], regexes: dict[str, re.Pattern[str]],
+) -> bool:
+    """True if the file passes ``name`` around as a value on a line other than its definition.
+
+    Covers ``arr.map(name)``, ``addEventListener('x', name)``, ``{ key: name }``,
+    ``alias = name;`` and ``name.bind(``.  Comment-only lines and matches inside string
+    literals (odd-quote guard) do not count.
+    """
+    lines = _read_lines(node.file_path, cache)
+    if not lines:
+        return False
+    pattern = regexes.get(node.name)
+    if pattern is None:
+        name = re.escape(node.name)
+        pattern = regexes[node.name] = re.compile(
+            rf"[(,]\s*{name}\s*[,)]|:\s*{name}\s*[,}}]|=\s*{name}\s*;"
+            rf"|(?<![\w$.]){name}\.bind\("
+        )
+    for idx, line in enumerate(lines, start=1):
+        if idx == node.line_start:
+            continue
+        if line.lstrip().startswith(("//", "/*", "*")):
+            continue
+        for match in pattern.finditer(line):
+            before = line[:match.start()]
+            if any(before.count(q) % 2 for q in ("'", '"', "`")):
+                continue
+            return True
+    return False
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -2490,6 +2626,8 @@ def find_dead_code(
     dead: list[dict[str, Any]] = []
     source_cache: dict[str, Optional[list[str]]] = {}
     jsx_regexes: dict[str, re.Pattern[str]] = {}
+    value_regexes: dict[str, re.Pattern[str]] = {}
+    tooling_entry = _make_tooling_checker(test_root, source_cache)
 
     for node in candidates:
 
@@ -2517,6 +2655,19 @@ def find_dead_code(
             node.kind == "Function"
             and node.language in _JSX_LANGUAGES
             and _used_as_jsx_value(node, source_cache, jsx_regexes)
+        ):
+            continue
+
+        # Next.js file conventions and files run by external tooling (codemods,
+        # Playwright global setup, vendored/public assets) have no in-repo caller.
+        if tooling_entry(node):
+            continue
+
+        # A local function passed by name (``items.map(fn)``) has no call edge.
+        if (
+            node.kind == "Function"
+            and node.language in _JS_TS_LANGUAGES
+            and _used_as_value(node, source_cache, value_regexes)
         ):
             continue
 
@@ -2815,6 +2966,7 @@ def find_dead_code(
                     "relative_path": rel,
                     "line": node.line_start,
                     "language": node.language,
+                    "test_support": is_test_support_path(rel),
                 })
 
     logger.info("find_dead_code: found %d dead symbols", len(dead))
