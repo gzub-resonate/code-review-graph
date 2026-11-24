@@ -12,7 +12,12 @@ from ..analysis import (
     generate_suggested_questions,
 )
 from ..paging import graph_stamp, make_scope, paginate, shown_range
-from ._common import _get_store, _page_together, _validate_positive_int
+from ._common import (
+    _get_store,
+    _page_together,
+    _relative_to_root,
+    _validate_positive_int,
+)
 
 # The ranking helpers already score every candidate before slicing, so asking
 # for "all" costs nothing extra and lets the tool report an honest ``total``.
@@ -26,8 +31,18 @@ _MAX_SURPRISING = 100
 _MAX_GAPS_PER_CATEGORY = 50
 
 _MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree")
-_MINIMAL_BRIDGE_FIELDS = ("name", "kind", "betweenness")
-_MINIMAL_SURPRISE_FIELDS = ("source", "target", "edge_kind", "surprise_score")
+# Two rows can share a bare name, so a minimal row also says where it is.
+_MINIMAL_BRIDGE_FIELDS = ("name", "qualified_name", "file", "kind", "betweenness")
+_MINIMAL_SURPRISE_FIELDS = (
+    "source", "source_qualified", "source_file",
+    "target", "target_qualified", "target_file",
+    "edge_kind", "surprise_score",
+)
+# Fields holding a path, or a qualified name that starts with one.
+_PATH_FIELDS = (
+    "file", "qualified_name", "source_qualified", "source_file",
+    "target_qualified", "target_file",
+)
 _MINIMAL_GAP_FIELDS = (
     "name", "qualified_name", "community_id", "size", "degree", "load_time",
 )
@@ -38,12 +53,26 @@ def _project(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[s
     return [{k: r[k] for k in fields if k in r} for r in rows]
 
 
+def _minimal(
+    rows: list[dict[str, Any]], fields: tuple[str, ...], root: Any,
+) -> list[dict[str, Any]]:
+    """Minimal rows, with paths relative to the repository root."""
+    return [
+        {
+            k: _relative_to_root(v, root) if k in _PATH_FIELDS and isinstance(v, str) else v
+            for k, v in row.items()
+        }
+        for row in _project(rows, fields)
+    ]
+
+
 def get_hub_nodes_func(
     repo_root: str | None = None,
     top_n: int = 10,
     detail_level: str = "standard",
     cursor: str | None = None,
     include_tests: bool = False,
+    exclude_leaf_primitives: bool = False,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -62,6 +91,10 @@ def get_hub_nodes_func(
         include_tests: Include test nodes (default False). Tests are left out
             before ranking, so ``total`` and ``next_cursor`` describe the
             filtered list. A cursor is only valid for the value it was made with.
+        exclude_leaf_primitives: Skip nodes with no outgoing CALLS or REFERENCES
+            to an indexed non-test node (a design-system component that many
+            files use resolves correctly and tells a reviewer little). Default
+            False.
 
     Returns:
         Ranked hubs. ``total`` reports the untruncated candidate count and
@@ -73,9 +106,15 @@ def get_hub_nodes_func(
     store, _root = _get_store(repo_root or None)
     try:
         page = paginate(
-            find_hub_nodes(store, top_n=_FETCH_ALL, include_tests=include_tests),
+            find_hub_nodes(
+                store, top_n=_FETCH_ALL, include_tests=include_tests,
+                exclude_leaf_primitives=exclude_leaf_primitives,
+            ),
             top_n, _MAX_HUB_NODES, cursor,
-            scope=make_scope("get_hub_nodes_tool", include_tests=include_tests),
+            scope=make_scope(
+                "get_hub_nodes_tool", include_tests=include_tests,
+                exclude_leaf_primitives=exclude_leaf_primitives,
+            ),
             stamp=graph_stamp(store),
         )
         hubs, total = page.items, page.total
@@ -119,7 +158,8 @@ def get_bridge_nodes_func(
         repo_root: Repository root (auto-detected if omitted).
         top_n: Number of top bridges to return (default 10, capped at 100).
         detail_level: "standard" (default) returns full node data;
-            "minimal" returns only name, kind, and betweenness.
+            "minimal" returns only name, qualified_name, file (both
+            relative to the repository root), kind, and betweenness.
         cursor: ``next_cursor`` from the previous reply, to read the next
             page of the ranking. Omit it for the first page. A cursor is
             opaque and only valid for the same graph.
@@ -134,7 +174,7 @@ def get_bridge_nodes_func(
     """
     _validate_positive_int(top_n, "top_n")
 
-    store, _root = _get_store(repo_root or None)
+    store, root = _get_store(repo_root or None)
     try:
         page = paginate(
             find_bridge_nodes(store, top_n=_FETCH_ALL, include_tests=include_tests),
@@ -144,7 +184,7 @@ def get_bridge_nodes_func(
         )
         bridges, total = page.items, page.total
         if detail_level == "minimal":
-            bridges = _project(bridges, _MINIMAL_BRIDGE_FIELDS)
+            bridges = _minimal(bridges, _MINIMAL_BRIDGE_FIELDS, root)
         return {
             "status": "ok",
             "summary": (
@@ -172,6 +212,7 @@ def get_knowledge_gaps_func(
     detail_level: str = "standard",
     cursor: str | None = None,
     include_tests: bool = False,
+    include_non_code: bool = False,
 ) -> dict[str, Any]:
     """Identify structural weaknesses in the codebase.
 
@@ -196,6 +237,9 @@ def get_knowledge_gaps_func(
             ``total_gaps`` and ``next_cursor`` describe the filtered lists.
             Configuration-document nodes (JsonPath, YamlPath, Output,
             ConfigProperty) are never reported as isolated nodes.
+        include_non_code: Also report documentation sections, lockfile entries,
+            Dockerfile stages and anything under ``.storybook`` or ``.github``
+            as isolated nodes and untested hotspots (default False).
 
     Returns:
         Gaps by category. ``summary`` maps each category to its untruncated
@@ -209,7 +253,7 @@ def get_knowledge_gaps_func(
     try:
         raw = find_knowledge_gaps(
             store, repo_root=root, max_isolated=None, max_untested=None,
-            include_tests=include_tests,
+            include_tests=include_tests, include_non_code=include_non_code,
         )
         # Totals must come from the untruncated lists: the summary counts are
         # the whole point of the tool, and capping them would hide the gap.
@@ -217,7 +261,10 @@ def get_knowledge_gaps_func(
 
         gaps, page = _page_together(
             raw, max_per_category, _MAX_GAPS_PER_CATEGORY, cursor,
-            scope=make_scope("get_knowledge_gaps_tool", include_tests=include_tests),
+            scope=make_scope(
+                "get_knowledge_gaps_tool", include_tests=include_tests,
+                include_non_code=include_non_code,
+            ),
             stamp=graph_stamp(store),
         )
         if detail_level == "minimal":
@@ -258,7 +305,9 @@ def get_surprising_connections_func(
         repo_root: Repository root (auto-detected if omitted).
         top_n: Number of top surprises to return (default 15, capped at 100).
         detail_level: "standard" (default) returns full edge records;
-            "minimal" returns only source, target, edge_kind, and score.
+            "minimal" returns only source and target (each with its
+            qualified name and file, relative to the repository root),
+            edge_kind, and score.
         cursor: ``next_cursor`` from the previous reply, to read the next
             page of the ranking. Omit it for the first page. A cursor is
             opaque and only valid for the same graph.
@@ -273,7 +322,7 @@ def get_surprising_connections_func(
     """
     _validate_positive_int(top_n, "top_n")
 
-    store, _root = _get_store(repo_root or None)
+    store, root = _get_store(repo_root or None)
     try:
         page = paginate(
             find_surprising_connections(
@@ -285,7 +334,7 @@ def get_surprising_connections_func(
         )
         surprises, total = page.items, page.total
         if detail_level == "minimal":
-            surprises = _project(surprises, _MINIMAL_SURPRISE_FIELDS)
+            surprises = _minimal(surprises, _MINIMAL_SURPRISE_FIELDS, root)
         return {
             "status": "ok",
             "summary": (

@@ -14,7 +14,14 @@ from .constants import (
     IMPORT_CONTEXT_PARENT_PACKAGE,
     IMPORT_CONTEXT_TYPE_ONLY,
 )
-from .graph import GraphEdge, GraphStore, _sanitize_name
+from .graph import (
+    RESOLUTION_UNRESOLVED,
+    GraphEdge,
+    GraphNode,
+    GraphStore,
+    _sanitize_name,
+)
+from .migrations import TARGET_RESOLUTION_KINDS
 from .parser import is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
@@ -23,6 +30,17 @@ logger = logging.getLogger(__name__)
 # and each row carries paths, so the rest is told as a count.
 _MAX_CYCLE_FILES = 10
 _MAX_CYCLE_HOPS = 10
+# The untested-hotspot list stops here; the tool never shows more.
+_MAX_UNTESTED_HOTSPOTS = 20
+# Files a package manager writes, whatever the ecosystem names them.
+_LOCKFILE_NAMES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "uv.lock", "pipfile.lock", "cargo.lock", "gemfile.lock",
+    "composer.lock", "go.sum", "gradle.lockfile", "packages.lock.json", "flake.lock",
+})
+_LOCKFILE_SUFFIXES = (".lock", ".lock.hcl", ".lockfile", "-lock.json", "-lock.yaml")
+# Folders that hold tooling around the code, not the code.
+_NON_CODE_DIRS = frozenset({".storybook", ".github"})
 
 
 #: Kinds that describe a configuration or data document, not code. A key in a JSON or YAML
@@ -40,26 +58,111 @@ def _is_test_node(node: Any, repo_root: str | None) -> bool:
     )
 
 
+def _is_non_code(node: GraphNode) -> bool:
+    """Is this node documentation, a lockfile entry or tooling, not code?
+
+    Such nodes are isolated or unreferenced by nature (an HTML anchor, a provider
+    pinned in ``.terraform.lock.hcl``, a Storybook mock, a Dockerfile stage), so
+    listing them as gaps tells the reader nothing.
+    """
+    if node.kind == "DocSection" or node.name.startswith("stage:"):
+        return True
+    parts = node.file_path.replace("\\", "/").lower().split("/")
+    base = parts[-1]
+    return (
+        base in _LOCKFILE_NAMES
+        or base.endswith(_LOCKFILE_SUFFIXES)
+        or base.startswith("dockerfile")
+        or base.endswith(".dockerfile")
+        or base == "containerfile"
+        or any(part in _NON_CODE_DIRS for part in parts[:-1])
+    )
+
+
+
+
+def _is_constructor(node: GraphNode) -> bool:
+    """Is this a constructor: a function named for the class that holds it?
+
+    Java, Kotlin, C# and Scala write constructors that way, and the parser flags
+    Java's. Frameworks (Guice, Spring) call them, so no call edge names them.
+    """
+    if node.kind != "Function":
+        return False
+    if node.extra.get("java_constructor"):
+        return True
+    return bool(node.parent_name) and node.name == node.parent_name.rsplit(".", 1)[-1]
+
+
+# Edges that say a node builds on another one.
+_OUTGOING_USE_KINDS = frozenset({"CALLS", "REFERENCES"})
+
+
+def _is_bare_name_edge(edge: GraphEdge, known: set[str]) -> bool:
+    """Is this call or reference bound to nothing but a bare name?
+
+    ``unresolved`` is what ``query_graph_tool`` counts as a guess: no node answers
+    to the target, so it is a name like ``get`` or ``parse`` that says nothing
+    about which symbol was meant. A graph that stores no verdict falls back to the
+    same node-existence test.
+    """
+    if edge.target_resolution is not None:
+        return edge.target_resolution == RESOLUTION_UNRESOLVED
+    return edge.kind in TARGET_RESOLUTION_KINDS and edge.target_qualified not in known
+
+
+def _traced_edges(
+    edges: list[GraphEdge], known: set[str],
+) -> tuple[list[GraphEdge], dict[str, int]]:
+    """The edges that name a node, and how many bare-name edges touch each node."""
+    traced: list[GraphEdge] = []
+    bare: dict[str, int] = Counter()
+    for e in edges:
+        if _is_bare_name_edge(e, known):
+            bare[e.source_qualified] += 1
+            bare[e.target_qualified] += 1
+        else:
+            traced.append(e)
+    return traced, bare
+
+
 def find_hub_nodes(
-    store: GraphStore, top_n: int = 10, include_tests: bool = True,
+    store: GraphStore,
+    top_n: int = 10,
+    include_tests: bool = True,
+    exclude_leaf_primitives: bool = False,
 ) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
 
     Test nodes are left out unless *include_tests* is true, before ranking.
 
+    Edges that are only a bare-name match (an unresolved call target such as
+    ``get`` or ``parse``) are not counted: they inflate whichever symbol makes
+    many calls and say nothing about structure. ``resolution_split`` tells how
+    many edges of each kind touch the node.
+
+    With *exclude_leaf_primitives*, nodes that call or reference no indexed
+    non-test node are skipped: a design-system component resolves correctly and
+    still tells a reviewer nothing.
+
     Returns list of dicts with: name, qualified_name, kind, file,
-    in_degree, out_degree, total_degree, community_id
+    in_degree, out_degree, total_degree, community_id, resolution_split
+    (``direct``: edges counted, ``bare_name``: edges left out)
     """
-    # Build degree counts from all edges
-    edges = store.get_all_edges()
+    # Get all non-File nodes
+    nodes = store.get_all_nodes(exclude_files=True)
+    node_map = {n.qualified_name: n for n in nodes}
+    edges, bare = _traced_edges(store.get_all_edges(), set(node_map))
     in_degree: dict[str, int] = Counter()
     out_degree: dict[str, int] = Counter()
+    builds_on: set[str] = set()
     for e in edges:
         out_degree[e.source_qualified] += 1
         in_degree[e.target_qualified] += 1
-
-    # Get all non-File nodes
-    nodes = store.get_all_nodes(exclude_files=True)
+        if e.kind in _OUTGOING_USE_KINDS:
+            target = node_map.get(e.target_qualified)
+            if target is not None and not target.is_test:
+                builds_on.add(e.source_qualified)
     community_map = store.get_all_community_ids()
     root = None if include_tests else store.get_repo_root()
 
@@ -73,6 +176,8 @@ def find_hub_nodes(
         total = ind + outd
         if total == 0:
             continue
+        if exclude_leaf_primitives and qn not in builds_on:
+            continue
         scored.append({
             "name": _sanitize_name(n.name),
             "qualified_name": n.qualified_name,
@@ -82,6 +187,7 @@ def find_hub_nodes(
             "out_degree": outd,
             "total_degree": total,
             "community_id": community_map.get(qn),
+            "resolution_split": {"direct": total, "bare_name": bare.get(qn, 0)},
         })
 
     # Equal degrees are ordered by qualified name, so a ranking read in pages never
@@ -105,8 +211,13 @@ def find_bridge_nodes(
     """
     import networkx as nx
 
-    # Build the graph — use cached version if available
-    nxg = store._build_networkx_graph()
+    # Build the graph — use cached version if available. A call to a bare name
+    # is no path: through it, every caller of ``get`` would sit next to every
+    # other, and the shortest paths between regions would run through names.
+    full = store._build_networkx_graph()
+    nxg = full.edge_subgraph(
+        (u, v) for u, v, d in full.edges(data=True) if not d.get("unresolved_target")
+    ).copy()
 
     # Compute betweenness centrality (approximate for large graphs)
     n_nodes = nxg.number_of_nodes()
@@ -149,7 +260,7 @@ def find_bridge_nodes(
     # Equal scores are ordered by qualified name, so a ranking read in pages never
     # repeats or skips a node.
     results.sort(key=lambda x: (-float(x["betweenness"]), str(x["qualified_name"])))  # type: ignore[arg-type]
-    del nxg, bc
+    del nxg, full, bc
     store.shrink_memory(clear_nx_cache=True)
     return results[:top_n]
 
@@ -275,10 +386,17 @@ def find_knowledge_gaps(
     store: GraphStore,
     repo_root: Path | None = None,
     max_isolated: int | None = 50,
-    max_untested: int | None = 20,
+    max_untested: int | None = _MAX_UNTESTED_HOTSPOTS,
     include_tests: bool = True,
+    include_non_code: bool = False,
 ) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
+
+    Documentation sections, lockfile entries, Dockerfile stages and anything under
+    ``.storybook`` or ``.github`` are left out of ``isolated_nodes`` and
+    ``untested_hotspots`` unless *include_non_code* is set. So are constructors
+    held by their class: a framework such as Guice calls them, so nothing in the
+    graph does. A constructor with no CONTAINS edge is still reported.
 
     Returns dict with categories:
     - isolated_nodes: degree <= 1, disconnected from graph
@@ -306,18 +424,29 @@ def find_knowledge_gaps(
 
     # Build degree map
     degree: dict[str, int] = Counter()
-    tested_nodes: set[str] = set()
+    contained: set[str] = set()
     for e in edges:
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
-        if e.kind == "TESTED_BY":
-            tested_nodes.add(e.source_qualified)
+        if e.kind == "CONTAINS":
+            contained.add(e.target_qualified)
+
+    def expected(n: GraphNode) -> bool:
+        """Never a gap: non-code, or a constructor its class contains (wired by a framework)."""
+        if include_non_code:
+            return False
+        return _is_non_code(n) or (_is_constructor(n) and n.qualified_name in contained)
 
     # 1. Isolated nodes (degree <= 1, not File)
     isolated = []
     for n in nodes:
         d = degree.get(n.qualified_name, 0)
-        if d <= 1 and n.kind not in CONFIG_DOCUMENT_KINDS:
+        # A config key is never a gap, except a non-code one (a lockfile entry) that
+        # include_non_code asked for.
+        config_key = n.kind in CONFIG_DOCUMENT_KINDS and not (
+            include_non_code and _is_non_code(n)
+        )
+        if d <= 1 and not config_key and not expected(n):
             isolated.append({
                 "name": _sanitize_name(n.name),
                 "qualified_name": n.qualified_name,
@@ -333,14 +462,18 @@ def find_knowledge_gaps(
     # whose members are all tests says nothing about production code.
     comm_prod: set[int] = set()
     comm_test: set[int] = set()
+    comm_code: set[int] = set()
     for n in all_nodes:
         cid = community_map.get(n.qualified_name)
         if cid is not None:
             comm_sizes[cid] += 1
             comm_files[cid].add(n.file_path)
             (comm_test if n.qualified_name in test_qns else comm_prod).add(cid)
+            if n.kind not in CONFIG_DOCUMENT_KINDS:
+                comm_code.add(cid)
 
-    # Thin communities (< 3 members)
+    # Thin communities (< 3 members). A community made only of JSON or YAML
+    # paths is one config document, which is a single file by nature.
     communities = sorted(
         (c for c in store.get_communities_list()
          if include_tests
@@ -350,6 +483,8 @@ def find_knowledge_gaps(
     thin = []
     for c in communities:
         cid = int(c["id"])
+        if cid not in comm_code and comm_sizes.get(cid, 0) > 0:
+            continue
         size = comm_sizes.get(cid, 0)
         if size < 3:
             thin.append({
@@ -358,21 +493,33 @@ def find_knowledge_gaps(
                 "size": size,
             })
 
-    # 3. Untested hotspots (degree >= 5, no TESTED_BY)
-    untested_hotspots = []
-    for n in nodes:
-        d = degree.get(n.qualified_name, 0)
-        if (d >= 5
-                and n.qualified_name not in tested_nodes
-                and not n.is_test):
-            untested_hotspots.append({
-                "name": _sanitize_name(n.name),
-                "qualified_name": n.qualified_name,
-                "kind": n.kind,
-                "file": n.file_path,
-                "degree": d,
-            })
-    untested_hotspots.sort(key=lambda x: (-x["degree"], x["qualified_name"]))  # type: ignore[operator]
+    # 3. Untested hotspots (degree >= 5, no covering test). "Tested" is what
+    # tests_for answers: a direct test, or one that reaches the node through
+    # test helpers. A test of something the node merely calls is not coverage.
+    # A hotspot is ranked like a hub: by the edges that name a node.
+    named: dict[str, int] = Counter()
+    for e in _traced_edges(edges, {n.qualified_name for n in nodes})[0]:
+        named[e.source_qualified] += 1
+        named[e.target_qualified] += 1
+    candidates = [
+        n for n in nodes
+        if named.get(n.qualified_name, 0) >= 5 and not n.is_test
+        and not expected(n)
+    ]
+    candidates.sort(key=lambda n: (-named.get(n.qualified_name, 0), n.qualified_name))
+    untested_hotspots: list[dict] = []
+    for n in candidates:
+        if max_untested is not None and len(untested_hotspots) >= max_untested:
+            break
+        if store.get_transitive_tests(n.qualified_name, include_callee_routes=False):
+            continue
+        untested_hotspots.append({
+            "name": _sanitize_name(n.name),
+            "qualified_name": n.qualified_name,
+            "kind": n.kind,
+            "file": n.file_path,
+            "degree": named[n.qualified_name],
+        })
 
     # 4. Single-file communities
     single_file = []
@@ -380,6 +527,8 @@ def find_knowledge_gaps(
         cid = int(c["id"])
         files = comm_files.get(cid, set())
         size = comm_sizes.get(cid, 0)
+        if cid not in comm_code:
+            continue
         if len(files) == 1 and size >= 3:
             single_file.append({
                 "community_id": cid,
@@ -412,18 +561,56 @@ def find_surprising_connections(
     Unless *include_tests* is true, an edge with a test node at either end is dropped
     before scoring and ranking.
     """
-    edges = store.get_all_edges()
     nodes = store.get_all_nodes(exclude_files=True)
     community_map = store.get_all_community_ids()
 
     node_map = {n.qualified_name: n for n in nodes}
     root = None if include_tests else store.get_repo_root()
+    # A bare-name match is no coupling, and one call made in five places is one
+    # row, not five: rank each (source, target, kind) once.
+    edges: list[GraphEdge] = []
+    row_keys: set[tuple[str, str, str]] = set()
+    traced, _bare = _traced_edges(store.get_all_edges(), set(node_map))
+    for e in traced:
+        key = (e.source_qualified, e.target_qualified, e.kind)
+        if key not in row_keys:
+            row_keys.add(key)
+            edges.append(e)
 
-    # Build degree map
-    degree: dict[str, int] = Counter()
+    # A class holding its method, or a JSON key holding its child, is how the
+    # code is laid out, never a coupling. Leave those edges out of the candidates
+    # (and so out of the totals). Degrees still count them: they are real links.
+    parent_of: dict[str, str] = {}
     for e in edges:
+        if e.kind == "CONTAINS":
+            parent_of.setdefault(e.target_qualified, e.source_qualified)
+    for qn, node in node_map.items():
+        if node.parent_name and qn not in parent_of:
+            owner = f"{node.file_path}::{node.parent_name}"
+            if owner in node_map:
+                parent_of[qn] = owner
+
+    def _is_ancestor(ancestor: str, qn: str) -> bool:
+        seen: set[str] = set()
+        while qn in parent_of and qn not in seen:
+            seen.add(qn)
+            qn = parent_of[qn]
+            if qn == ancestor:
+                return True
+        return False
+
+    # Build degree map from every traced edge, as the hub ranking counts them.
+    degree: dict[str, int] = Counter()
+    for e in traced:
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
+
+    edges = [
+        e for e in edges
+        if e.kind != "CONTAINS"
+        and not _is_ancestor(e.source_qualified, e.target_qualified)
+        and not _is_ancestor(e.target_qualified, e.source_qualified)
+    ]
 
     # Median degree for peripheral detection
     degrees = [d for d in degree.values() if d > 0]
@@ -493,6 +680,8 @@ def find_surprising_connections(
                 "source_qualified": e.source_qualified,
                 "target": _sanitize_name(tgt.name),
                 "target_qualified": e.target_qualified,
+                "source_file": src.file_path,
+                "target_file": tgt.file_path,
                 "edge_kind": e.kind,
                 "surprise_score": round(score, 2),
                 "reasons": reasons,
