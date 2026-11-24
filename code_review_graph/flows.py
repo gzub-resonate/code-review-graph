@@ -388,6 +388,8 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(
         r"^(?:[\w.]+\.)?(?:Command|Option|Parameters|ArgGroup)(?:\s*\(.*)?$", re.DOTALL,
     ),
+    # Spring Shell: @ShellMethod commands are dispatched by the shell by name.
+    re.compile(r"^(?:[\w.]+\.)?ShellMethod(?:Availability)?(?:\s*\(.*)?$", re.DOTALL),
     # Temporal Java callbacks are invoked by the workflow runtime.
     re.compile(r"(WorkflowMethod|ActivityMethod)", re.IGNORECASE),
     # JS/TS frameworks

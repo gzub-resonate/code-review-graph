@@ -62,6 +62,50 @@ def test_picocli_command_class_members_are_reachable(tmp_path):
     assert "orphan" in dead
 
 
+PICOCLI_METHODS = """package a;
+import picocli.CommandLine.Command;
+@Command(name = "x")
+public class Root implements Runnable {
+  @Command(name = "connect", description = "Connect")
+  public void connect() {}
+  public void run() {}
+}
+class Plain {
+  public void orphan() {}
+}
+"""
+
+SHELL = """package a;
+@ShellComponent
+public class ConnectCommand extends RemoteCommand {
+  @ShellMethod("Connect to the cluster.")
+  public String connect(String locators) { return ""; }
+  @ShellMethod("Disconnect.")
+  @ShellMethodAvailability("isAvailable")
+  public String disconnect() { return ""; }
+  public String neverCalled() { return ""; }
+}
+class Plain {
+  @ShellMethod("x") public String shellOnPlain() { return ""; }
+  public void orphan() {}
+}
+"""
+
+
+def test_picocli_command_methods_are_reachable(tmp_path):
+    dead = _dead(tmp_path, {"Root.java": PICOCLI_METHODS})
+    assert "connect" not in dead
+    assert "orphan" in dead
+
+
+def test_spring_shell_methods_are_reachable(tmp_path):
+    dead = _dead(tmp_path, {"ConnectCommand.java": SHELL})
+    for name in ("connect", "disconnect", "shellOnPlain"):
+        assert name not in dead
+    assert "neverCalled" in dead
+    assert "orphan" in dead
+
+
 def test_spring_handlers_and_lifecycle_callbacks_are_reachable(tmp_path):
     dead = _dead(tmp_path, {"Advice.java": ADVICE})
     for name in ("handleUnsupported", "helperInAdvice", "init", "close", "onRabbit", "onJms"):
