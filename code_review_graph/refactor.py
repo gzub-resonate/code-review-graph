@@ -2131,6 +2131,65 @@ def _is_scala_entry_point(
     return "main" in class_methods.get((node.file_path, node.name), ())
 
 
+# ``declare module 'x' {`` / ``declare global {`` at column 0: a TypeScript
+# augmentation block. Its members extend a type declared elsewhere.
+_TS_AUGMENTATION_RE = re.compile(
+    r"^(?:export\s+)?declare\s+(?:module\s+['\"][^'\"]+['\"]|global)\s*\{"
+)
+_JSX_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+
+
+def _read_lines(path: str, cache: dict[str, Optional[list[str]]]) -> Optional[list[str]]:
+    """Source lines of *path*, read once per call; ``None`` if unreadable."""
+    if path not in cache:
+        try:
+            cache[path] = Path(path).read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            cache[path] = None
+    return cache[path]
+
+
+def _in_ts_augmentation(node: GraphNode, cache: dict[str, Optional[list[str]]]) -> bool:
+    """True if *node* sits inside an unclosed column-0 augmentation block."""
+    lines = _read_lines(node.file_path, cache)
+    if not lines or not node.line_start:
+        return False
+    for idx in range(min(node.line_start, len(lines)) - 1, -1, -1):
+        line = lines[idx]
+        if idx != node.line_start - 1 and line.startswith("}"):
+            return False
+        if _TS_AUGMENTATION_RE.match(line):
+            return True
+    return False
+
+
+def _used_as_jsx_value(
+    node: GraphNode, cache: dict[str, Optional[list[str]]], regexes: dict[str, re.Pattern[str]],
+) -> bool:
+    """True if the file uses ``attr={name}`` on a line other than the definition."""
+    lines = _read_lines(node.file_path, cache)
+    if not lines:
+        return False
+    pattern = regexes.get(node.name)
+    if pattern is None:
+        pattern = regexes[node.name] = re.compile(
+            r"\w[\w.-]*\s*=\s*\{\s*" + re.escape(node.name) + r"\s*\}"
+        )
+    for idx, line in enumerate(lines, start=1):
+        if idx == node.line_start:
+            continue
+        stripped = line.lstrip()
+        if stripped.startswith(("//", "/*", "*")):
+            continue
+        for match in pattern.finditer(line):
+            before = line[:match.start()]
+            # A match inside a string literal is text, not a JSX attribute.
+            if any(before.count(q) % 2 for q in ("'", '"', "`")):
+                continue
+            return True
+    return False
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -2345,6 +2404,8 @@ def find_dead_code(
         class_methods.setdefault((method_file, method_parent), set()).add(method_name)
 
     dead: list[dict[str, Any]] = []
+    source_cache: dict[str, Optional[list[str]]] = {}
+    jsx_regexes: dict[str, re.Pattern[str]] = {}
 
     for node in candidates:
 
@@ -2354,6 +2415,25 @@ def find_dead_code(
 
         # Skip ambient type declarations (.d.ts) — they describe external APIs.
         if node.file_path.endswith(".d.ts"):
+            continue
+
+        # Interfaces and type aliases (stored as Class) inside a
+        # ``declare module '...' {}`` / ``declare global {}`` block augment a
+        # type declared elsewhere (e.g. MUI theme), so nothing references them.
+        if (
+            node.kind == "Class"
+            and node.language in ("typescript", "tsx")
+            and _in_ts_augmentation(node, source_cache)
+        ):
+            continue
+
+        # A function handed to a JSX attribute (``onClick={handler}``) creates no
+        # call edge in graphs built before the parser learned that pattern.
+        if (
+            node.kind == "Function"
+            and node.language in _JSX_LANGUAGES
+            and _used_as_jsx_value(node, source_cache, jsx_regexes)
+        ):
             continue
 
         # Skip dunder methods -- invoked by runtime, never have explicit callers.

@@ -3880,6 +3880,7 @@ _POWERSHELL_SCOPE_RE = re.compile(r"^(?:global|local|private|script):", re.IGNOR
 class CodeParser:
     """Parses source files using Tree-sitter and extracts structural information."""
 
+    _jsx_names_cache: Optional[tuple[tuple[Any, ...], set[str]]] = None
     _MODULE_CACHE_MAX = 15_000  # Evict cache to cap memory on huge monorepos
     _MAX_HTML_BYTES = 2_097_152
     _MAX_HTML_SECTIONS = 500
@@ -20994,11 +20995,70 @@ class CodeParser:
             self._ref_from_array(child, source, language, file_path, caller, edges, imap, dnames)
             return
 
+        # --- JSX: ``onClick={handler}`` / ``{renderRow}`` children ---
+        if node_type == "jsx_expression" and language in ("javascript", "typescript", "tsx"):
+            named = [c for c in child.children if c.is_named and c.type != "comment"]
+            if len(named) == 1 and named[0].type == "identifier":
+                self._emit_reference_if_known(
+                    named[0].text.decode("utf-8", errors="replace"),
+                    language, file_path, caller, edges, imap,
+                    self._jsx_known_names(child, file_path, dnames),
+                    line=named[0].start_point[0] + 1,
+                )
+            return
+
         # --- Callback arguments (identifier args inside call_expression) ---
         if node_type in self._ARGUMENTS_TYPES:
             self._ref_from_arguments(
                 child, source, language, file_path, caller, edges, imap, dnames,
             )
+
+    _JS_FUNCTION_VALUE_TYPES = frozenset({
+        "arrow_function", "function_expression", "function", "generator_function",
+    })
+
+    def _jsx_known_names(self, node, file_path: str, defined_names: set[str]) -> set[str]:
+        """File-scope defined names plus every function-valued name in the file.
+
+        React handlers are usually declared inside the component
+        (``const onSave = () => ...``), which the top-level scan misses.
+        The last result is kept so a file's JSX expressions share one walk.
+        """
+        root = node
+        while root.parent is not None:
+            root = root.parent
+        key = (file_path, root.id, root.end_byte, root.child_count)
+        cached = self._jsx_names_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        names = set(defined_names)
+        stack = [root]
+        while stack:
+            cur = stack.pop()
+            stack.extend(cur.children)
+            if cur.type in ("function_declaration", "generator_function_declaration"):
+                name_node = cur.child_by_field_name("name")
+            elif cur.type == "variable_declarator":
+                name_node = cur.child_by_field_name("name")
+                value = cur.child_by_field_name("value")
+                if value is None or name_node is None or name_node.type != "identifier":
+                    continue
+                if value.type in self._JS_FUNCTION_VALUE_TYPES:
+                    pass
+                elif value.type == "call_expression":
+                    arguments = value.child_by_field_name("arguments")
+                    if arguments is None or not any(
+                        a.type in self._JS_FUNCTION_VALUE_TYPES for a in arguments.children
+                    ):
+                        continue
+                else:
+                    continue
+            else:
+                continue
+            if name_node is not None and name_node.type == "identifier":
+                names.add(name_node.text.decode("utf-8", errors="replace"))
+        self._jsx_names_cache = (key, names)
+        return names
 
     def _emit_reference_if_known(
         self,
