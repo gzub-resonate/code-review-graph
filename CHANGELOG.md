@@ -8,7 +8,6 @@
   files are read from Git and parsed in memory as `pr_blast_radius_tool` does, matched to the base
   graph, and scored by the same analysis as a working-tree diff (risk score, flows, test gaps,
   priorities, churn). A `pull_request` section lists the symbols the pull request adds and removes.
-  `analyze_changes` accepts `changed_nodes` for callers that already know the changed symbols.
 - `pr_blast_radius_tool` gives the blast radius of a pull request from its changed files, so files the
   pull request adds are included although the graph, built from the default branch, has never seen
   them. It reads the files from Git (`pr=<number>` fetches `refs/pull/<n>/head` into a temporary repository that is removed after the call),
@@ -275,9 +274,10 @@
 
 - `detect_changes_tool` with `pr` or `head` no longer sends every added symbol name when
   `detail_level="minimal"`: the `pull_request` section then carries the two commits and the
-  added and removed totals only. In the standard level the name lists are cut at 25 per file and
-  50 files, `symbols_truncated` says when that happened, and the totals count every symbol. Names
-  are sanitised like any node name.
+  added and removed totals only. In the standard level the names are paged like the other lists:
+  `max_results` rows a page, `symbols_truncated` says while rows remain, and the same `next_cursor`
+  reads the next page of changed functions and of symbols together. The totals count every symbol.
+  Names are sanitised like any node name.
 - `pr_blast_radius_tool` and `detect_changes_tool` accept a `head` commit or a `base` branch the
   checkout has not fetched. A full commit SHA, or a branch name, is fetched from `origin` when the
   checkout lacks it. An unresolvable ref now fails with an error naming the ref (`head` or
@@ -428,6 +428,7 @@
 
 ### Internal
 
+- `analyze_changes` accepts `changed_nodes`, for callers that already know the changed symbols.
 - `ember_extract.py`, `ember_template.py` and `ember_resolver.py` add the Ember
   support; tests are `test_ember_parser.py`, `test_ember_template.py` (including
   hostile-input bounds) and `test_ember_resolver.py`, over the synthetic apps in
