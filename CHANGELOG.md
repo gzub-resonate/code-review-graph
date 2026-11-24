@@ -4,6 +4,16 @@
 
 ### Added
 
+- `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has
+  no callers in the graph, so it used to look safe: a pull request adding 75 production symbols
+  reported one changed function. `pull_request.new_code` gives the totals (symbols added, tests
+  added, symbols no test in the pull request calls, the highest score) and, beyond `minimal`, one
+  page of scored symbols, riskiest first, each with how a test was tied to it (`coverage`: `linked`,
+  `name_only`, `unit_only` or `none`), the tests, and the reasons: no test, a new endpoint, a
+  security-looking name, size and branching. The overall `risk_score` is now the higher of that and
+  the changed symbols' score, and `risk_breakdown` shows both. The score is a heuristic: a test
+  is tied to a symbol by the names the parser reads, not by a resolved call. The same `cursor` pages
+  the scored symbols with the changed functions and the symbol names.
 - `CRG_DEFAULT_IGNORE` sets ignore patterns for every repository without editing each one, for
   example `src/generated/**,.claude/**` (comma or newline separated, same syntax as
   `.code-review-graphignore`). Full builds and updates honour it, and a file already in the graph
@@ -461,6 +471,9 @@
 
 ### Internal
 
+- `new_code.py` scores a pull request's added symbols; `pr_blast_radius.analyse` keeps each file's
+  added production symbols and test symbols (`FileReport.new_symbols`) for it. Tests are
+  `test_new_code.py`.
 - `tests/test_cross_repo_ranking_budget.py` covers the match tiers, the paging walk in ranked order,
   the call budget (a monkeypatched clock through `registry_tools._now`) and the
   `CRG_CROSS_REPO_BUDGET_SECONDS` validation in `constants.cross_repo_budget_seconds`.
