@@ -311,6 +311,13 @@
 
 ### Fixed
 
+- A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
+  declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
+  unresolved unless the base class was imported, so `callers_of` and impact radius missed every
+  test or subclass that used an inherited helper. On a 935-file Java service this linked 693
+  more calls (15,908 to 16,601 resolved Java calls). A call whose class extends a type outside
+  the repository, or whose method name is overloaded, is still left unresolved or marked
+  ambiguous rather than guessed.
 - `refactor_tool(mode="dead_code")` no longer lists a Dockerfile build stage (`stage:0`, `stage:builder`) as dead code.
 - `cross_repo_search_tool` ranks an exact name first. Scores differ between repos, so ordering by
   repo-local rank alone put other repos' weak first hits ahead of the exact match, and a repo's
