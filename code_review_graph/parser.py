@@ -37,6 +37,8 @@ from . import dead_code_evidence as _dead_code_evidence
 from . import scala_parse as _scala_parse
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
+    E2E_DIR_RE,
+    E2E_FILE_NAME_RES,
     IMPORT_CONTEXT_DEFERRED,
     IMPORT_CONTEXT_KEY,
     IMPORT_CONTEXT_PARENT_PACKAGE,
@@ -1881,7 +1883,9 @@ _TEST_DIR_PATTERNS = [
     # ships a ``test`` subpackage keeps its production status.
     re.compile(_SEP + r"tests[\\/]"),
     re.compile(_SEP + r"__tests__[\\/]"),
-    re.compile(_SEP + r"e2e[_-]?tests?[\\/]"),
+    # End-to-end suites: ``e2e/``, ``e2e-tests/``, ``end-to-end/`` ... (whole
+    # segments only; see constants.E2E_DIR_RE).
+    E2E_DIR_RE,
     re.compile(_SEP + r"testthat[\\/]"),
     # Ruby RSpec.  The directory name alone is not evidence: "spec/" and
     # "specs/" just as often hold design documents or generated API specs,
@@ -1915,6 +1919,8 @@ _TEST_NAME_PATTERNS = [
     re.compile(r"\.(?:test|spec)\.[cm]?[jt]sx?$"),
     # Storybook CSF files demonstrate components; they are not production callers.
     _STORYBOOK_FILE_RE,
+    # End-to-end specs and page objects: ``login.e2e.ts``, ``a.e2e-spec.ts``.
+    *E2E_FILE_NAME_RES,
     # Go.
     re.compile(r"_test\.go$"),
     # Ruby.
