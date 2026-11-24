@@ -113,6 +113,10 @@ code-review-graph detect-changes --details all # Add bounded graph context under
                                                 #   risk, communities, hubs, coupling, impact, gaps, graph.
                                                 #   Off by default; the GitHub Action's `details` input uses it.
 code-review-graph dead-code                    # Functions/classes with no callers or test references
+                                                #   A bare name passed as a value, a type-position use, a Class.MEMBER
+                                                #   read, a re-export (__init__.py, export ... from), a Scala main or
+                                                #   `extends App` object, an inline handler string (onclick="fn()") and
+                                                #   Terraform resource/module/output/provider blocks all count as used.
 code-review-graph dead-code --kind Function --file-pattern src/ --json
 code-review-graph dead-code --limit 20         # 0, the default, means no limit
 

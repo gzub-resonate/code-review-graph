@@ -318,6 +318,21 @@
 
 ### Fixed
 
+- Dead-code detection (`refactor_tool` dead-code mode, `code-review-graph dead-code`) no longer
+  reports code that is used without a call naming it. A bare name passed as a value
+  (`xs.map(fn)`, `register(handler)`, `callback=fn`) counts as a use of a function of that name in
+  the same file, including functions nested in a wrapper or an HTML script block. A type in a type
+  position (Python annotations, Java and Scala type identifiers, a TypeScript `const X: T = () => ...`
+  annotation) and a `Class.MEMBER` read count as a use of the class. Names re-exported from an
+  `__init__.py`, or by `export { X } from` and `export * from`, count as used. A Scala `main`, an
+  `object` that has one, and an `object ... extends App` are entry points. `onclick="fn(...)"`,
+  `hx-on*` and `js:fn()` handler text, in a template or built inside any source file, counts as a
+  use of a function of that name in an HTML or JavaScript file. Terraform `resource`, `module`,
+  `output` and `provider` blocks are never reported; `variable` and `local` still are. On the
+  four repositories measured, reports fell from 354 to 202 (Python), 1,733 to 440 (TypeScript),
+  231 to 189 (Scala) and 2,877 to 300 (HCL).
+- A JavaScript or TypeScript arrow function passed inline (`items.map(item => item.id)`) no longer
+  becomes a function node named after its parameter, which dead-code reports listed as unused.
 - A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
   declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
   unresolved unless the base class was imported, so `callers_of` and impact radius missed every

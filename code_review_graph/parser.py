@@ -33,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 from . import asl_parse, ember_extract, ember_template, js_api_extract, py_api_extract
+from . import dead_code_evidence as _dead_code_evidence
 from . import scala_parse as _scala_parse
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
@@ -4482,6 +4483,10 @@ class CodeParser:
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
+        self._emit_dead_code_evidence(
+            tree.root_node, source, language, file_path_str, nodes, edges,
+            import_map, defined_names,
+        )
 
         if language == "java":
             edges = self._qualify_java_same_package_constructors(
@@ -4849,6 +4854,165 @@ class CodeParser:
             ))
 
         return nodes, edges
+
+    def _emit_dead_code_evidence(
+        self,
+        root,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> None:
+        """Record uses that no call names, for the dead-code detector.
+
+        Bare names passed as values, types in type positions and ``Name.member``
+        reads resolve to a definition in the same file (or to a known import);
+        re-exports carry the names they re-export; handler strings name the
+        function a browser runs. See :mod:`code_review_graph.dead_code_evidence`.
+        """
+        try:
+            self._emit_value_reference_edges(
+                root, language, file_path, nodes, edges, import_map, defined_names,
+            )
+            self._emit_reexport_names(root, language, file_path, edges)
+            if language != "html":
+                self._emit_inline_handler_edges(source, file_path, edges)
+        except RecursionError:  # pragma: no cover - defensive
+            logger.warning("dead-code evidence skipped for %s", file_path)
+
+    def _emit_value_reference_edges(
+        self,
+        root,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> None:
+        candidates = _dead_code_evidence.value_candidates(root, language)
+        if not candidates:
+            return
+        by_name: dict[str, list[NodeInfo]] = {}
+        for node in nodes:
+            if node.kind in ("Function", "Class", "Test"):
+                by_name.setdefault(node.name, []).append(node)
+        seen = {
+            (e.target, e.line) for e in edges
+            if e.kind in ("REFERENCES", "CALLS") and e.source == file_path
+        }
+        bare_type_names: set[str] = set()
+        for name, line, form in candidates:
+            if name in self._VALUE_REF_SKIP_NAMES or len(name) <= 1:
+                continue
+            if name in _dead_code_evidence.TYPE_USE_STOPLIST and form != "arg":
+                continue
+            targets: list[str] = []
+            for node in by_name.get(name, ()):
+                if form == "arg":
+                    # A bare name reads a variable or function in scope, so a
+                    # method only counts where the language writes it bare.
+                    if node.parent_name and language not in ("java", "scala"):
+                        continue
+                elif node.kind != "Class":
+                    continue
+                targets.append(self._node_qualified(node))
+            if not targets and (name in import_map or name in defined_names):
+                if name.isupper():
+                    continue
+                targets.append(self._resolve_call_target(
+                    name, file_path, language, import_map, defined_names,
+                ))
+            if (
+                not targets
+                and form in ("type", "member")
+                and language in ("java", "scala")
+                and name[:1].isupper()
+                and name not in bare_type_names
+            ):
+                # Same package, no import to follow: the name is all the file
+                # says. The dead-code check accepts it for a class that is
+                # unique, or whose file this one imports.
+                bare_type_names.add(name)
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=file_path,
+                    target=name,
+                    file_path=file_path,
+                    line=line,
+                    extra={"use_form": form},
+                ))
+            for target in targets:
+                if (target, line) in seen:
+                    continue
+                seen.add((target, line))
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=file_path,
+                    target=target,
+                    file_path=file_path,
+                    line=line,
+                    extra={"use_form": form},
+                ))
+
+    def _emit_reexport_names(
+        self, root, language: str, file_path: str, edges: list[EdgeInfo],
+    ) -> None:
+        """Mark the import edges of a re-exporting module with the names."""
+        if language == "python" and Path(file_path).name == "__init__.py":
+            for child in root.children:
+                if child.type != "import_from_statement":
+                    continue
+                names = _dead_code_evidence.python_reexport_names(child)
+                line = child.start_point[0] + 1
+                for edge in edges:
+                    if edge.kind == "IMPORTS_FROM" and edge.line == line:
+                        edge.extra = {**edge.extra, "reexport_names": names}
+        elif language in ("javascript", "typescript", "tsx"):
+            for child in root.children:
+                if child.type != "export_statement":
+                    continue
+                parsed = _dead_code_evidence.js_reexport(child)
+                if parsed is None:
+                    continue
+                spec, names = parsed
+                line = child.start_point[0] + 1
+                existing = [
+                    e for e in edges if e.kind == "IMPORTS_FROM" and e.line == line
+                ]
+                if existing:
+                    for edge in existing:
+                        edge.extra = {**edge.extra, "reexport_names": names}
+                    continue
+                target = self._resolve_module_to_file(spec, file_path, language) or spec
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM",
+                    source=file_path,
+                    target=target,
+                    file_path=file_path,
+                    line=line,
+                    extra={"reexport_names": names},
+                ))
+
+    def _emit_inline_handler_edges(
+        self, source: bytes, file_path: str, edges: list[EdgeInfo],
+    ) -> None:
+        """``onclick="fn(...)"`` written inside a source file names ``fn``."""
+        if b"=" not in source or not _dead_code_evidence.INLINE_HANDLER_HINT.search(source):
+            return
+        text = source.decode("utf-8", errors="replace")
+        for name in _dead_code_evidence.inline_handler_names(text):
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=file_path,
+                target=name,
+                file_path=file_path,
+                line=1,
+                extra={"inline_handler": True},
+            ))
 
     def _emit_ember_reexports(
         self, root, file_path: str, language: str, edges: list[EdgeInfo],
@@ -5303,8 +5467,10 @@ class CodeParser:
                     attributes = _html_attributes(start_tag)
                     line = start_tag.start_point[0] + 1
                     for name, value in attributes.items():
-                        if name.startswith("on") and value:
+                        if value and name.startswith(("on", "hx-on", "x-on:", "@")):
                             handlers.append((name, value, line))
+                        elif value and name.startswith("hx-") and value.lstrip().startswith("js:"):
+                            handlers.append((name, value.lstrip()[3:], line))
                     self._add_html_section(
                         node, _html_tag_name(start_tag), attributes, file_path_str,
                         test_file, sections, file_node,
@@ -5333,7 +5499,8 @@ class CodeParser:
             for node in classic_nodes
             if node.kind in ("Function", "Test") and not node.parent_name
         }
-        for event, value, line in handlers if page_functions else []:
+        bare_handlers: set[str] = set()
+        for event, value, line in handlers:
             seen: set[str] = set()
             for called in self._html_handler_calls(value):
                 if called in page_functions and called not in seen:
@@ -5346,6 +5513,19 @@ class CodeParser:
                         line=line,
                         extra={"html_event": event},
                     ))
+                elif called not in page_functions:
+                    bare_handlers.add(called)
+        # A function the page does not define may live in a script or partial
+        # the page loads: the dead-code check matches these by name.
+        for called in sorted(bare_handlers)[:_dead_code_evidence.MAX_INLINE_HANDLER_NAMES]:
+            all_edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=file_path_str,
+                target=called,
+                file_path=file_path_str,
+                line=1,
+                extra={"inline_handler": True},
+            ))
 
         # Not only on test pages: a ``test_`` function is a test anywhere, as in
         # a ``.js`` file.
@@ -5449,6 +5629,9 @@ class CodeParser:
             import_map, defined_names = self._collect_file_scope(
                 script_tree.root_node, script_lang, raw_text.text, file_path,
             )
+            defined_names |= _dead_code_evidence.nested_function_names(
+                script_tree.root_node,
+            ) - import_map.keys()
             is_module = attributes.get("type", "").strip().lower() == "module"
             blocks.append((
                 script_tree.root_node, raw_text.text, script_lang,
@@ -15880,9 +16063,9 @@ class CodeParser:
             # definition, and what it evaluates besides the component still belongs
             # to the enclosing scope. That starts with its type annotation:
             # `const Card: FC<Props> = memo(...)` references Props from here.
-            rest: list = []
-            if wrapper_calls:
-                rest = [sub for sub in declarator.children if sub.type == "type_annotation"]
+            rest: list = [
+                sub for sub in declarator.children if sub.type == "type_annotation"
+            ]
             for wrapper_call in wrapper_calls:
                 # `memo(...)` and any wrapper it nests are called where the
                 # declaration is, so the edges belong to the enclosing function.
@@ -24229,6 +24412,12 @@ class CodeParser:
 
     def _get_name(self, node, language: str, kind: str) -> Optional[str]:
         """Extract the name from a class/function definition node."""
+        # An arrow function has no name of its own. ``items.map(item => item.id)``
+        # is not a function called ``item``: the first identifier child is its
+        # parameter. A bound arrow (``const f = () => 1``) is named by
+        # ``_extract_js_variable_function`` from the variable instead.
+        if node.type == "arrow_function" and language in ("javascript", "typescript", "tsx"):
+            return None
         if language == "powershell":
             for child in node.children:
                 if child.type in ("function_name", "simple_name"):
