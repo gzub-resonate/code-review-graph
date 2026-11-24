@@ -273,3 +273,115 @@ class TestArrowCallbackParameterIsNotAFunction:
         path.write_text(src, encoding="utf-8")
         nodes, _ = CodeParser().parse_file(path)
         assert [n.name for n in nodes if n.kind == "Function"] == ["ids"]
+
+
+_JSX_SRC = (
+    "import React from 'react';\n"
+    "const handleSave = () => 1;\n"
+    "const neverUsed = () => 2;\n"
+    "const onlyInComment = () => 3;\n"
+    "const onlyInString = () => 4;\n"
+    "// onClick={onlyInComment}\n"
+    "const label = 'onClick={onlyInString}';\n"
+    "export function Panel() {\n"
+    "  return <Button onClick={handleSave} title={label}/>;\n"
+    "}\n"
+)
+
+
+def _dead_without_references(tmp_path: Path, files: dict[str, str]) -> set[str]:
+    """Like ``_dead`` but on a graph built before the parser emitted JSX edges."""
+    repo = tmp_path / "repo"
+    paths = []
+    for rel, text in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        paths.append(path)
+    (repo / ".git").mkdir(exist_ok=True)
+    parser = CodeParser(repo)
+    store = GraphStore(tmp_path / "graph.db")
+    try:
+        for path in paths:
+            nodes, edges = parser.parse_file(path)
+            edges = [e for e in edges if e.kind != "REFERENCES"]
+            store.store_file_nodes_edges(str(path), nodes, edges, "")
+        return {d["name"] for d in find_dead_code(store, root=repo)}
+    finally:
+        store.close()
+
+
+class TestJsxHandlers:
+    def test_parser_emits_reference_for_jsx_attribute_value(self, tmp_path):
+        path = tmp_path / "Panel.jsx"
+        path.write_text(_JSX_SRC, encoding="utf-8")
+        _, edges = CodeParser().parse_file(path)
+        targets = {e.target.rsplit("::", 1)[-1] for e in edges if e.kind == "REFERENCES"}
+        assert "handleSave" in targets
+        assert "neverUsed" not in targets
+
+    def test_parser_reference_for_jsx_child_expression(self, tmp_path):
+        src = (
+            "const renderRow = () => null;\n"
+            "export function List() { return <ul>{renderRow}</ul>; }\n"
+        )
+        path = tmp_path / "List.tsx"
+        path.write_text(src, encoding="utf-8")
+        _, edges = CodeParser().parse_file(path)
+        assert any(
+            e.kind == "REFERENCES" and e.target.endswith("renderRow") for e in edges
+        )
+
+    def test_indexed_handler_not_dead_unreferenced_still_dead(self, tmp_path):
+        dead = _dead(tmp_path, {"Panel.jsx": _JSX_SRC})
+        assert "handleSave" not in dead
+        assert "neverUsed" in dead
+
+    def test_query_fallback_on_old_graph(self, tmp_path):
+        dead = _dead_without_references(tmp_path, {"Panel.jsx": _JSX_SRC})
+        assert "handleSave" not in dead
+        # Mentions in a comment or a string do not count as uses.
+        assert {"neverUsed", "onlyInComment", "onlyInString"} <= dead
+
+    def test_query_fallback_declared_and_exported_still_dead(self, tmp_path):
+        src = (
+            "export const selectRdsError = (s) => s.rds.error;\n"
+            "function WavePanelistTrafficManager() { return null; }\n"
+        )
+        dead = _dead_without_references(tmp_path, {"sel.jsx": src})
+        assert {"selectRdsError", "WavePanelistTrafficManager"} <= dead
+
+
+class TestTsAugmentation:
+    _THEME = (
+        "declare module '@mui/material/styles' {\n"
+        "  interface Palette { brand: string }\n"
+        "  type Extra = { a: number };\n"
+        "}\n"
+        "interface TrulyDead { x: number }\n"
+        "declare global {\n"
+        "  interface Window { app: string }\n"
+        "}\n"
+        "export const theme = 1;\n"
+    )
+
+    def test_members_of_augmentation_blocks_not_dead(self, tmp_path):
+        dead = _dead(tmp_path, {"theme.ts": self._THEME})
+        assert not {"Palette", "Extra", "Window"} & dead
+        assert "TrulyDead" in dead
+
+    def test_unreadable_file_does_not_suppress(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        path = repo / "theme.ts"
+        path.write_text(self._THEME, encoding="utf-8")
+        nodes, edges = CodeParser(repo).parse_file(path)
+        path.unlink()
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            store.store_file_nodes_edges(str(path), nodes, edges, "")
+            dead = {d["name"] for d in find_dead_code(store, root=repo)}
+        finally:
+            store.close()
+        assert "Palette" in dead
