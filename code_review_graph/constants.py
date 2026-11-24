@@ -109,6 +109,67 @@ def _bounded_float_env(
         return default
     return value
 
+# ---------------------------------------------------------------------------
+# Operator-wide ignore patterns
+# ---------------------------------------------------------------------------
+
+DEFAULT_IGNORE_ENV = "CRG_DEFAULT_IGNORE"
+#: At most this many patterns in ``CRG_DEFAULT_IGNORE``.
+DEFAULT_IGNORE_MAX_PATTERNS = 200
+#: Longest single pattern accepted, in characters.
+DEFAULT_IGNORE_MAX_PATTERN_LENGTH = 256
+
+
+def default_ignore_patterns() -> list[str]:
+    """Return the patterns in ``CRG_DEFAULT_IGNORE``, validated.
+
+    Patterns use the ``.code-review-graphignore`` glob syntax and are separated
+    by commas or newlines. Surrounding whitespace is stripped and blank entries
+    are dropped. Unset or blank means no patterns.
+
+    Read on every call so a long-lived server sees the value it was started
+    with, and so tests can set it per case.
+
+    Raises:
+        CodeReviewGraphError: too many patterns, a pattern that is too long or
+            contains a control character, or a ``!`` negation (negations belong
+            in a repository's own ``.code-review-graphignore``). A wrong
+            setting must stop the run: skipping it silently would index the
+            generated code the operator meant to exclude.
+    """
+    from .errors import CodeReviewGraphError
+
+    raw = os.environ.get(DEFAULT_IGNORE_ENV)
+    if raw is None or not raw.strip():
+        return []
+    patterns = [
+        part.strip()
+        for part in raw.replace("\r", "\n").replace(",", "\n").split("\n")
+        if part.strip()
+    ]
+    if len(patterns) > DEFAULT_IGNORE_MAX_PATTERNS:
+        raise CodeReviewGraphError(
+            f"{DEFAULT_IGNORE_ENV} has {len(patterns)} patterns; the limit is "
+            f"{DEFAULT_IGNORE_MAX_PATTERNS}. Shorten the list or use broader globs."
+        )
+    for pattern in patterns:
+        if len(pattern) > DEFAULT_IGNORE_MAX_PATTERN_LENGTH:
+            raise CodeReviewGraphError(
+                f"{DEFAULT_IGNORE_ENV} has a pattern of {len(pattern)} characters "
+                f"(limit {DEFAULT_IGNORE_MAX_PATTERN_LENGTH}): {pattern[:40]!r}..."
+            )
+        if any(ord(char) < 32 or ord(char) == 127 for char in pattern):
+            raise CodeReviewGraphError(
+                f"{DEFAULT_IGNORE_ENV} has a pattern with a control character: {pattern!r}."
+            )
+        if pattern.startswith("!"):
+            raise CodeReviewGraphError(
+                f"{DEFAULT_IGNORE_ENV} cannot hold the negation {pattern!r}. "
+                "Spare a path with a '!' line in the repository's .code-review-graphignore."
+            )
+    return patterns
+
+
 SECURITY_KEYWORDS: frozenset[str] = frozenset({
     "auth", "login", "password", "token", "session", "crypt", "secret",
     "credential", "permission", "sql", "query", "execute", "connect",
@@ -204,6 +265,30 @@ def discovery_timeout() -> float:
             "discovery.", DISCOVERY_TIMEOUT_ENV, raw, fallback,
         )
         return fallback
+    return value
+
+
+#: Seconds one ``cross_repo_search_tool`` or ``cross_repo_requests_tool`` call may
+#: spend before it stops starting new repositories. ``0`` means no limit.
+CROSS_REPO_BUDGET_ENV = "CRG_CROSS_REPO_BUDGET_SECONDS"
+CROSS_REPO_BUDGET_DEFAULT = 60.0
+
+
+def cross_repo_budget_seconds() -> float:
+    """Return the per-call time budget of the cross-repo tools, ``0`` for none.
+
+    Resolved on every call, so a long-lived server sees a change made with the
+    variable. An unparseable, non-finite or negative value logs a warning and
+    falls back to :data:`CROSS_REPO_BUDGET_DEFAULT` rather than raising inside a
+    tool call or silently removing the bound.
+    """
+    value = env_float(CROSS_REPO_BUDGET_ENV, CROSS_REPO_BUDGET_DEFAULT)
+    if value < 0:
+        logger.warning(
+            "Ignoring invalid %s=%r (negative); using the default %s.",
+            CROSS_REPO_BUDGET_ENV, value, CROSS_REPO_BUDGET_DEFAULT,
+        )
+        return CROSS_REPO_BUDGET_DEFAULT
     return value
 
 

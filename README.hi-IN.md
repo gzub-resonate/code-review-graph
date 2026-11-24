@@ -676,6 +676,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git संक्रियाओं की समय सीमा (सेकंड में; build / update / watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | जब किसी रिव्यू टूल या कमांड को फ़ाइल सूची स्पष्ट रूप से नहीं दी गई हो, तब बदलाव पता करने वाली प्रत्येक Git कमांड की समय सीमा (सेकंड में)। सीमा पार होने पर त्रुटि मिलती है, "कोई बदलाव नहीं" नहीं | `5` (`CRG_GIT_TIMEOUT` स्पष्ट रूप से सेट हो तो वही) |
+| `CRG_DEFAULT_IGNORE` | हर रिपॉज़िटरी पर लागू अतिरिक्त अनदेखी पैटर्न, रिपॉज़िटरी की अपनी `.code-review-graphignore` के अतिरिक्त (वही सिंटैक्स; अल्पविराम या नई पंक्ति से अलग)। उदाहरण: `src/generated/**,.claude/**`। रिपॉज़िटरी की `.code-review-graphignore` में `!path` पंक्ति इन पैटर्न से बाहर किए गए पथ को बचा लेती है। 200 से अधिक पैटर्न, 256 से लंबा पैटर्न, कंट्रोल कैरेक्टर या `!` से शुरू होने वाली प्रविष्टि त्रुटि है | - |
 | `CRG_DATA_DIR` | ग्राफ़ डेटाबेस और बनी हुई फ़ाइलों की डायरेक्टरी। `install` ने जो फ़ाइलें लिखीं, उनका रिकॉर्ड रिपॉज़िटरी के `.code-review-graph/` में ही रहता है | - |
 | `CRG_HOME` | हर यूज़र की स्थिति वाला फ़ोल्डर: मल्टी-रिपॉज़िटरी रजिस्ट्री (`registry.json`), डेमॉन की `watch.toml`, उसकी pid और स्थिति फ़ाइलें, और `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1` करने पर बनाए गए git हुक जुड़े हुए git worktree में भी चलते हैं | - |
@@ -692,6 +693,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | जब `tests_for` और `detect-changes` टेस्ट खोजते हैं, तब हर हॉप पर अधिकतम कितने कॉली देखे जाएँ। नाम के क्रम में पहले वाले रखे जाते हैं, इसलिए एक ग्राफ़ हमेशा एक ही उत्तर देता है | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | बिना टेस्ट वाले बदले हुए सिंबल का टेस्ट किया गया कॉलर खोजते समय आने वाले `CALLS` पर ऊपर की ओर कितने हॉप चलें। यह केवल सूचना है, कवरेज नहीं | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |
+| `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` या `cross_repo_requests_tool` की एक कॉल नए रेपो शुरू करना बंद करने और बाकी को `skipped_repos` में सूचीबद्ध करने से पहले कितने सेकंड चल सकती है। `0` का मतलब कोई सीमा नहीं | `60` |
 | `CRG_TOOL_TIMEOUT` | केवल-पठन MCP टूल की समय सीमा (सेकंड; `0` से बंद)। लिखने वाले टूल (build / postprocess / embed / wiki / apply-refactor) पर लागू नहीं | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` की कमिट गिनती की अवधि | `90` |
 | `CRG_CONTEXT_HISTORY` | `1` करने पर हर `context_savings` अनुमान `.code-review-graph/context-history.jsonl` नाम के स्थानीय लॉग में लिखा जाता है; इसे `code-review-graph context-history` से पढ़ें। इसमें टोकन संख्या, टूल के नाम, समय, विवरण स्तर और फ़ाइल व गहराई की संख्या होती है, फ़ाइल के नाम, पाथ या सोर्स कोड कभी नहीं, और यह कहीं भेजा नहीं जाता | - |

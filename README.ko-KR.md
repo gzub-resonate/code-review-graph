@@ -676,6 +676,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 작업의 제한 시간(초, build / update / watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | 리뷰 도구나 명령에 파일 목록이 주어지지 않았을 때 변경 내용을 찾는 각 Git 명령의 제한 시간(초). 초과하면 오류를 반환하며 '변경 없음'으로 보고하지 않음 | `5`(`CRG_GIT_TIMEOUT`을 직접 설정하면 그 값) |
+| `CRG_DEFAULT_IGNORE` | 모든 저장소에 적용되는 추가 제외 패턴으로, 각 저장소의 `.code-review-graphignore`에 더해 쓰입니다(문법 동일, 쉼표 또는 줄바꿈으로 구분). 예: `src/generated/**,.claude/**`. 저장소의 `.code-review-graphignore`에 `!path` 줄을 쓰면 이 패턴이 제외하는 경로를 살릴 수 있습니다. 패턴이 200개를 넘거나 하나가 256자를 넘거나 제어 문자가 있거나 `!`로 시작하면 오류입니다 | - |
 | `CRG_DATA_DIR` | 그래프 데이터베이스와 생성물이 놓이는 디렉터리. `install`이 쓴 파일의 기록은 저장소의 `.code-review-graph/`에 남습니다 | - |
 | `CRG_HOME` | 사용자별 상태를 두는 폴더: 다중 저장소 등록부(`registry.json`), 데몬의 `watch.toml`, 데몬의 pid와 상태 파일, `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1`로 두면 생성된 git 훅이 연결된 git worktree에서도 실행 | - |
@@ -692,6 +693,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for`와 `detect-changes`가 테스트를 찾을 때 홉마다 따라가는 피호출자의 최대 수. 이름순으로 앞의 것을 남기므로 같은 그래프는 언제나 같은 답을 줌 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |
+| `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` 또는 `cross_repo_requests_tool` 한 번의 호출이 새 저장소 시작을 멈추고 나머지를 `skipped_repos`에 나열하기까지의 시간(초). `0`은 제한 없음 | `60` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
 | `CRG_CONTEXT_HISTORY` | `1`로 설정하면 각 `context_savings` 추정치를 로컬 로그 `.code-review-graph/context-history.jsonl`에 기록합니다. `code-review-graph context-history`로 확인합니다. 토큰 수, 도구 이름, 타임스탬프, 상세 수준, 파일 수와 깊이를 남기며 파일 이름, 경로, 소스 코드는 남기지 않고 외부로 보내지 않습니다 | - |
