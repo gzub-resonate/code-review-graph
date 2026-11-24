@@ -24,8 +24,9 @@ Use detail_level="standard" only for high-risk items. Report summary, risk, issu
 </section>
 
 <section name="review-pr">
-1. get_minimal_context_tool(task="review PR", base="main"); build_or_update_graph_tool() if not_ready.
+Local checkout: 1. get_minimal_context_tool(task="review PR", base="main"); build_or_update_graph_tool() if not_ready.
 2. detect_changes_tool(base="main", detail_level="minimal"); get_affected_flows_tool(base="main") when you need flow steps (minimal mode returns per-flow metadata only, with no steps).
+Shared server (serve --multi-repo): the checkout is the default branch, so name the pull request instead of a diff. detect_changes_tool(pr=<number>, repo_root=<repo>, detail_level="minimal") scores the files the pull request changes, new ones included (head=<ref or sha> works too; add base=<parent branch> for a stacked pull request), and pr_blast_radius_tool(pr=<number>) lists what each changed symbol reaches, the routes it adds and the client calls in other repos. Without pr, head or changed_files, detect_changes_tool on such a server refuses. Long symbol lists page: pass the next_cursor back as cursor.
 3. query_graph_tool with callers_of and tests_for for high-risk functions.
 Report a structured review with a blast-radius table and risk scores. Do not include whole files unless asked.
 </section>
