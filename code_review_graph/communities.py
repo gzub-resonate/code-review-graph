@@ -93,6 +93,9 @@ _COMMON_WORDS = frozenset({
     "should", "when", "then", "given", "return", "returns", "raise",
     "raises", "expect", "expected", "assert", "tests", "be", "it", "if",
     "not",
+    # Say what a symbol is, not what a community is about: a 1,400-member community of one
+    # bot was named after its most frequent exception word.
+    "error", "errors", "exception", "result", "event",
 })
 
 
