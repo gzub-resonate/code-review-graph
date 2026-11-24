@@ -551,3 +551,67 @@ def test_the_mcp_tools_take_a_cursor(name):
     parameter = inspect.signature(getattr(main_module, name)).parameters["cursor"]
     assert parameter.default is None
     assert "next_cursor" in (getattr(main_module, name).__doc__ or "")
+
+
+# ---------------------------------------------------------------------------
+# find_large_functions: default ranking
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mixed_repo():
+    tmp = tempfile.mkdtemp()
+    root = Path(tmp).resolve()
+    (root / ".git").mkdir()
+    (root / ".code-review-graph").mkdir()
+    store = GraphStore(str(root / ".code-review-graph" / "graph.db"))
+    big = (root / "src" / "big.py").as_posix()
+    _add_node(store, big, big, 1, 300, kind="File")
+    _add_node(store, big, "Big", 1, 299, kind="Class")
+    _add_node(store, big, "run", 10, 130)
+    test_py = (root / "tests" / "test_big.py").as_posix()
+    _add_node(store, test_py, test_py, 1, 900, kind="File")
+    _add_node(store, test_py, "helper", 1, 500)
+    sql = (root / "db" / "V1__baseline.sql").as_posix()
+    _add_node(store, sql, "baseline_fn", 1, 700)
+    story = (root / "ui" / "a.stories.tsx").as_posix()
+    _add_node(store, story, "Story", 1, 400)
+    store.commit()
+    yield root
+    store.close()
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_find_large_functions_defaults_to_production_functions(mixed_repo):
+    reply = find_large_functions(min_lines=50, repo_root=str(mixed_repo))
+    assert [(r["name"], r["kind"]) for r in reply["results"]] == [("run", "Function")]
+    assert reply["include_tests"] is False
+
+
+def test_find_large_functions_include_tests_adds_test_and_generated_files(mixed_repo):
+    reply = find_large_functions(min_lines=50, repo_root=str(mixed_repo), include_tests=True)
+    assert [r["name"] for r in reply["results"]] == ["baseline_fn", "helper", "Story", "run"]
+
+
+def test_find_large_functions_kind_overrides_default(mixed_repo):
+    reply = find_large_functions(min_lines=50, kind="Class", repo_root=str(mixed_repo))
+    assert [r["name"] for r in reply["results"]] == ["Big"]
+    reply = find_large_functions(min_lines=50, kind="File", repo_root=str(mixed_repo))
+    assert [r["kind"] for r in reply["results"]] == ["File"]
+
+
+def test_find_large_functions_drops_class_spanning_its_file(mixed_repo):
+    reply = find_large_functions(
+        min_lines=50, kind="File,Class,Function", repo_root=str(mixed_repo),
+    )
+    assert [(r["name"][-6:], r["kind"]) for r in reply["results"]] == [
+        ("big.py", "File"), ("run", "Function"),
+    ]
+
+
+def test_find_large_functions_minimal_does_not_repeat_hits_in_summary(mixed_repo):
+    reply = find_large_functions(
+        min_lines=50, repo_root=str(mixed_repo), detail_level="minimal",
+    )
+    assert "run" not in reply["summary"]
+    assert [r["name"] for r in reply["results"]] == ["run"]
