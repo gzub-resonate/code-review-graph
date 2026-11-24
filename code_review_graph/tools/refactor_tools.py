@@ -31,7 +31,7 @@ from ._common import (
 # an uncapped ``dead_code`` sweep returned ~47k tokens on this repo alone.
 _MAX_REFACTOR_RESULTS = 150
 
-_MINIMAL_DEAD_FIELDS = ("name", "kind", "relative_path", "line")
+_MINIMAL_DEAD_FIELDS = ("name", "kind", "relative_path", "line", "test_support")
 _MINIMAL_SUGGESTION_FIELDS = ("type", "description", "symbols")
 _MINIMAL_EDIT_FIELDS = ("file", "line", "confidence")
 
@@ -166,10 +166,12 @@ def refactor_func(
             return result
 
         elif mode == "dead_code":
+            all_dead = find_dead_code(
+                store, kind=kind, file_pattern=file_pattern, root=root
+            )
+            test_support_total = sum(1 for d in all_dead if d.get("test_support"))
             page = paginate(
-                find_dead_code(
-                    store, kind=kind, file_pattern=file_pattern, root=root
-                ),
+                all_dead,
                 max_results, _MAX_REFACTOR_RESULTS, cursor,
                 scope=make_scope(
                     "refactor_tool", mode=mode, kind=kind, file_pattern=file_pattern,
@@ -187,6 +189,7 @@ def refactor_func(
                 ),
                 "dead_code": dead,
                 "total": total,
+                "test_support_total": test_support_total,
                 "truncated": page.truncated,
                 **page.fields(),
             }
