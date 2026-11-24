@@ -1500,6 +1500,7 @@ async def get_hub_nodes_tool(
     exclude_leaf_primitives: bool = False,
     include_config: bool = False,
     include_generated: bool = False,
+    exclude_data_types: bool = False,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1526,6 +1527,12 @@ async def get_hub_nodes_tool(
             Default: false, so generated files are left out before ranking, totals
             and paging; ``generated_excluded`` says how many that removed. A cursor
             made with one value is refused for the other.
+        exclude_data_types: Skip data carriers: enums, Lombok or accessor-only Java
+            classes, records, data classes, Python dataclass/NamedTuple/TypedDict/pydantic
+            models without non-dunder methods, TS interfaces and type aliases without
+            methods. Default: false. Left out before ranking, totals and paging;
+            ``data_types_excluded`` says how many that removed and each row's ``data_type``
+            says why it is data-like. A cursor made with one value is refused for the other.
 
     Rows are ordered by ``ranking_degree`` (name-matched edges damped), so the raw
     ``total_degree`` shown beside it is not strictly descending.
@@ -1538,6 +1545,7 @@ async def get_hub_nodes_tool(
             include_tests=include_tests,
             exclude_leaf_primitives=exclude_leaf_primitives,
             include_config=include_config, include_generated=include_generated,
+            exclude_data_types=exclude_data_types,
         ),
         root,
     )

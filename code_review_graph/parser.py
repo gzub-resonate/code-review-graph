@@ -2890,6 +2890,54 @@ def _modifier_annotation_names(node) -> list[str]:
     return names
 
 
+def _class_type_form(node, language: str) -> Optional[str]:
+    """Which data-carrying form a type declaration takes, if it is one.
+
+    ``enum`` for the languages' enum nodes (Java, TS, C#, PHP, Rust, Scala, Kotlin
+    ``enum class``), ``record`` for a C# record and ``data_class`` for a Kotlin
+    ``data class``. Kept beside ``java_kind`` and ``typescript_kind``, which it must
+    not change: ``analysis.data_type_label`` reads it.
+    """
+    if node.type in ("enum_declaration", "enum_item", "enum_definition"):
+        return "enum"
+    if language == "csharp" and node.type == "record_declaration":
+        return "record"
+    if language == "kotlin":
+        if any(c.type == "enum" for c in node.children):
+            return "enum"
+        for sub in node.children:
+            if sub.type == "modifiers" and any(
+                m.type == "class_modifier" and m.text == b"data" for m in sub.children
+            ):
+                return "data_class"
+    return None
+
+
+def _ts_is_data_shape(node) -> bool:
+    """Whether a TS interface or type alias declares only plain properties.
+
+    A method or call signature, or a property typed as a function, is behavior a
+    caller depends on, so the declaration is not a data shape.
+    """
+    if node.type == "interface_declaration":
+        body = next((c for c in node.children if c.type == "interface_body"), None)
+    else:
+        value = node.child_by_field_name("value")
+        if value is None:
+            return False
+        if value.type in ("union_type", "literal_type", "predefined_type"):
+            return b"=>" not in value.text
+        body = value if value.type == "object_type" else None
+    if body is None:
+        return False
+    for member in body.named_children:
+        if member.type == "comment":
+            continue
+        if member.type not in ("property_signature", "index_signature") or b"=>" in member.text:
+            return False
+    return True
+
+
 def _python_decorator_names(node) -> list[str]:
     """Return decorators wrapping a Python definition in source order."""
     parent = node.parent
@@ -18398,6 +18446,11 @@ class CodeParser:
             "interface_declaration", "type_alias_declaration",
         ):
             extra["typescript_kind"] = child.type
+            if _ts_is_data_shape(child):
+                extra["ts_data_shape"] = True
+        type_form = _class_type_form(child, language)
+        if type_form:
+            extra["type_form"] = type_form
         # A PHP interface or trait is not a superclass: a method it declares is
         # not what ``$this->m()`` runs through ``extends``.
         if language == "php" and child.type in (

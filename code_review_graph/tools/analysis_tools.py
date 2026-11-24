@@ -30,7 +30,7 @@ _MAX_BRIDGE_NODES = 100
 _MAX_SURPRISING = 100
 _MAX_GAPS_PER_CATEGORY = 50
 
-_MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree", "ranking_degree")
+_MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree", "ranking_degree", "data_type")
 # Two rows can share a bare name, so a minimal row also says where it is.
 _MINIMAL_BRIDGE_FIELDS = ("name", "qualified_name", "file", "kind", "betweenness")
 _MINIMAL_SURPRISE_FIELDS = (
@@ -54,6 +54,14 @@ def _generated_note(include_generated: bool, stats: dict[str, int]) -> str:
     if include_generated or not excluded:
         return ""
     return f"; {excluded} generated node(s) excluded (include_generated=true keeps them)"
+
+
+def _data_types_note(exclude_data_types: bool, stats: dict[str, int]) -> str:
+    """Summary suffix naming what data-type filtering removed."""
+    excluded = stats.get("data_types_excluded", 0)
+    if not exclude_data_types or not excluded:
+        return ""
+    return f"; {excluded} data type node(s) excluded (exclude_data_types=false keeps them)"
 
 
 def _project(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -83,6 +91,7 @@ def get_hub_nodes_func(
     exclude_leaf_primitives: bool = False,
     include_config: bool = False,
     include_generated: bool = False,
+    exclude_data_types: bool = False,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -113,6 +122,15 @@ def get_hub_nodes_func(
             so ``total`` and ``next_cursor`` describe the filtered list and
             ``generated_excluded`` reports how many nodes that removed. A cursor is
             only valid for the value it was made with.
+        exclude_data_types: Skip data carriers: enums, Java classes that are Lombok
+            data holders or only accessors, Kotlin/C# data classes and records, Python
+            dataclasses, NamedTuple, TypedDict and pydantic models without non-dunder
+            methods, TS interfaces and type aliases without methods. Left out before
+            ranking, like tests, so ``total`` and ``next_cursor`` describe the filtered
+            list and ``data_types_excluded`` reports how many that removed. Rows carry
+            ``data_type`` (the label, or null) either way. A cursor is only valid for the
+            value it was made with. Needs a graph built after this filter existed for
+            enums, Kotlin data classes and TS interfaces.
 
     Returns:
         Ranked hubs. Rows are ordered by ``ranking_degree`` (name-matched edges are damped),
@@ -130,6 +148,7 @@ def get_hub_nodes_func(
             store, top_n=_FETCH_ALL, include_tests=include_tests,
             exclude_leaf_primitives=exclude_leaf_primitives,
             include_config=include_config, include_generated=include_generated, stats=stats,
+            exclude_data_types=exclude_data_types,
         )
         # A repository of data files has no hub but its config nodes. Hiding them
         # would leave an empty ranking, so they are ranked instead and the reply says so.
@@ -139,6 +158,7 @@ def get_hub_nodes_func(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
                 exclude_leaf_primitives=exclude_leaf_primitives, include_config=True,
                 include_generated=include_generated, stats=stats,
+                exclude_data_types=exclude_data_types,
             )
             if with_config:
                 ranked, config_only = with_config, True
@@ -149,6 +169,7 @@ def get_hub_nodes_func(
                 exclude_leaf_primitives=exclude_leaf_primitives,
                 include_config=include_config or config_only,
                 include_generated=include_generated,
+                exclude_data_types=exclude_data_types,
             ),
             stamp=graph_stamp(store),
         )
@@ -162,8 +183,10 @@ def get_hub_nodes_func(
                 "so total_degree is not strictly descending)"
                 + shown_range(page)
                 + _generated_note(include_generated, stats)
+                + _data_types_note(exclude_data_types, stats)
             ),
             "generated_excluded": stats.get("generated_excluded", 0),
+            "data_types_excluded": stats.get("data_types_excluded", 0),
             "hub_nodes": hubs,
             "count": len(hubs),
             "total": total,
