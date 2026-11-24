@@ -1945,6 +1945,88 @@ _RUNTIME_WIRED_NAMES = re.compile(
 )
 
 
+#: Ember resolves these directories by naming convention, so nothing imports or calls the
+#: symbols in them directly (lifecycle hooks, ``{{action}}``, route actions, templates).
+_EMBER_CONVENTION_DIRS = (
+    "components|controllers|routes|models|services|adapters|serializers|transforms|"
+    "modifiers|mixins|helpers|initializers|instance-initializers|templates|exports|commons"
+)
+_EMBER_CONVENTION_PATH = re.compile(rf"^(?:app|addon)/(?:{_EMBER_CONVENTION_DIRS})/")
+_EMBER_TOOLING_PATH = re.compile(
+    r"^(?:server/|blueprints/|mirage/|ember-cli-build\.js$|testem\.js$|config/[^/]+\.js$)"
+)
+_EMBER_ROUTE_PATH = re.compile(r"^app/routes/(.+)\.(?:js|ts)$")
+_ROUTE_IMPLICIT = {"application", "index", "loading", "error"}
+_ANTLR_HEADER = re.compile(r"Generated from\b.*\bby ANTLR\b|ANTLR.*Generated from\b", re.I)
+
+
+def _is_antlr_generated(path: str, cache: dict[str, bool]) -> bool:
+    """True when the first lines of *path* carry an ANTLR ``Generated from`` header."""
+    hit = cache.get(path)
+    if hit is None:
+        hit = False
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = "".join(fh.readline() for _ in range(5))
+            hit = bool(_ANTLR_HEADER.search(head))
+        except OSError:
+            hit = False
+        cache[path] = hit
+    return hit
+
+
+def _read_router_source(root: Optional[Union[str, Path]]) -> Optional[str]:
+    """``app/router.js`` with comments removed, or ``None`` when it cannot be read."""
+    if root is None:
+        return None
+    for name in ("router.js", "router.ts"):
+        try:
+            text = (Path(root) / "app" / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        return re.sub(r"(?m)(?<!:)//.*$", "", text)
+    return None
+
+
+def _make_ember_checker(root: Optional[Union[str, Path]]):
+    """Return ``is_ember_wired(file_path, kind)`` for the Ember convention rule.
+
+    Applies only when *root* is known and holds ``ember-cli-build.js``.  A route file
+    whose name is absent from ``app/router.js`` (a route commented out or removed) is
+    left to the normal checks so a truly dead route stays visible.
+    """
+    if root is None or not (Path(root) / "ember-cli-build.js").is_file():
+        return lambda file_path, kind: False
+    router: list[Optional[str]] = []
+
+    def route_declared(name: str) -> bool:
+        if not router:
+            router.append(_read_router_source(root))
+        src = router[0]
+        if src is None:
+            return True
+        segment = name.rsplit("/", 1)[-1]
+        if segment in _ROUTE_IMPLICIT or segment.endswith(("-loading", "-error")):
+            return True
+        return re.search(rf"(?<![\w-]){re.escape(segment)}(?![\w-])", src) is not None
+
+    def is_ember_wired(file_path: str, language: Optional[str]) -> bool:
+        if language not in ("javascript", "typescript"):
+            return False
+        rel = _repo_relative(file_path, root)
+        if not rel:
+            return False
+        if _EMBER_TOOLING_PATH.match(rel):
+            return True
+        if not _EMBER_CONVENTION_PATH.match(rel):
+            return False
+        m = _EMBER_ROUTE_PATH.match(rel)
+        return route_declared(m.group(1)) if m else True
+
+    return is_ember_wired
+
+
 def _is_runtime_wired(node: Any) -> bool:
     if _RUNTIME_WIRED_NAMES.match(node.name or ""):
         return True
@@ -2231,6 +2313,8 @@ def find_dead_code(
     # relative to this root so ``tests/`` means the repository's own tests
     # and not a directory above the checkout (#1023).
     test_root = root or store.get_repo_root()
+    ember_wired = _make_ember_checker(test_root)
+    antlr_cache: dict[str, bool] = {}
 
     def _package_segments(file_path: str) -> tuple[str, ...]:
         """Directory segments of *file_path* that could name a package.
@@ -2506,6 +2590,12 @@ def find_dead_code(
 
         # Skip entry points (by name pattern or decorator, not just "uncalled").
         if _is_entry_point(node):
+            continue
+
+        # Generated parser code (ANTLR) and Ember convention-resolved files.
+        if _is_antlr_generated(node.file_path, antlr_cache) or ember_wired(
+            node.file_path, node.language
+        ):
             continue
 
         # A CommonJS default export is what a ``require`` of the file receives, and
