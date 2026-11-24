@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `cross_repo_requests_tool` no longer reports every `receiver_inferred` JavaScript match as `low`. It
+  is `medium`, and `high` for one handler answering an exact method and a literal, untemplated
+  route. Handlers of one path in one repository (`several_handlers_in_repo`) are `medium`.
+- Handlers of one route that differ by a Spring `params` condition are told apart when the call's
+  URL spells out its query keys: the index now records `params` and `headers` on server
+  endpoints and `query_keys` on JavaScript calls, and the most specific handler whose conditions
+  can hold is kept. Several handlers in one repository remain `matched` with all candidates
+  (documented behavior); only a call whose query is unknown lists them all.
+
 ### Added
 
 - `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has

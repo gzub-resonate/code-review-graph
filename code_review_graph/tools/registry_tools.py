@@ -618,6 +618,34 @@ def _route_in_scope(call_route: str, wanted: str) -> bool:
     return wanted == "/" or have == wanted or have.startswith(wanted + "/")
 
 
+#: Notes that say the match rests on a guess about the route or the origin.
+_LOW_CONFIDENCE_NOTES = frozenset({"ember_data_convention", "base_url_not_literal"})
+
+
+def _js_confidence(call: fl.ClientCall, result: fl.LinkResult, notes: list[str]) -> str:
+    """``low``, ``medium`` or ``high`` for a matched or ambiguous JavaScript call.
+
+    A wildcard or variable match, a route derived from a model name and a base URL that is
+    not a literal are guesses: ``low``. ``receiver_inferred`` alone (the client instance was
+    recognised by its name) is ``medium``, and ``high`` when one server location answers
+    the call by exact method and a literal, untemplated route. Several handlers of one
+    path (``several_handlers_in_repo``) are never better than ``medium``.
+    """
+    if result.confidence == "low" or _LOW_CONFIDENCE_NOTES.intersection(notes):
+        return "low"
+    if result.status != fl.MATCHED or len(result.candidates) != 1:
+        return "medium"
+    server = result.candidates[0]
+    exact_method = (
+        server.http_method.upper() == call.http_method.upper()
+        and not call.method_dynamic
+    )
+    literal_route = not call.route_dynamic and "{" not in call.route
+    if set(notes) <= {"receiver_inferred"} and exact_method and literal_route:
+        return "high"
+    return "medium"
+
+
 def _candidate_row(server: fl.ServerEndpoint) -> dict[str, Any]:
     row: dict[str, Any] = {
         "repo": _sanitize_name(server.repo),
@@ -903,8 +931,10 @@ def cross_repo_requests_func(
                     row_notes = list(call.notes)
                     if result.confidence == "low":
                         row_notes.append(result.reason or "catch_all_route")
+                    elif result.reason == fl.SAME_REPO_REASON:
+                        row_notes.append(result.reason)
                     if row_notes and result.status in (fl.MATCHED, fl.AMBIGUOUS):
-                        row["confidence"] = "low"
+                        row["confidence"] = _js_confidence(call, result, row_notes)
                         row["confidence_notes"] = row_notes
                 if result.status == fl.CASE_MISMATCH:
                     row["confidence"] = "low"

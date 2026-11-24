@@ -280,6 +280,26 @@ def static_text(
     return None if head else "{param}"
 
 
+def query_keys_of(text: str) -> Optional[tuple[str, ...]]:
+    """The query keys a folded URL spells out, or ``None`` when they are not all known.
+
+    A URL with no ``?`` says nothing (axios ``params`` and the like add keys elsewhere), a
+    bare ``?`` marks a computed query, and a key or a value glued to an unknown piece could
+    hide more keys.
+    """
+    cut = text.find("?")
+    if cut == -1:
+        return None
+    query = text[cut + 1:].split("#", 1)[0]
+    keys: list[str] = []
+    for part in query.split("&"):
+        key, _, value = part.partition("=")
+        if not key or "{param}" in key or ("{param}" in value and value != "{param}"):
+            return None
+        keys.append(key)
+    return tuple(sorted(set(keys)))
+
+
 def split_route(text: str) -> tuple[str, bool]:
     """``(route without query/fragment, absolute)`` for folded URL text."""
     absolute = bool(_ABSOLUTE_RE.match(text))
@@ -361,6 +381,7 @@ class ClientHit:
     base_url_dynamic: bool = False
     instance: Optional[str] = None
     receiver_inferred: bool = False
+    query_keys: Optional[tuple[str, ...]] = None
 
 
 class _FileFacts:
@@ -538,6 +559,7 @@ def _build_hit(
         kind=kind, method=method, route=route, line=line, end_line=end_line,
         method_dynamic=method_dynamic, absolute_url=absolute, base_url=base,
         base_url_dynamic=base_dynamic, instance=instance, receiver_inferred=inferred,
+        query_keys=query_keys_of(folded),
     )
 
 
@@ -1361,6 +1383,8 @@ def extract(
             meta["instance"] = hit.instance
         if hit.receiver_inferred:
             meta["receiver_inferred"] = True
+        if hit.query_keys is not None:
+            meta["query_keys"] = list(hit.query_keys)
         nodes.append(node_cls(
             kind="Endpoint", name=name, file_path=file_path, line_start=hit.line,
             line_end=hit.end_line, language=language, extra=meta,

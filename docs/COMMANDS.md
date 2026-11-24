@@ -1061,10 +1061,20 @@ is `unmatchable` with one of these reasons: `non_literal_url` (a variable or
 computed URL, or a template or concatenation that starts with an unknown
 piece), `absolute_url` (a full `https://...` URL or an absolute `baseURL`),
 `method_dynamic` (the method is not a literal) or `placeholder_in_route`.
-A match carries `confidence: "low"` and `confidence_notes` when it rests on a
-guess: `ember_data_convention` (the route was derived from a model name),
+A match carries `confidence` and `confidence_notes` when it rests on a guess.
+`low`: `ember_data_convention` (the route was derived from a model name),
+`base_url_not_literal`, `catch_all_route` or `variable_matches_literal`.
 `receiver_inferred` (an instance imported from another file, recognised by its
-name), `base_url_not_literal`, or `catch_all_route`. A server route that takes
+name) is `medium`, and `high` when one server location answers the call by exact
+HTTP method and a literal route with no `{...}` piece. Several handlers of one
+path (`several_handlers_in_repo`) are `medium` at best. Several handlers of one
+path stay `matched` (with every handler in `candidates`); `ambiguous` is for
+several repositories. When the call's URL spells its query keys out
+(`/v1/accounts?onlyActiveAccounts=true`), the Spring `params` conditions of the
+handlers narrow the candidates: a handler whose `params` cannot hold is dropped, and the
+one with the most conditions wins, as in Spring. A URL with no query, or a computed one,
+narrows nothing (axios `params` objects are not read). `headers` conditions are indexed
+but not compared. A server route that takes
 the rest of the path (a Next.js `[...path]` route, an Express `*`) matches only
 a call with the same HTTP method and a literal prefix that is a whole leading
 path, with at least one more segment (none for `[[...path]]`), and only when no
