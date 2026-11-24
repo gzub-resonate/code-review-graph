@@ -8,7 +8,13 @@ from typing import Any
 from ..flows import get_flow_by_id, get_flows
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
-from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
+from ._common import (
+    _bounded,
+    _get_store,
+    _relative_to_root,
+    _shown_of,
+    _validate_positive_int,
+)
 
 # ---------------------------------------------------------------------------
 # Tool 10: list_flows  [EXPLORE]
@@ -45,8 +51,9 @@ def list_flows(
         limit: Maximum flows to return (default: 50, capped at 200).
         kind: Optional filter by entry point kind (e.g. "Test", "Function").
         detail_level: "standard" (default) returns full flow data;
-                      "minimal" returns only name, criticality, and
-                      node_count per flow.
+                      "minimal" returns only name, qualified_name and
+                      file (the entry point's, relative to the repository
+                      root), criticality, and node_count per flow.
 
     Returns:
         Flows with criticality scores, plus ``total`` and ``truncated``.
@@ -73,12 +80,23 @@ def list_flows(
 
         flows, total, truncated = _bounded(flows, limit, _MAX_FLOWS)
 
+        # Two flows can share an entry point name, so each row says where its
+        # entry point is. Only the rows kept are looked up.
+        for f in flows:
+            entry = (
+                store.get_node_by_id(f["entry_point_id"])
+                if f.get("entry_point_id") is not None else None
+            )
+            if entry is not None:
+                f["qualified_name"] = _relative_to_root(entry.qualified_name, root)
+                f["file"] = _relative_to_root(entry.file_path, root)
+
         if detail_level == "minimal":
             flows = [
                 {
-                    "name": f["name"],
-                    "criticality": f["criticality"],
-                    "node_count": f["node_count"],
+                    k: f[k]
+                    for k in ("name", "qualified_name", "file", "criticality", "node_count")
+                    if k in f
                 }
                 for f in flows
             ]

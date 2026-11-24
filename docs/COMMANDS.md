@@ -582,6 +582,14 @@ test whose call could mean this method or a same-named one in another class the
 test imports, as with `app(Service::class)->run()`. The summary says how many
 rows are guesses. A guess is never counted as coverage.
 
+`tests_for` lists direct tests first, then indirect ones by path length. Each
+indirect row carries `hops` (CALLS hops on the route), and a test of something
+the target merely calls carries `inferred_by: "callee_test"` and `via`, the callee
+it covers: that shows the target runs tested code, not that it is tested. A test
+that reaches the target through test helpers is not marked. Only resolved edges are
+followed; a bare name no node answers to is never walked, and the walk is at most
+one CALLS hop for callee tests.
+
 #### `get_review_context_tool`
 ```
 changed_files: list[str] | None
@@ -689,8 +697,10 @@ sort_by: str = "criticality"  # criticality, depth, node_count, file_count, name
 limit: int = 50               # Flows returned (max 200)
 kind: str | None              # Entry point kind (e.g. "Test", "Function")
 repo_root: str | None
-detail_level: str = "standard"
+detail_level: str = "standard"   # "minimal": name, qualified_name, file, criticality, node_count
 ```
+Each flow row carries `qualified_name` and `file` of its entry point (relative to
+the repository root), so two flows with the same name can be told apart.
 
 #### `get_flow_tool`
 ```
@@ -759,8 +769,9 @@ detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
 ```
 top_n: int = 10                  # Capped at 100
 repo_root: str | None
-detail_level: str = "standard"   # "minimal" returns name, kind, betweenness
+detail_level: str = "standard"   # "minimal": name, qualified_name, file, kind, betweenness
 ```
+Minimal rows give `qualified_name` and `file` relative to the repository root.
 
 #### `get_knowledge_gaps_tool`
 ```
@@ -771,6 +782,12 @@ detail_level: str = "standard"   # "minimal" drops file paths
 `summary` maps each category to its untruncated count. The categories are
 `isolated_nodes`, `thin_communities`, `untested_hotspots`,
 `single_file_communities` and `import_cycles`.
+
+An `untested_hotspots` row is a node with at least 5 connections that `tests_for`
+shows no covering test for: no direct test and none reaching it through test
+helpers. A test of something it only calls does not count, so the two tools
+agree. A community made only of JSON or YAML paths is a config document and is
+not reported as `thin_communities` or `single_file_communities`.
 
 An `import_cycles` row is one group of files that import each other: `size` is
 how many files, `name` and `cycle` spell out one loop with its import lines, and
@@ -786,8 +803,11 @@ before this release need `code-review-graph build` to tell these imports apart.
 ```
 top_n: int = 15                  # Capped at 100
 repo_root: str | None
-detail_level: str = "standard"   # "minimal" returns source, target, kind, score
+detail_level: str = "standard"   # "minimal": source and target (with qualified name and file), kind, score
 ```
+Structural containment is never a surprising connection: a CONTAINS edge, or any
+edge between a node and a node that contains it, is left out of the rows and of
+`total`. Rows carry `source_file` and `target_file`.
 
 #### `get_suggested_questions_tool`
 ```

@@ -377,6 +377,18 @@ def _validate_positive_int(value: int, name: str) -> int:
     return value
 
 
+def _relative_to_root(value: str, root: Path | None) -> str:
+    """Drop the repository root from a stored path or qualified name.
+
+    Graphs built with absolute paths repeat the checkout folder in every row.
+    A value that does not start with the root is returned as stored.
+    """
+    if root is None:
+        return value
+    prefix = f"{normalize_file_path(root)}/"
+    return value[len(prefix):] if value.startswith(prefix) else value
+
+
 def _bounded(
     items: "list[Any]", max_results: int, hard_cap: int,
 ) -> tuple[list[Any], int, bool]:

@@ -11,7 +11,13 @@ from ..analysis import (
     find_surprising_connections,
     generate_suggested_questions,
 )
-from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
+from ._common import (
+    _bounded,
+    _get_store,
+    _relative_to_root,
+    _shown_of,
+    _validate_positive_int,
+)
 
 # The ranking helpers already score every candidate before slicing, so asking
 # for "all" costs nothing extra and lets the tool report an honest ``total``.
@@ -25,8 +31,18 @@ _MAX_SURPRISING = 100
 _MAX_GAPS_PER_CATEGORY = 50
 
 _MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree")
-_MINIMAL_BRIDGE_FIELDS = ("name", "kind", "betweenness")
-_MINIMAL_SURPRISE_FIELDS = ("source", "target", "edge_kind", "surprise_score")
+# Two rows can share a bare name, so a minimal row also says where it is.
+_MINIMAL_BRIDGE_FIELDS = ("name", "qualified_name", "file", "kind", "betweenness")
+_MINIMAL_SURPRISE_FIELDS = (
+    "source", "source_qualified", "source_file",
+    "target", "target_qualified", "target_file",
+    "edge_kind", "surprise_score",
+)
+# Fields holding a path, or a qualified name that starts with one.
+_PATH_FIELDS = (
+    "file", "qualified_name", "source_qualified", "source_file",
+    "target_qualified", "target_file",
+)
 _MINIMAL_GAP_FIELDS = (
     "name", "qualified_name", "community_id", "size", "degree", "load_time",
 )
@@ -35,6 +51,19 @@ _MINIMAL_GAP_FIELDS = (
 def _project(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
     """Keep only *fields* on each row, dropping keys the row does not have."""
     return [{k: r[k] for k in fields if k in r} for r in rows]
+
+
+def _minimal(
+    rows: list[dict[str, Any]], fields: tuple[str, ...], root: Any,
+) -> list[dict[str, Any]]:
+    """Minimal rows, with paths relative to the repository root."""
+    return [
+        {
+            k: _relative_to_root(v, root) if k in _PATH_FIELDS and isinstance(v, str) else v
+            for k, v in row.items()
+        }
+        for row in _project(rows, fields)
+    ]
 
 
 def get_hub_nodes_func(
@@ -102,7 +131,8 @@ def get_bridge_nodes_func(
         repo_root: Repository root (auto-detected if omitted).
         top_n: Number of top bridges to return (default 10, capped at 100).
         detail_level: "standard" (default) returns full node data;
-            "minimal" returns only name, kind, and betweenness.
+            "minimal" returns only name, qualified_name, file (both
+            relative to the repository root), kind, and betweenness.
 
     Returns:
         Ranked bridges. ``total`` reports the untruncated candidate count and
@@ -110,13 +140,13 @@ def get_bridge_nodes_func(
     """
     _validate_positive_int(top_n, "top_n")
 
-    store, _root = _get_store(repo_root or None)
+    store, root = _get_store(repo_root or None)
     try:
         bridges, total, truncated = _bounded(
             find_bridge_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_BRIDGE_NODES,
         )
         if detail_level == "minimal":
-            bridges = _project(bridges, _MINIMAL_BRIDGE_FIELDS)
+            bridges = _minimal(bridges, _MINIMAL_BRIDGE_FIELDS, root)
         return {
             "status": "ok",
             "summary": (
@@ -212,7 +242,9 @@ def get_surprising_connections_func(
         repo_root: Repository root (auto-detected if omitted).
         top_n: Number of top surprises to return (default 15, capped at 100).
         detail_level: "standard" (default) returns full edge records;
-            "minimal" returns only source, target, edge_kind, and score.
+            "minimal" returns only source and target (each with its
+            qualified name and file, relative to the repository root),
+            edge_kind, and score.
 
     Returns:
         Ranked surprising edges. ``total`` reports the untruncated count and
@@ -220,7 +252,7 @@ def get_surprising_connections_func(
     """
     _validate_positive_int(top_n, "top_n")
 
-    store, _root = _get_store(repo_root or None)
+    store, root = _get_store(repo_root or None)
     try:
         surprises, total, truncated = _bounded(
             find_surprising_connections(store, top_n=_FETCH_ALL),
@@ -228,7 +260,7 @@ def get_surprising_connections_func(
             _MAX_SURPRISING,
         )
         if detail_level == "minimal":
-            surprises = _project(surprises, _MINIMAL_SURPRISE_FIELDS)
+            surprises = _minimal(surprises, _MINIMAL_SURPRISE_FIELDS, root)
         return {
             "status": "ok",
             "summary": (

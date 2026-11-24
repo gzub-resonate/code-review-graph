@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # and each row carries paths, so the rest is told as a count.
 _MAX_CYCLE_FILES = 10
 _MAX_CYCLE_HOPS = 10
+# The untested-hotspot list stops here; the tool never shows more.
+_MAX_UNTESTED_HOTSPOTS = 20
+# Node kinds that make up a config document rather than code.
+_CONFIG_DOCUMENT_KINDS = frozenset({"JsonPath", "YamlPath"})
 
 
 def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
@@ -262,12 +266,9 @@ def find_knowledge_gaps(
 
     # Build degree map
     degree: dict[str, int] = Counter()
-    tested_nodes: set[str] = set()
     for e in edges:
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
-        if e.kind == "TESTED_BY":
-            tested_nodes.add(e.source_qualified)
 
     # 1. Isolated nodes (degree <= 1, not File)
     isolated = []
@@ -285,17 +286,23 @@ def find_knowledge_gaps(
     # 2. Build community sizes and file maps from node data
     comm_sizes: Counter[int] = Counter()
     comm_files: dict[int, set[str]] = defaultdict(set)
+    comm_code: set[int] = set()
     for n in nodes:
         cid = community_map.get(n.qualified_name)
         if cid is not None:
             comm_sizes[cid] += 1
             comm_files[cid].add(n.file_path)
+            if n.kind not in _CONFIG_DOCUMENT_KINDS:
+                comm_code.add(cid)
 
-    # Thin communities (< 3 members)
+    # Thin communities (< 3 members). A community made only of JSON or YAML
+    # paths is one config document, which is a single file by nature.
     communities = store.get_communities_list()
     thin = []
     for c in communities:
         cid = int(c["id"])
+        if cid not in comm_code and comm_sizes.get(cid, 0) > 0:
+            continue
         size = comm_sizes.get(cid, 0)
         if size < 3:
             thin.append({
@@ -304,24 +311,27 @@ def find_knowledge_gaps(
                 "size": size,
             })
 
-    # 3. Untested hotspots (degree >= 5, no TESTED_BY)
-    untested_hotspots = []
-    for n in nodes:
-        d = degree.get(n.qualified_name, 0)
-        if (d >= 5
-                and n.qualified_name not in tested_nodes
-                and not n.is_test):
-            untested_hotspots.append({
-                "name": _sanitize_name(n.name),
-                "qualified_name": n.qualified_name,
-                "kind": n.kind,
-                "file": n.file_path,
-                "degree": d,
-            })
-    untested_hotspots.sort(
-        key=lambda x: x.get("degree", 0),  # type: ignore[arg-type,return-value]
-        reverse=True,
-    )
+    # 3. Untested hotspots (degree >= 5, no covering test). "Tested" is what
+    # tests_for answers: a direct test, or one that reaches the node through
+    # test helpers. A test of something the node merely calls is not coverage.
+    candidates = [
+        n for n in nodes
+        if degree.get(n.qualified_name, 0) >= 5 and not n.is_test
+    ]
+    candidates.sort(key=lambda n: -degree.get(n.qualified_name, 0))
+    untested_hotspots: list[dict] = []
+    for n in candidates:
+        if len(untested_hotspots) >= _MAX_UNTESTED_HOTSPOTS:
+            break
+        if store.get_transitive_tests(n.qualified_name, include_callee_routes=False):
+            continue
+        untested_hotspots.append({
+            "name": _sanitize_name(n.name),
+            "qualified_name": n.qualified_name,
+            "kind": n.kind,
+            "file": n.file_path,
+            "degree": degree[n.qualified_name],
+        })
 
     # 4. Single-file communities
     single_file = []
@@ -329,6 +339,8 @@ def find_knowledge_gaps(
         cid = int(c["id"])
         files = comm_files.get(cid, set())
         size = comm_sizes.get(cid, 0)
+        if cid not in comm_code:
+            continue
         if len(files) == 1 and size >= 3:
             single_file.append({
                 "community_id": cid,
@@ -364,11 +376,40 @@ def find_surprising_connections(
 
     node_map = {n.qualified_name: n for n in nodes}
 
+    # A class holding its method, or a JSON key holding its child, is how the
+    # code is laid out, never a coupling. Leave those edges out of the candidates
+    # (and so out of the totals). Degrees still count them: they are real links.
+    parent_of: dict[str, str] = {}
+    for e in edges:
+        if e.kind == "CONTAINS":
+            parent_of.setdefault(e.target_qualified, e.source_qualified)
+    for qn, node in node_map.items():
+        if node.parent_name and qn not in parent_of:
+            owner = f"{node.file_path}::{node.parent_name}"
+            if owner in node_map:
+                parent_of[qn] = owner
+
+    def _is_ancestor(ancestor: str, qn: str) -> bool:
+        seen: set[str] = set()
+        while qn in parent_of and qn not in seen:
+            seen.add(qn)
+            qn = parent_of[qn]
+            if qn == ancestor:
+                return True
+        return False
+
     # Build degree map
     degree: dict[str, int] = Counter()
     for e in edges:
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
+
+    edges = [
+        e for e in edges
+        if e.kind != "CONTAINS"
+        and not _is_ancestor(e.source_qualified, e.target_qualified)
+        and not _is_ancestor(e.target_qualified, e.source_qualified)
+    ]
 
     # Median degree for peripheral detection
     degrees = [d for d in degree.values() if d > 0]
@@ -436,6 +477,8 @@ def find_surprising_connections(
                 "source_qualified": e.source_qualified,
                 "target": _sanitize_name(tgt.name),
                 "target_qualified": e.target_qualified,
+                "source_file": src.file_path,
+                "target_file": tgt.file_path,
                 "edge_kind": e.kind,
                 "surprise_score": round(score, 2),
                 "reasons": reasons,

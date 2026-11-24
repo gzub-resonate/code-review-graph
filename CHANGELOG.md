@@ -21,6 +21,21 @@
 
 ### Changed
 
+- `get_surprising_connections_tool` no longer lists structural containment (a
+  class holding its method, a JSON key holding its child) and does not count it
+  in `total`. Its rows carry `source_file` and `target_file`.
+- Minimal rows of `get_bridge_nodes_tool`, `get_surprising_connections_tool` and
+  `list_flows_tool` carry `qualified_name` and `file` (relative to the repository
+  root), so rows that share a bare name can be told apart. A flow row gives its
+  entry point's.
+- `query_graph_tool` `tests_for` lists direct tests first, then indirect ones by
+  path length, each with `hops`. A test of something the target only calls is
+  labelled `inferred_by: "callee_test"` with the callee as `via`, and counted
+  among the guesses, instead of passing as coverage.
+- `get_knowledge_gaps_tool` reports an untested hotspot by the same rule as
+  `tests_for` (a direct test, or one reaching it through test helpers; a test of a
+  callee does not count), and no longer reports config documents (communities of
+  only JSON or YAML paths) as `thin_communities` or `single_file_communities`.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers
