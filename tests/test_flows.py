@@ -524,6 +524,41 @@ class TestFlows:
         assert "kind" in step
         assert "file" in step
 
+    def test_get_flow_name_matches_qualified_name_segment(self):
+        """flow_name finds a flow by class segment of the entry qualified name."""
+        from code_review_graph.tools import flows_tools
+
+        self._add_func("initialize", path="src/DasInitializer.java", parent="DasInitializer")
+        self._add_func("step1", path="src/DasInitializer.java", parent="DasInitializer")
+        self._add_call(
+            "src/DasInitializer.java::DasInitializer.initialize",
+            "src/DasInitializer.java::DasInitializer.step1",
+            path="src/DasInitializer.java",
+        )
+        store_flows(self.store, trace_flows(self.store))
+
+        class _Store:
+            def __init__(self, s):
+                self._s = s
+
+            def __getattr__(self, k):
+                return getattr(self._s, k)
+
+            def close(self):
+                pass
+
+        orig = flows_tools._get_store
+        flows_tools._get_store = lambda repo_root=None: (_Store(self.store), Path("."))
+        try:
+            for q in ("DasInitializer", "DasInitializer.initialize", "initialize"):
+                res = flows_tools.get_flow(flow_name=q)
+                assert res["status"] == "ok", q
+                assert res["flow"]["name"] == "initialize"
+                assert res["matches_total"] == 1
+            assert flows_tools.get_flow(flow_name="nope")["status"] == "not_found"
+        finally:
+            flows_tools._get_store = orig
+
     def test_get_flow_by_id_not_found(self):
         """get_flow_by_id returns None for nonexistent flow."""
         result = get_flow_by_id(self.store, 99999)

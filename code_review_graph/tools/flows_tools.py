@@ -149,7 +149,8 @@ def get_flow(
 
     Args:
         flow_id: Database ID of the flow (from list_flows).
-        flow_name: Name to search for (partial match). Ignored if flow_id
+        flow_name: Name to search for: exact name, then qualified-name
+                   segment/suffix, then partial match. Ignored if flow_id
                    given.
         include_source: If True, include source code snippets for each step.
         repo_root: Repository root path. Auto-detected if omitted.
@@ -176,17 +177,43 @@ def get_flow(
     store, root = _get_store(repo_root)
     try:
         flow: dict | None = None
+        matches_total: int | None = None
 
         if flow_id is not None:
             flow = get_flow_by_id(store, flow_id)
         elif flow_name is not None:
-            # Search flows by name match
+            # Exact name, then qualified-name segment/suffix, then partial.
+            # Highest criticality wins within a tier (list is sorted by it).
             all_flows = get_flows(
                 store, sort_by="criticality", limit=500
             )
-            for f in all_flows:
-                if flow_name.lower() in f["name"].lower():
-                    flow = get_flow_by_id(store, f["id"])
+            needle = flow_name.lower()
+            qns = {
+                r["id"]: (r["qualified_name"] or "").lower()
+                for r in store._conn.execute(
+                    "SELECT id, qualified_name FROM nodes WHERE id IN (%s)"
+                    % ",".join("?" * len(all_flows)),
+                    [f["entry_point_id"] for f in all_flows],
+                )
+            } if all_flows else {}
+
+            def _qn_match(f: dict) -> bool:
+                qn = qns.get(f["entry_point_id"], "")
+                tail = qn.rsplit("::", 1)[-1]
+                if tail == needle or tail.endswith("." + needle):
+                    return True
+                segments = qn.replace("::", "/").replace(".", "/").split("/")
+                return needle in segments
+
+            tiers = (
+                [f for f in all_flows if f["name"].lower() == needle],
+                [f for f in all_flows if _qn_match(f)],
+                [f for f in all_flows if needle in f["name"].lower()],
+            )
+            for matches in tiers:
+                if matches:
+                    flow = get_flow_by_id(store, matches[0]["id"])
+                    matches_total = len(matches)
                     break
 
         if flow is None:
@@ -258,6 +285,8 @@ def get_flow(
             "flow": flow,
             **page.fields(),
         }
+        if matches_total is not None:
+            result["matches_total"] = matches_total
         result["_hints"] = generate_hints(
             "get_flow_tool", result, get_session()
         )
