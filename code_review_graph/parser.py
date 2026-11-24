@@ -4902,11 +4902,11 @@ class CodeParser:
                 by_name.setdefault(node.name, []).append(node)
         seen = {
             (e.target, e.line) for e in edges
-            if e.kind in ("REFERENCES", "CALLS") and e.source == file_path
+            if e.kind in ("REFERENCES", "CALLS")
         }
         bare_type_names: set[str] = set()
         for name, line, form in candidates:
-            if name in self._VALUE_REF_SKIP_NAMES or len(name) <= 1:
+            if name in self._VALUE_REF_SKIP_NAMES or len(name) <= 1 or name.isupper():
                 continue
             if name in _dead_code_evidence.TYPE_USE_STOPLIST and form != "arg":
                 continue
