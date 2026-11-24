@@ -1069,7 +1069,7 @@ route: str | None            # Only calls whose route equals this or lies below 
 status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
-origin: str | None           # feign | js | terraform | workflow; default: feign and js
+origin: str | None           # feign | js | terraform | workflow | stepfunction; default: feign and js
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
 ```
@@ -1087,6 +1087,20 @@ using repo, file and line, `target_repo`, `target_path`, `ref` and `kind` (`reus
 `ambiguous` or `repo_not_registered`. Local `./` and `docker://` references and expression-valued ones are not
 listed. An action at a repo's root has an empty path and is `matched` once the repo is registered. A path the
 target graph does not index (an action folder outside `.github`) reads as `path_not_found`.
+
+`origin="stepfunction"` lists what the Step Functions Task states of the repos call and the registered repo that
+defines it. A target is a `REFERENCES` edge from a state to `external:aws-<service>:<name>`: a name written in the
+definition, or one the deploying Terragrunt unit's replacement maps give a `${placeholder}` (`named_by` is
+`definition` or `replacement_vars`). Rows carry the calling repo, file and line, `machine`, `state`, `target_kind`
+(`lambda`, `ecs`, `sns`, `states`, ...), `target_name`, `target` (`kind/name`) and, when matched, `target_repo`.
+A repo defines a target when it has a Lambda Terragrunt unit deployed under that name (exact), a Terraform
+resource of the matching type labelled with it (`aws_lambda_function`, `aws_ecs_task_definition`, `aws_sns_topic`,
+`aws_sfn_state_machine`, ...; case, `-` and `_` ignored), or, for a state machine, a definition file of that name.
+`status` is `matched` (exactly one registered repo defines it, possibly the calling repo), `ambiguous` (several
+do; they are in `candidates`) or `not_found` (no registered repo does, or it names it another way). `service`
+filters by target name and `route` by kind (`lambda`) or `kind/name`. Run it with `service=<function name>` to see
+which state machines run a Lambda. A placeholder that stands for a different name in each environment gives one
+row per name.
 
 Joins each outbound Spring Feign call, and each JavaScript or TypeScript HTTP
 call, to the server endpoint it reaches in another registered repository. The join is computed on every call from the

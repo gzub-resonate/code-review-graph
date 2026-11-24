@@ -237,6 +237,8 @@ def test_a_graph_without_terraform_or_state_machines_is_untouched(tmp_path):
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     store = build(tmp_path)
     try:
-        assert resolve_asl_local_targets(store) == {"links": 0, "ambiguous": 0}
+        stats = resolve_asl_local_targets(store)
+        assert stats["links"] == 0 and stats["ambiguous"] == 0
+        assert not any(stats.values())  # the placeholder and handler counters too
     finally:
         store.close()

@@ -46,6 +46,19 @@
 
 ### Added
 
+- Step Functions state machines link to the code and resources they call. A Task whose target is a
+  `${placeholder}` is named from the Terragrunt unit that deploys the definition
+  (`step_function_file_path` and the `replacement_vars` maps): the state gets a `REFERENCES` edge to
+  `external:aws-<service>:<name>` (`extra.resolution: "asl_replacement_vars"`), one per distinct
+  name. A state that runs a Lambda of the repository gets an edge to the handler function
+  (`asl_lambda_handler`), found through the Lambda unit's `handler`, `function_name` and
+  `git_repo_sub_dir`; execution flows continue from the machine into the handler's calls, and impact
+  analysis reaches the machine from a changed handler. `cross_repo_requests_tool` takes
+  `origin="stepfunction"` to list what state machines call and the registered repo that defines it.
+  Terragrunt `inputs` is now read, for an allowlist of keys only, and each value is reduced to
+  naming data before anything is stored (see `docs/INFRASTRUCTURE_REFERENCES.md`, "Terragrunt
+  inputs"). The static Terragrunt evaluator gains `split`, `join`, `slice`, `length`, `basename`,
+  list indexes and whole-number `+` / `-`. Run `code-review-graph build` once to add the links.
 - Step Functions state machines now start flows. The `StartAt` state of each machine is a flow entry
   point, and the flow follows `TRANSITIONS_TO` (next, choice, catch, Parallel branch, Map
   processor) and the inferred link from a Task state to its Terraform Lambda or ECS task

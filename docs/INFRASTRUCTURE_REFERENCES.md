@@ -14,7 +14,7 @@ string per construct, parsed into its parts. Everything else in the file is neve
 |---|---|---|
 | `.github/workflows/*.yml`, `.github/actions/**/action.yml` | `jobs.<id>.uses`, `steps[].uses` | `with`, `env`, `secrets`, `run`, `if`, every other key |
 | `Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile` | `FROM` image and stage alias, `COPY --from` | `ARG`, `ENV`, `LABEL`, `RUN`, build arguments and every other instruction |
-| `*.hcl` (Terragrunt) | `terraform.source`, `include.path`, `dependency.config_path`, `dependencies.paths` | `inputs`, `mock_outputs` and every other attribute. A `locals` value is read only to work out one of the four references above (see [Expressions](#expressions)); it is never stored |
+| `*.hcl` (Terragrunt) | `terraform.source`, `include.path`, `dependency.config_path`, `dependencies.paths`; in `inputs`, only the keys listed under [Terragrunt inputs](#terragrunt-inputs) | `mock_outputs`, every other key of `inputs` and every other attribute. A `locals` value is read only to work out one of the references or allowlisted inputs (see [Expressions](#expressions)); it is never stored |
 | `*.tf` | `module.source` | every other attribute |
 
 A GitHub Actions or Dockerfile reference that is an expression (`${{ matrix.action }}`,
@@ -45,6 +45,45 @@ before anything is stored:
 - A reference that cannot be reduced safely (for example a `?` before the `@`, so the end of the
   credentials is unclear, or an unexpected character in a ref) is recorded as `dynamic` with no
   text, and its edge points at the `dynamic` target.
+
+## Terragrunt inputs
+
+`inputs` holds values, so it is read through an allowlist of keys and nothing else. An unlisted
+key is skipped without its value being visited, in the unit and in the files it includes.
+
+| Key | What is kept | What it is for |
+|---|---|---|
+| `step_function_file_path` | The Step Functions definition file it names, when that file is in the repository (the path is tried from the repository root, then from the unit) | Says which `.asl.json` the unit deploys |
+| `replacement_vars` | For an entry whose value is an ARN of Lambda, Step Functions, ECS (task definition or cluster), SNS, SQS, DynamoDB, Batch (job definition), Glue (job) or CodeBuild (project): the entry key, the service and the resource name. The partition must be `aws`, `aws-us-gov` or `aws-cn`. The account id, the region and a version, alias or revision are dropped | Says what a `${key}` placeholder of the definition stands for |
+| `lambda_replacement_vars`, `step_function_replacement_vars`, `sns_topic_replacement_vars` | The entry key and the plain name (letters, digits, `_`, `.`, `-`), with the service the map is for | The same, for the typed maps of a shared `step_function` module |
+| `handler` | A `module.function` string (`pkg/module.function` and `pkg.module.function` too) | The code a Lambda unit runs |
+| `function_name` | A plain function name | The name the Lambda is deployed under |
+| `git_repo_sub_dir` | The directory it evaluates to, when that directory is in the repository | Where the handler's module is |
+
+No raw value is stored. A value that is not of the shape above leaves nothing behind: a subnet
+or security group id, an e-mail address, a bucket name, a URL (with or without credentials), a
+password, an ARN of any other service. An entry whose key looks like a secret (`secret`,
+`passw`, `token`, `credential`, `api_key`, `private_key`, `access_key`, in any case) is skipped
+whatever its value. A value written as an expression is reduced as described under
+[Expressions](#expressions), and one that cannot be reduced leaves no entry and no text. In an
+ARN, the account id and the region may be expressions that do not reduce (they are dropped
+anyway); the partition, the service and the name must be literal.
+
+The reduced data is on the unit's `File` node as `extra.terragrunt_inputs`
+(`state_machine_file`, `replacement_vars` as `{key, service, kind, name}`, `handler`,
+`function_name`, `source_dir`). `handler`, `function_name` and `source_dir` are recorded for a
+unit that can be deployed (it has an `include` or a `terraform` block), not for a base file that
+other units include. A unit is looked at only when it, or a file it includes, defines
+`step_function_file_path`, one of the replacement maps or `handler`. A unit with more than 3
+`include` blocks is not read through its includes: it gets `dynamic_reason: "depth_limit"` and
+nothing is guessed. The unit's own entries win over an included file's, and an included file
+adds entries to a map only when the unit does not define it or the include sets
+`merge_strategy = "deep"`.
+
+`asl_resolver.py` turns this into edges after the build (see `docs/schema.md`, "Step Functions"):
+a Task state whose target is `${key}` gets a `REFERENCES` edge to
+`external:aws-<service>:<name>`, and a state that runs a Lambda of the repository gets one to the
+handler function.
 
 ## Edges and targets
 
@@ -115,7 +154,12 @@ Resolved:
   `get_path_to_repo_root()`, `path_relative_to_include()`, `path_relative_from_include()` and
   `dirname()`. The functions that name the unit being run need a file called `terragrunt.hcl`.
   In any other `.hcl` file, which is only ever included, they stay `dynamic` because the answer
-  depends on the file that includes it.
+  depends on the file that includes it. When a unit's reference or allowlisted input is worked
+  out through a file it includes, `path_relative_to_include()` in that file is the unit's path
+  relative to it, as in Terragrunt.
+- `split`, `join`, `slice`, `length`, `basename`, an index (`list[n]`) and `+` / `-` on whole
+  numbers. They are pure functions of their arguments. A list or a number exists only between
+  them: an expression whose result is not a string stays `dynamic`.
 - Strings that combine these with literals (`"${get_repo_root()}/modules//app"`; the part after
   `//` is the module directory, as in Terragrunt).
 - `local.<name>` from the same file, and `include.<name>.locals.<name>` when that `include` has
@@ -132,8 +176,8 @@ Everything else stays `dynamic` with a coarse `dynamic_reason` and no text:
 | `env` | `get_env(...)`. No environment variable is ever read |
 | `command` | `run_cmd(...)`. Nothing is ever run |
 | `variable` | `var.*`, `each.*`, `count.*`, `dependency` outputs, a conditional or any other value that the files do not hold |
-| `unsupported_function` | Any other function (`sops_decrypt_file`, `read_terragrunt_config`, `format`, `try`, ...) or construct (a list, a heredoc, a template directive) |
-| `depth_limit` | A bound was reached or the expressions are cyclic: nesting depth 16, 400 nodes, 3 included files, 1 MB per included file, 4,096 characters in a value |
+| `unsupported_function` | Any other function (`sops_decrypt_file`, `read_terragrunt_config`, `format`, `try`, ...) or construct (a list as the result, a heredoc, a template directive) |
+| `depth_limit` | A bound was reached or the expressions are cyclic: nesting depth 40, 400 nodes, 3 included files, 1 MB per included file, 4,096 characters in a value, 256 items in a list |
 | `not_found` | A file, `include`, `local` or parent file it needs is missing, is outside the repository, is excluded, or the path it names does not exist |
 
 Safety rules:
@@ -142,14 +186,16 @@ Safety rules:
   planted `run_cmd` or `get_env` is never run or read.
 - A file is opened only when it resolves, symbolic links included, to a place inside the
   repository that is not excluded. A path that leaves the repository (`../../..`) is `not_found`.
-- A value taken from `locals`, `inputs` or an included file is never stored, whatever it holds.
-  Only the target is: a file in the repository, or an address reduced as above.
+- A value taken from `locals`, `inputs` or an included file is never stored as written,
+  whatever it holds. Only the target is: a file in the repository, or an address reduced as
+  above. For the allowlisted `inputs` keys, only the naming data described under
+  [Terragrunt inputs](#terragrunt-inputs) is.
 - Evaluation is bounded (see `depth_limit`), so a cyclic or hostile include chain ends at once
   as `dynamic`.
 - The same files always give the same edges.
 
 Not resolved, for lack of use in the repositories measured: `read_terragrunt_config(...)`,
-`format`/`join`/`try`, locals more than one file away, and `${path.module}` in a `.tf`
+`format`/`try`, locals more than one file away, and `${path.module}` in a `.tf`
 `module` source.
 
 ## Querying

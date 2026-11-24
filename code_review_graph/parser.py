@@ -58,6 +58,9 @@ from .infra_references import (
     MAX_DOCKERFILE_BYTES,
     MAX_DOCKERFILE_LINES,
     MAX_INFRA_REFERENCES_PER_FILE,
+    MAX_REPLACEMENT_VARS,
+    REPLACEMENT_VAR_MAPS,
+    TERRAGRUNT_INPUT_TRIGGER_KEYS,
     clean_stage_alias,
     docker_image_target,
     format_docker_image,
@@ -69,6 +72,9 @@ from .infra_references import (
     parse_docker_image,
     parse_github_uses,
     parse_terragrunt_source,
+    reduce_lambda_handler,
+    reduce_lambda_name,
+    reduce_replacement_var,
 )
 from .npm_alias_resolver import NpmAliasResolver
 from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
@@ -4452,6 +4458,9 @@ class CodeParser:
                 tree.root_node, source, path, file_path_str, language, test_file,
                 nodes, edges,
             )
+
+        if language == "hcl" and path.name == "terragrunt.hcl":
+            self._emit_terragrunt_inputs(tree.root_node, file_path_str, file_extra)
 
         if language == "elixir":
             nodes, edges = self._merge_elixir_clauses(nodes, edges)
@@ -14257,9 +14266,10 @@ class CodeParser:
         ``dependencies`` block names.
 
         Only ``terraform.source``, ``include.path``, ``dependency.config_path`` and
-        ``dependencies.paths`` are read. ``inputs``, ``mock_outputs`` and every other attribute
-        are not visited. A local path resolves to the file or module it names, as a ``.tf``
-        module ``source`` does; a remote source points at
+        ``dependencies.paths`` are read. ``mock_outputs`` and every other attribute of these
+        blocks are not visited (``inputs`` is read separately, for an allowlist of keys: see
+        :meth:`_emit_terragrunt_inputs`). A local path resolves to the file or module it
+        names, as a ``.tf`` module ``source`` does; a remote source points at
         ``external:terraform-module:<address>`` with the ``ref`` in ``extra``. Credentials and
         query parameters other than ``ref`` and ``version`` are dropped, and the raw source is
         never stored.
@@ -14294,6 +14304,118 @@ class CodeParser:
                 block_type, labels, entry, True, file_path, edges, entry_line,
                 evaluator=evaluator,
             )
+
+    def _emit_terragrunt_inputs(
+        self, root_node, file_path: str, file_extra: dict[str, Any],
+    ) -> None:
+        """Record, on the file node of a Terragrunt unit, the naming data of its ``inputs``.
+
+        Only the keys in ``TERRAGRUNT_INPUT_KEYS`` are visited, in the unit and in the files
+        it includes; a unit that defines none of ``TERRAGRUNT_INPUT_TRIGGER_KEYS`` there is
+        left alone. Nothing is stored as written. ``file_extra["terragrunt_inputs"]`` gets:
+
+        * ``state_machine_file``: the in-repository Step Functions definition that
+          ``step_function_file_path`` names (relative to the repository root, else to the
+          unit).
+        * ``replacement_vars``: ``{key, service, kind, name}`` per replacement-map entry
+          that names an AWS resource (``reduce_replacement_var``).
+        * ``handler``, ``function_name`` and ``source_dir`` of a Lambda unit: the handler
+          string, the deployed name, and the in-repository directory ``git_repo_sub_dir``
+          evaluates to. They are recorded for a unit that can be deployed (it includes a
+          file or has a ``terraform`` block), not for a base file other units include.
+        * ``dynamic_reason``: ``depth_limit`` when the unit includes more files than may be
+          read, so nothing was taken from them.
+
+        An expression is reduced by :class:`TerragruntEvaluator` (nothing is run, no
+        environment variable is read, no file outside the repository is opened); one that
+        cannot be reduced leaves no entry and no text.
+        """
+        body = _hcl_child(root_node, "body")
+        if body is None or self._repo_root is None:
+            return
+        evaluator = self._terragrunt_evaluator(body, file_path)
+        if evaluator is None or not evaluator.input_keys() & TERRAGRUNT_INPUT_TRIGGER_KEYS:
+            return
+        info: dict[str, Any] = {}
+        reasons: set[str] = set()
+
+        value, reason, found = evaluator.input_value("step_function_file_path")
+        reasons.add(reason or "")
+        if found and value is not None:
+            machine = self._terragrunt_repo_path(value, file_path, want_dir=False)
+            if machine:
+                info["state_machine_file"] = machine
+
+        reduced: dict[tuple[str, str, str], dict[str, str]] = {}
+        for map_name in REPLACEMENT_VAR_MAPS:
+            entries, reason = evaluator.input_entries(map_name)
+            reasons.add(reason or "")
+            for key, entry_value, _entry_line in entries:
+                item = reduce_replacement_var(map_name, key, entry_value)
+                if item is not None:
+                    reduced.setdefault((item["key"], item["service"], item["name"]), item)
+        if reduced:
+            info["replacement_vars"] = [
+                reduced[k] for k in sorted(reduced)
+            ][:MAX_REPLACEMENT_VARS]
+
+        value, reason, found = evaluator.input_value("handler")
+        handler = reduce_lambda_handler(value) if found else None
+        if handler is not None and evaluator.is_deployable():
+            info["handler"] = handler
+            value, _reason, found = evaluator.input_value("function_name")
+            name = reduce_lambda_name(value) if found else None
+            if name is not None:
+                info["function_name"] = name
+            value, _reason, found = evaluator.input_value("git_repo_sub_dir")
+            source_dir = (
+                self._terragrunt_repo_path(value, file_path, want_dir=True)
+                if found and value is not None else None
+            )
+            if source_dir:
+                info["source_dir"] = source_dir
+        if "depth_limit" in reasons:
+            info["dynamic_reason"] = "depth_limit"
+        if info:
+            file_extra["terragrunt_inputs"] = info
+
+    def _terragrunt_repo_path(self, value: str, file_path: str, want_dir: bool) -> Optional[str]:
+        """The existing in-repository file or directory *value* names, else ``None``.
+
+        *value* is an evaluated path: absolute (``get_repo_root()``-based), or relative to the
+        repository root or to the unit. It must resolve, symbolic links included, inside the
+        repository; a file must not be an excluded one. *value* itself is not kept.
+        """
+        root = self._repo_root
+        if root is None or not is_reference_text(value) or any(ch in value for ch in "?#@$"):
+            return None
+        unit_dir = Path(file_path).parent
+        if not unit_dir.is_absolute():
+            unit_dir = root / unit_dir
+        candidates = (
+            [Path(value)] if os.path.isabs(value) else [root / value, unit_dir / value]
+        )
+        for candidate in candidates:
+            try:
+                resolved = Path(os.path.realpath(candidate))
+                if not _path_is_within(resolved, Path(os.path.realpath(root))):
+                    continue
+                if want_dir:
+                    if resolved.is_dir():
+                        return normalize_file_path(Path(os.path.normpath(candidate)))
+                    continue
+                if not resolved.is_file():
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            target = normalize_file_path(Path(os.path.normpath(candidate)))
+            if (
+                normalize_file_path(resolved) in self._excluded_files
+                or target in self._excluded_files
+            ):
+                continue
+            return target
+        return None
 
     def _append_terragrunt_edge(
         self,

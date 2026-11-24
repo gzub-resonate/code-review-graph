@@ -368,8 +368,18 @@ def _run_hcl_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _has_lambda_units(store: GraphStore) -> bool:
+    """Whether a Terragrunt Lambda unit recorded a handler, without failing an update."""
+    try:
+        from .asl_resolver import has_lambda_units
+        return has_lambda_units(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Step Functions resolver check failed: %s", exc)
+        return False
+
+
 def _run_asl_resolver(store: GraphStore) -> Optional[dict]:
-    """Link Step Functions states to the Terraform they run without failing a build."""
+    """Link Step Functions states to what they run without failing a build."""
     try:
         from .asl_resolver import resolve_asl_local_targets
         return resolve_asl_local_targets(store)
@@ -3792,8 +3802,11 @@ def incremental_update(
         for path in candidate_paths
     )
     ember_stats = _run_ember_resolver(store) if ember_changed else None
-    if has_graph_changes and any(
-        rp.endswith((".tf", ".hcl", ".asl", ".asl.json")) for rp in all_files
+    # A handler link ends at a function of any language, so once a Lambda unit records a
+    # handler every change reruns the pass (it is a few bounded reads).
+    if has_graph_changes and (
+        any(rp.endswith((".tf", ".hcl", ".asl", ".asl.json")) for rp in all_files)
+        or _has_lambda_units(store)
     ):
         _run_asl_resolver(store)
     # Project-only edits can rebind C# calls without reparsing a source file,

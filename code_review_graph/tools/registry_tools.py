@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import feign_links as fl
+from .. import stepfunction_links as sl
 from .. import terraform_links as tl
 from .. import workflow_links as wl
 from ..constants import cross_repo_budget_seconds, cross_repo_workers
@@ -691,6 +692,29 @@ def _workflow_links(
     )
 
 
+def _stepfunction_links(
+    repos: list[str] | None,
+    target_name: str | None,
+    target: str | None,
+    status: str | None,
+    max_results: int,
+) -> dict[str, Any]:
+    """The ``origin="stepfunction"`` branch: what state machines call, joined to its owner."""
+    definitions = sl.Definitions()
+    result = _infra_links(
+        "stepfunction", "Step Functions target(s)", sl.STATUSES, sl.read_target_edges,
+        definitions.defines, sl.resolve_links, "target_name", "target",
+        repos, target_name, target, status, max_results,
+    )
+    for row in result["results"]:
+        for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
+            if isinstance(row.get(key), str):
+                row[key] = _sanitize_name(row[key])
+        if isinstance(row.get("candidates"), list):
+            row["candidates"] = [_sanitize_name(str(name)) for name in row["candidates"]]
+    return result
+
+
 def _infra_links(
     origin: str,
     noun: str,
@@ -706,7 +730,10 @@ def _infra_links(
     status: str | None,
     max_results: int,
 ) -> dict[str, Any]:
-    """Shared body of the ``terraform`` and ``workflow`` origins (one read-only join each)."""
+    """Shared body of the ``terraform``, ``workflow`` and ``stepfunction`` origins.
+
+    One read-only join each. *exists_in_repo* is ``(store, repo path, what) -> bool``.
+    """
     from ..registry import Registry
 
     if status is not None and status not in statuses:
@@ -851,7 +878,12 @@ def cross_repo_requests_func(
             that point at another repo; ``service`` then filters by the target repo name,
             ``route`` by path prefix inside it, and ``status`` is one of ``matched``,
             ``path_not_found``, ``ambiguous`` or ``repo_not_registered``. Local
-            (``./``) and ``docker://`` references are not listed.
+            (``./``) and ``docker://`` references are not listed. ``stepfunction``
+            lists what the Step Functions Task states call (a Lambda, an ECS task
+            definition, an SNS topic, another state machine, ...) and the registered
+            repo that defines it; ``service`` then filters by target name, ``route`` by
+            kind (``lambda``) or ``kind/name``, and ``status`` is one of ``matched``,
+            ``not_found`` or ``ambiguous``.
 
     The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 300,
     0 = unlimited). Once spent, no further client repo is started; those left are
@@ -871,10 +903,13 @@ def cross_repo_requests_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
-    if status is not None and origin not in ("terraform", "workflow") and status not in fl.STATUSES:
+    infra_origins = ("terraform", "workflow", "stepfunction")
+    if status is not None and origin not in infra_origins and status not in fl.STATUSES:
         raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
-    if origin is not None and origin not in ("feign", "js", "terraform", "workflow"):
-        raise ValueError("origin must be one of: feign, js, terraform, workflow")
+    if origin is not None and origin not in ("feign", "js", *infra_origins):
+        raise ValueError("origin must be one of: feign, js, terraform, workflow, stepfunction")
+    if origin == "stepfunction":
+        return _stepfunction_links(repos, service, route, status, max_results)
     if origin == "terraform":
         return _terraform_links(repos, service, route, status, max_results)
     if origin == "workflow":

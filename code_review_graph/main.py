@@ -1840,6 +1840,14 @@ async def cross_repo_requests_tool(
             ``path_not_found``, ``ambiguous`` or ``repo_not_registered``. Local
             ``./`` and ``docker://`` references are not listed. Use it from a
             workflow-templates repo to see which repos call a workflow.
+            ``stepfunction`` lists what the Step Functions Task states of the repos
+            call (a Lambda function, an ECS task definition, an SNS topic, another
+            state machine), named in the definition or by the deploying Terragrunt
+            unit's replacement maps, and the registered repo that defines it:
+            ``service`` filters by target name, ``route`` by kind (``lambda``,
+            ``ecs``, ``sns``, ``states``) or ``kind/name``, ``status`` is
+            ``matched``, ``not_found`` or ``ambiguous``. Use it with
+            ``service=<function name>`` to see which state machines run a Lambda.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
         repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as

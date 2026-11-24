@@ -7,12 +7,22 @@ module source. Each is parsed into its parts and stored as an ``IMPORTS_FROM`` e
 stable external target, so a question such as "which repositories call this shared workflow"
 has an answer in the graph.
 
-Nothing else is read. ``env``, ``with``, ``secrets``, ``args``, ``ENV``, ``ARG`` values,
-``LABEL`` and Terragrunt ``inputs`` are never looked at, so no value in them can reach a node
-or an edge. Nor does a URL credential (``user:password@``, a token), a query string other
-than a ``ref`` or ``version``, or a fragment: they are dropped from every reference and the
-raw remote string is never stored. The helpers here are pure: they take a string and return
-its parts, and the emitters in ``parser.py`` decide where the edges go.
+Nothing else is read. ``env``, ``with``, ``secrets``, ``args``, ``ENV``, ``ARG`` values and
+``LABEL`` are never looked at, so no value in them can reach a node or an edge. Nor does a URL
+credential (``user:password@``, a token), a query string other than a ``ref`` or ``version``,
+or a fragment: they are dropped from every reference and the raw remote string is never
+stored. The helpers here are pure: they take a string and return its parts, and the emitters
+in ``parser.py`` decide where the edges go.
+
+Terragrunt ``inputs`` is read for the keys in :data:`TERRAGRUNT_INPUT_KEYS` and for no other:
+an unlisted key is skipped without its value being visited. They are the keys that say which
+Step Functions definition a unit deploys, what its ``${placeholder}`` names stand for, and
+which handler a Lambda unit runs. No raw value is stored. Each is reduced to naming data
+first, by the reducers at the end of this module: the name part of an ARN (never the account
+id or the region), the name in a typed ``*_replacement_vars`` map, a handler string
+(``module.function``), a function name, a path inside the repository. A value that is not of
+that shape (an e-mail address, a subnet id, a URL, a password), an entry whose key looks like
+a secret, and an expression that cannot be reduced statically all leave nothing behind.
 """
 
 from __future__ import annotations
@@ -345,3 +355,138 @@ def parse_terragrunt_source(raw: str) -> dict[str, Any]:
     elif not scheme and not getter and "." in base.split("/")[0]:
         parts["kind"] = "git"  # ``github.com/acme/mods``: go-getter's shorthand
     return parts
+
+
+# -- Terragrunt ``inputs``: the allowlisted keys and their reducers ------------------------------
+
+#: Typed replacement maps of the shared ``step_function`` module: map name ->
+#: ``(service, target kind)`` of the plain names it holds.
+TYPED_REPLACEMENT_VARS: dict[str, tuple[str, str]] = {
+    "lambda_replacement_vars": ("lambda", "function"),
+    "step_function_replacement_vars": ("states", "state-machine"),
+    "sns_topic_replacement_vars": ("sns", "topic"),
+}
+
+#: The untyped map: only its entries whose value is an ARN of a known service are used.
+UNTYPED_REPLACEMENT_VARS = "replacement_vars"
+
+#: Every replacement map that is read, the untyped one first.
+REPLACEMENT_VAR_MAPS: tuple[str, ...] = (UNTYPED_REPLACEMENT_VARS, *TYPED_REPLACEMENT_VARS)
+
+#: Keys of a Lambda unit that are read: the handler, the deployed name and the source directory.
+LAMBDA_INPUT_KEYS: tuple[str, ...] = ("handler", "function_name", "git_repo_sub_dir")
+
+#: The only keys of a Terragrunt ``inputs`` object that are ever visited.
+TERRAGRUNT_INPUT_KEYS: frozenset[str] = frozenset(
+    {"step_function_file_path", *REPLACEMENT_VAR_MAPS, *LAMBDA_INPUT_KEYS}
+)
+
+#: A unit is looked at only when it, or a file it includes, defines one of these.
+TERRAGRUNT_INPUT_TRIGGER_KEYS: frozenset[str] = frozenset(
+    {"step_function_file_path", *REPLACEMENT_VAR_MAPS, "handler"}
+)
+
+#: Most replacement entries kept for one unit.
+MAX_REPLACEMENT_VARS = 500
+
+#: ARN service -> ``(resource prefix, target kind)`` choices. The name follows the prefix.
+_ARN_RESOURCES: dict[str, tuple[tuple[str, str], ...]] = {
+    "lambda": (("function:", "function"),),
+    "states": (("stateMachine:", "state-machine"),),
+    "ecs": (("task-definition/", "task-definition"), ("cluster/", "cluster")),
+    "sns": (("", "topic"),),
+    "sqs": (("", "queue"),),
+    "dynamodb": (("table/", "table"),),
+    "batch": (("job-definition/", "job-definition"),),
+    "glue": (("job/", "job"),),
+    "codebuild": (("project/", "project"),),
+}
+_ARN_PARTITIONS = frozenset({"aws", "aws-us-gov", "aws-cn"})
+_AWS_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,256}$")
+_PLACEHOLDER_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,127}$")
+_SECRET_KEY = re.compile(
+    r"secret|passw|token|credential|api[_-]?key|private[_-]?key|access[_-]?key", re.IGNORECASE,
+)
+_LAMBDA_HANDLER = re.compile(
+    r"^[A-Za-z0-9_][A-Za-z0-9_/\-]{0,127}(?:\.[A-Za-z0-9_][A-Za-z0-9_\-]{0,63}){0,8}"
+    r"\.[A-Za-z_][A-Za-z0-9_]{0,127}$"
+)
+_LAMBDA_NAME = re.compile(r"^[A-Za-z0-9_\-]{1,140}$")
+
+
+def aws_external_target(service: str, name: str) -> str:
+    """The external target of the AWS resource *name* of *service* (``external:aws-sns:x``)."""
+    return f"external:aws-{service}:{name}"
+
+
+def reduce_arn(value: str) -> Optional[tuple[str, str, str]]:
+    """``(service, target kind, name)`` of an ARN of a known service, else ``None``.
+
+    The account id and the region are dropped and may be anything, including a part that
+    could not be evaluated. The partition, the service and the name must be literal. A
+    version, alias or revision after the name is dropped.
+    """
+    parts = value.strip().split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn" or parts[1] not in _ARN_PARTITIONS:
+        return None
+    service = parts[2]
+    resource = parts[5]
+    for prefix, kind in _ARN_RESOURCES.get(service, ()):
+        if prefix and not resource.startswith(prefix):
+            continue
+        name = resource[len(prefix):]
+        if kind in ("function", "state-machine", "task-definition", "job-definition"):
+            name = name.split(":", 1)[0]
+        elif kind == "table":
+            name = name.split("/", 1)[0]
+        if _AWS_NAME.match(name):
+            return service, kind, name
+        return None
+    return None
+
+
+def reduce_replacement_var(
+    map_name: str, key: str, value: Optional[str],
+) -> Optional[dict[str, str]]:
+    """One entry of a replacement map as ``{key, service, kind, name}``, else ``None``.
+
+    *key* is the ``${key}`` placeholder of the state machine definition. In the untyped map
+    only an ARN of a known service is used, so a subnet id, an e-mail address, a bucket or
+    any other plain value is skipped. A typed map holds plain names of its one service (an
+    ARN of that service is accepted too). An entry whose key looks like a secret is skipped
+    whatever its value, and the value itself is never part of the result.
+    """
+    if value is None or not _PLACEHOLDER_KEY.match(key) or _SECRET_KEY.search(key):
+        return None
+    if not is_reference_text(value.replace("\x00", "?")):
+        return None
+    typed = TYPED_REPLACEMENT_VARS.get(map_name)
+    if value.startswith("arn:"):
+        reduced = reduce_arn(value)
+        if reduced is None or (typed is not None and reduced[0] != typed[0]):
+            return None
+        service, kind, name = reduced
+    elif typed is not None and _AWS_NAME.match(value):
+        service, kind = typed
+        name = value
+    else:
+        return None
+    return {"key": key, "service": service, "kind": kind, "name": name}
+
+
+def reduce_lambda_handler(value: Optional[str]) -> Optional[str]:
+    """A ``module.function`` handler string, or ``None`` for any other shape.
+
+    ``pkg/module.function`` and ``pkg.module.function`` are kept as written. A Java handler
+    (``com.acme.Handler::handleRequest``) is not of this shape and is not kept.
+    """
+    if value is None or not _LAMBDA_HANDLER.match(value):
+        return None
+    return value
+
+
+def reduce_lambda_name(value: Optional[str]) -> Optional[str]:
+    """A Lambda function name, or ``None`` when *value* is not a plain name."""
+    if value is None or not _LAMBDA_NAME.match(value):
+        return None
+    return value

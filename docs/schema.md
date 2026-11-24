@@ -250,6 +250,31 @@ holding the external target it stands for. The external edge stays, so a functio
 repository, or one whose name does not match, keeps it. Every pass removes these links and makes
 them again, so an update gives what a full build does.
 
+Two more derived `REFERENCES` edges come from the Terragrunt unit that deploys the machine (the
+allowlisted `inputs` keys in `docs/INFRASTRUCTURE_REFERENCES.md`, "Terragrunt inputs"):
+
+- `extra.resolution: "asl_replacement_vars"`: a Task state whose target is a `${key}` placeholder
+  gets an edge to `external:aws-<service>:<name>` when a unit whose `step_function_file_path`
+  names this definition fills `key` from a replacement map. The name was read, so
+  `extra.confidence_tier` is `EXTRACTED` (the edge's own `confidence_tier` column follows the
+  rule for every target that names no node, and is `UNRESOLVED` like the parser's literal
+  external edges); `extra.placeholder` is the key, with `resource_kind` and `target_kind`. A key that
+  stands for different names in different units (one per environment) gets one edge per name. The
+  state keeps `target_dynamic` and `target_placeholders`, which describe the definition file.
+- `extra.resolution: "asl_lambda_handler"`: a state with an edge to `external:aws-lambda:<name>`
+  gets an edge to the handler `Function` node of the Lambda unit deployed as `<name>`: the
+  function `function` of `<source_dir>/<module>` (`.py`, `.js`, `.mjs`, `.cjs`, `.ts`) for a
+  `handler` of `module.function`. It is `EXTRACTED` when the unit's `function_name` and
+  `git_repo_sub_dir` were both evaluated statically. Otherwise a directory-name convention stands
+  in (the directory above the unit names the function, and the module is looked for in a
+  directory named after `function_name`, else after that directory) and the edge is `INFERRED`
+  at 0.6. Units that disagree on the handler of one name give no edge, and Java
+  `Class::method` handlers are not linked. `extra.external_target` holds the Lambda target.
+
+Impact analysis walks `REFERENCES` backwards, so a changed handler reaches the states and the
+machines that run it. Execution flows follow all three derived edges out of a state, so a flow
+that starts at a machine continues into the handler's calls.
+
 Machines and states keep the `Class` and `Function` kinds: a new kind would need every filter on
 `kind` (impact radius, risk scoring, dead code, communities, flows, search) to learn it, and the
 schema allows none without a migration. The role is in `extra` instead: `asl_role`
