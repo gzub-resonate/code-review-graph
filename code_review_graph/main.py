@@ -1828,7 +1828,13 @@ async def cross_repo_requests_tool(
             ``service`` filters by module repo name, ``route`` by module folder
             prefix, ``status`` is ``matched``, ``module_not_found``, ``ambiguous``
             or ``repo_not_registered``. Use it from a module repo to see which
-            stacks use a module.
+            stacks use a module. ``workflow`` lists the GitHub Actions ``uses``
+            references (reusable workflows and actions) that point at another repo
+            and the registered repo and path each resolves to: ``service`` filters
+            by target repo name, ``route`` by path prefix, ``status`` is ``matched``,
+            ``path_not_found``, ``ambiguous`` or ``repo_not_registered``. Local
+            ``./`` and ``docker://`` references are not listed. Use it from a
+            workflow-templates repo to see which repos call a workflow.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
         repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as
