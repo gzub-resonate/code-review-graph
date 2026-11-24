@@ -84,6 +84,15 @@ _GENERIC_DIRS = frozenset({
     "python", "js", "ts", "com", "org", "net", "io", "code", "packages",
 })
 
+#: Directory names that only say "this is configuration". A config directory called
+#: ``config`` is named after the folder above it (``tlcm-etl-config-json``), or every
+#: pipeline's ``config/`` would collide. Kept apart from ``_GENERIC_DIRS`` so code
+#: community names are unaffected.
+_CONFIG_DIR_NAMES = frozenset({"config", "conf", "settings", "params", "env"})
+
+#: Config document kinds, whose communities are named after their directory.
+_CONFIG_NODE_KINDS = frozenset({"JsonPath", "YamlPath"})
+
 # Common words to filter when generating community names
 _COMMON_WORDS = frozenset({
     "get", "set", "self", "init", "new", "create", "update", "delete",
@@ -206,6 +215,28 @@ def _dir_label(file_path: str) -> str:
             if slug:
                 return slug
     return ""
+
+
+def _config_dir_label(directory: str) -> str:
+    """Label a config directory, adding the folder above a bare ``config`` one.
+
+    ``datasci/flash/3-set-bits/config`` gives ``3-set-bits-config``. Any other
+    directory is labelled by ``_dir_label`` alone.
+    """
+    label = _dir_label(directory + "/x")
+    segments = [s for s in directory.replace("\\", "/").split("/") if s]
+    nearest = next((s for s in reversed(segments) if s.lower() not in _GENERIC_DIRS), "")
+    if not label or nearest.lower() not in _CONFIG_DIR_NAMES:
+        return label
+    # Index of the last occurrence, so a repeated name resolves to the nearest one.
+    above = segments[: len(segments) - 1 - segments[::-1].index(nearest)]
+    for segment in reversed(above):
+        if segment.lower() in _GENERIC_DIRS or segment.lower() in _CONFIG_DIR_NAMES:
+            continue
+        slug = _to_slug(segment)
+        if slug:
+            return f"{slug}-{label}"
+    return label
 
 
 def _extract_file_prefix(file_paths: list[str]) -> str:
@@ -954,6 +985,44 @@ def _split_oversized(
     return result
 
 
+def _dominant_dir(
+    community: dict[str, Any], nodes_by_qn: dict[str, GraphNode],
+) -> list[str]:
+    """Path segments of the directory holding most of a community's members."""
+    counts = Counter(
+        nodes_by_qn[qn].file_path.replace("\\", "/").rsplit("/", 1)[0]
+        for qn in community.get("members", [])
+        if qn in nodes_by_qn and "/" in nodes_by_qn[qn].file_path.replace("\\", "/")
+    )
+    if not counts:
+        return []
+    top = min(counts, key=lambda d: (-counts[d], d))
+    return [s for s in top.split("/") if s]
+
+
+def _config_path_name(
+    base_name: str,
+    index: int,
+    group_dirs: list[list[str]],
+    taken_names: set[str],
+) -> str:
+    """Name a colliding config community by a path segment no other collider has.
+
+    The deepest segment of its dominant directory that none of the other colliding
+    groups' directories contains. Returns ``""`` when there is none or the name is taken.
+    """
+    own = group_dirs[index]
+    others = {seg for i, d in enumerate(group_dirs) if i != index for seg in d}
+    for segment in reversed(own):
+        if segment in others:
+            continue
+        slug = _to_slug(segment)
+        candidate = f"{slug}-{base_name}" if slug else ""
+        if slug and slug not in base_name.split("-") and candidate not in taken_names:
+            return candidate
+    return ""
+
+
 def _dedupe_community_names(
     communities: list[dict[str, Any]],
     nodes: list[GraphNode],
@@ -987,8 +1056,11 @@ def _dedupe_community_names(
             ),
         )
         base_words = set(base_name.split("-"))
+        group_dirs = [_dominant_dir(c, nodes_by_qn) for _, c in ordered]
 
-        for _, community in ordered[1:]:
+        for index, (_, community) in enumerate(ordered):
+            if index == 0:
+                continue
             member_nodes = [
                 nodes_by_qn[qualified_name]
                 for qualified_name in community.get("members", [])
@@ -1003,6 +1075,13 @@ def _dedupe_community_names(
                 if candidate not in taken_names:
                     candidate_name = candidate
                     break
+
+            if not candidate_name and member_nodes and all(
+                n.kind in _CONFIG_NODE_KINDS for n in member_nodes
+            ):
+                candidate_name = _config_path_name(
+                    base_name, index, group_dirs, taken_names,
+                )
 
             if not candidate_name:
                 suffix_number = 2
@@ -1072,7 +1151,7 @@ def _group_config_documents(
     pending: list[tuple[tuple[str, str], str, list[GraphNode]]] = []
     for key in sorted(groups):
         members = groups[key]
-        label = _dir_label(key[0] + "/x") or "config"
+        label = _config_dir_label(key[0]) or "config"
         base = f"{label}-{'json' if key[1] == 'JsonPath' else 'yaml'}"
         # A very large document set (a data file of a thousand rows) is cut
         # into equal slices in document order, so no community is a blob.
