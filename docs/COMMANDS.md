@@ -1365,10 +1365,10 @@ result key spelled in snake_case like the other keys here.
 - Where a reply holds several lists, one cursor moves them together by position:
   `get_knowledge_gaps_tool` shows the same row positions of every category (a category
   with no rows left is empty), `get_architecture_overview_tool` pages the
-  cross-community rows and the warnings, and `get_community_tool` pages `members` and
-  `member_details`. In `get_architecture_overview_tool` the community list and each
-  community's member names stay bounded as before; read a community's members with
-  `get_community_tool`. A page after the first of these three adds `offset`; in
+  communities (largest first), the cross-community rows and the warnings under one
+  offset, and `get_community_tool` pages `members` and `member_details`. In
+  `get_architecture_overview_tool` each community's member names stay bounded as
+  before; read a community's members with `get_community_tool`. A page after the first of these three adds `offset`; in
   `get_community_tool` and `get_flow_tool` the cursor and `offset` sit at the top of
   the reply, beside `flow` or `community`, and `members_truncated` means members remain.
 - `get_flow_tool` pages `flow.steps`; `flow.path` (the node ids of every step) is
