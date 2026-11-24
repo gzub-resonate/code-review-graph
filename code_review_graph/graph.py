@@ -572,6 +572,12 @@ _RESOLVER_BOUND_KEYS = (
 #: Receivers that are the calling object itself, so the call means a method of
 #: the caller's class or one it inherits.
 _SELF_RECEIVERS = frozenset({"this", "$this", "self"})
+#: Edge ``extra`` keys the parser writes when a call has a receiver or a
+#: receiver expression. A call with none of them is a plain ``name()`` call.
+_RECEIVER_EVIDENCE_KEYS = (
+    "receiver_binding", "receiver_form", "receiver_type", "receiver_resolution",
+    "receiver_class", "receiver_module", "receiver_constant", "receiver_scope",
+)
 #: Receivers that start the lookup at the caller's parent.
 _SUPER_RECEIVERS = frozenset({"super", "base"})
 #: Languages whose parser records a receiver's declared type, so a receiver
@@ -3062,6 +3068,20 @@ class GraphStore:
         """
         receiver = edge_extra.get("receiver")
         owner: Optional[str]
+        if (
+            caller_language == "java"
+            and caller_class
+            and receiver is None
+            and not any(key in edge_extra for key in _RECEIVER_EVIDENCE_KEYS)
+            and bare_name[:1].islower()
+        ):
+            # A plain ``ping()``: the calling class, or a class it extends,
+            # declares it. ``this.ping()`` is read the same way.
+            scope = inheritance.scope_methods(caller_class, bare_name)
+            if not scope:
+                return None
+            declared_in = scope[0].rpartition(".")[0]
+            return scope, (None if declared_in == caller_class else declared_in)
         if edge_extra.get("receiver_resolution") == "typed_receiver_unresolved":
             receiver_type = edge_extra.get("receiver_type")
             owner = (

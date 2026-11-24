@@ -280,6 +280,13 @@ wrote `<path>::Leaf.handle` and only `Alpha` declares `handle`, the target becom
 checks the move again. When the bare-name resolver binds a call this way, `extra.inherited_through`
 names the class the call went through. Both are `INFERRED`.
 
+A plain Java call with no receiver, `helper()`, is read as Java reads it: the calling class
+first, then what that class inherits. The nearest class that declares `helper` answers, so a
+test class calling `givenAuthenticated()` from an abstract base in another package reaches
+`BaseApiTest.givenAuthenticated`. Overloads of that name stay `AMBIGUOUS`. A class that
+extends a type outside the graph, or that nothing in its chain declares the name for, is left
+to the usual evidence, because the call may be a static import or an enclosing class's method.
+
 Scala calls and imports are bound across files by `scala_resolver.py`, from the package
 clauses, imports and declared types the parser recorded. A bound call is `INFERRED` and
 carries `extra.scala_resolved` (the rule: `object_member`, `constructor`, `apply`,

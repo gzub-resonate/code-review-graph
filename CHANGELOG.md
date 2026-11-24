@@ -272,6 +272,13 @@
 
 ### Fixed
 
+- A plain Java call such as `givenAuthenticated()` now links to the method in the base class that
+  declares it, the way `this.givenAuthenticated()` already did. Before, such a call stayed
+  unresolved unless the base class was imported, so `callers_of` and impact radius missed every
+  test or subclass that used an inherited helper. On a 935-file Java service this linked 693
+  more calls (15,908 to 16,601 resolved Java calls). A call whose class extends a type outside
+  the repository, or whose method name is overloaded, is still left unresolved or marked
+  ambiguous rather than guessed.
 - `detect_changes_tool` with `pr` or `head` no longer sends every added symbol name when
   `detail_level="minimal"`: the `pull_request` section then carries the two commits and the
   added and removed totals only. In the standard level the names are paged like the other lists:
