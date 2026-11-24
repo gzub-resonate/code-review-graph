@@ -46,12 +46,31 @@ IGNORED: dict[str, str] = {
     "communities.created_at": "wall-clock time the row was written",
     "metadata.last_updated": "wall-clock time of the build",
     "metadata.last_postprocessed_at": "wall-clock time of post-processing",
+    "metadata.endpoint_index.stamp": (
+        "cache-validity token hashed from MAX(nodes.updated_at) and SUM(nodes.id): "
+        "wall-clock and id-numbering dependent by design; the payload is still compared"
+    ),
     "sqlite_sequence": "SQLite's own autoincrement bookkeeping for the ignored id columns",
     "nodes_fts_data/idx/docsize/config": (
         "FTS5 shadow tables; the index is compared through the "
         "fts_index_bytes and fts_query_results sections instead"
     ),
 }
+
+
+def _without_build_stamp(key: str, value: Any) -> Any:
+    """Drop the build-specific cache stamp from the stored endpoint index."""
+    if key != "endpoint_index" or not isinstance(value, str):
+        return value
+    try:
+        payload = json.loads(value)
+    except ValueError:
+        return value
+    if isinstance(payload, dict):
+        payload.pop("stamp", None)
+        return json.dumps(payload, separators=(",", ":"))
+    return value
+
 
 # Tables a section reads, for the coverage assertion.
 _COVERED_TABLES = {
@@ -305,7 +324,7 @@ def dump_database(db_path: Path, repo_root: Path) -> dict[str, list[str]]:
         )
 
         sections["metadata"] = sorted(
-            _canon([r["key"], r["value"]], roots)
+            _canon([r["key"], _without_build_stamp(r["key"], r["value"])], roots)
             for r in _rows(conn, "SELECT key, value FROM metadata")
             if r["key"] not in ("last_updated", "last_postprocessed_at")
         )
