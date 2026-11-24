@@ -574,7 +574,7 @@ QUERY_PATTERNS = {
 # End-to-end (e2e) test convention
 # ---------------------------------------------------------------------------
 #
-# In Resonate-style repositories ``e2e`` means end-to-end tests (Playwright,
+# In many repositories ``e2e`` means end-to-end tests (Playwright,
 # Cypress, ...). Directory names are matched as WHOLE path segments, so a
 # directory called ``e2e-utils-lib`` is not claimed. Both are case-insensitive.
 # Shared by the parser (``is_test_file``) and the community naming heuristic.
