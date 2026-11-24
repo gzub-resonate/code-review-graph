@@ -351,6 +351,17 @@ class TestNamesAndDescriptions:
         assert "1 endpoints, 1 entry points" in text
         assert text != "Community of 4 nodes"
 
+    def test_description_top_files_skip_test_files(self):
+        nodes = [_node("a/main/Prod.java::Prod", "Class")] + [
+            _node(f"a/test/ProdTest.java::ProdTest.t{i}", "Test") for i in range(5)
+        ]
+
+        text = cm._describe_community(nodes, called_targets=set())
+
+        assert "6 nodes (5 Test, 1 Class)" in text
+        assert "main/Prod.java (1)" in text
+        assert "ProdTest" not in text
+
     def test_detection_is_deterministic_and_names_are_unique(self):
         layout = {f"d{i % 3}/f{i}.json": ("JsonPath", 5) for i in range(9)}
         runs = []

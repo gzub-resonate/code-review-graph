@@ -1341,7 +1341,8 @@ def _describe_community(
         for kind, count in sorted(kinds.items(), key=lambda item: (-item[1], item[0]))[:4]
     )
     files = Counter(
-        "/".join(n.file_path.replace("\\", "/").split("/")[-2:]) for n in member_nodes
+        "/".join(n.file_path.replace("\\", "/").split("/")[-2:])
+        for n in _naming_members(list(member_nodes))
     )
     top_files = ", ".join(
         f"{path} ({count})"
