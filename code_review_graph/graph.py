@@ -565,6 +565,7 @@ _RESOLVER_BOUND_KEYS = (
     "bare_tested_by_source",
     "cpp_scoped_target",
     "ember_resolved",
+    "jooq_resolved",
     INHERITED_ENDPOINT_KEY,
     "rescript_open_module",
     "scala_resolved",
