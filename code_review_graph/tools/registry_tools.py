@@ -7,11 +7,12 @@ import re
 import sqlite3
 import time
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Optional
 
 from .. import feign_links as fl
-from ..constants import cross_repo_budget_seconds
+from ..constants import cross_repo_budget_seconds, cross_repo_workers
 from ..endpoint_index import attach as attach_endpoints
 from ..endpoint_index import extract_endpoints, read_endpoint_index
 from ..errors import GraphStoreError
@@ -243,6 +244,37 @@ def _search_repo(
     return tiered[:limit]
 
 
+def _search_one_repo(
+    repo_index: int, repo_entry: dict[str, Any], query: str, kind: str | None, limit: int,
+) -> tuple[str, list[tuple[int, int, int, dict[str, Any]]]] | None:
+    """Search one repo (on a worker thread): its alias and its rows, or ``None``.
+
+    ``None`` means the repo has no graph database or its search failed (logged), so it
+    is not counted as searched. The graph is opened, and closed, inside this call: a
+    connection is never shared between two threads.
+    """
+    repo_path = Path(repo_entry["path"])
+    db_path = get_db_path(repo_path)
+    if not db_path.exists():
+        return None
+    try:
+        store = GraphStore(str(db_path))
+        try:
+            alias = repo_entry.get("alias", repo_path.name)
+            rows: list[tuple[int, int, int, dict[str, Any]]] = []
+            for local_rank, match, row in _search_repo(store, query, kind, limit):
+                row["repo"] = alias
+                row["repo_path"] = str(repo_path)
+                row["match"] = match
+                rows.append((_TIER_ORDER[match], local_rank, repo_index, row))
+            return alias, rows
+        finally:
+            store.close()
+    except Exception as exc:
+        logger.warning("Search failed for %s: %s", repo_path, exc)
+        return None
+
+
 #: Seconds the exact-name pass may spend on the repos the budget kept the full search
 #: out of. It is a bound on a slow volume, not a share of the call's budget.
 _EXACT_PASS_SECONDS = 30.0
@@ -324,6 +356,8 @@ def cross_repo_search_func(
     is started and the repos left are named in ``skipped_repos``. Those repos
     still get a plain exact-name lookup (bounded to 30 s), so an exact match in
     one of them is returned; ``exact_lookup_repos_total`` counts them.
+    Up to ``CRG_CROSS_REPO_WORKERS`` repos (default 4, 1 = one at a time) are
+    searched at once; the order of the rows does not depend on which finishes first.
 
     Args:
         query: Search query string.
@@ -429,35 +463,41 @@ def cross_repo_search_func(
         searched_repos: list[str] = []
         skipped: list[str] = []
         left: list[tuple[int, dict[str, Any]]] = []
+        workers = cross_repo_workers()
+        outcomes: dict[int, tuple[str, list[tuple[int, int, int, dict[str, Any]]]]] = {}
+        in_flight: dict[Future[Any], int] = {}
 
-        for repo_index, repo_entry in enumerate(selected):
-            # The first repo always runs, so a call makes progress; after that no
-            # new repo is started once the budget is spent, and each one left is named.
-            if repo_index and _out_of_budget(deadline):
-                skipped.extend(_repo_label(e) for e in selected[repo_index:])
-                left = list(enumerate(selected))[repo_index:]
-                break
-            repo_path = Path(repo_entry["path"])
-            db_path = get_db_path(repo_path)
-            if not db_path.exists():
-                continue
+        def reap(done: Any) -> None:
+            for future in done:
+                outcome = future.result()
+                index = in_flight.pop(future)
+                if outcome is not None:
+                    outcomes[index] = outcome
 
-            try:
-                store = GraphStore(str(db_path))
-                try:
-                    alias = repo_entry.get("alias", repo_path.name)
-                    for local_rank, match, r in _search_repo(store, query, kind, limit):
-                        r["repo"] = alias
-                        r["repo_path"] = str(repo_path)
-                        r["match"] = match
-                        ranked_results.append((_TIER_ORDER[match], local_rank, repo_index, r))
-                    searched_repos.append(alias)
-                finally:
-                    store.close()
-            except Exception as exc:
-                logger.warning(
-                    "Search failed for %s: %s", repo_path, exc
+        # Up to ``workers`` repos are searched at once. The budget is checked here, on the
+        # calling thread and in registry order, each time a worker is free to start the next
+        # repo, so what is skipped does not depend on which search finishes first.
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crg-xrepo") as pool:
+            for repo_index, repo_entry in enumerate(selected):
+                while len(in_flight) >= workers:
+                    reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
+                # The first repo always runs, so a call makes progress; after that no
+                # new repo is started once the budget is spent, and each one left is named.
+                if repo_index and _out_of_budget(deadline):
+                    skipped.extend(_repo_label(e) for e in selected[repo_index:])
+                    left = list(enumerate(selected))[repo_index:]
+                    break
+                future = pool.submit(
+                    _search_one_repo, repo_index, repo_entry, query, kind, limit,
                 )
+                in_flight[future] = repo_index
+            reap(wait(in_flight).done)
+
+        # Whatever order the searches finished in, the rows go in registry order.
+        for repo_index in sorted(outcomes):
+            alias, rows = outcomes[repo_index]
+            searched_repos.append(alias)
+            ranked_results.extend(rows)
 
         # The repos the budget kept out of the full search still get the cheap exact-name
         # lookup, so an exact match in a late repo is not lost to the time limit.

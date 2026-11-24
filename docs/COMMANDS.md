@@ -966,6 +966,9 @@ The call has a time budget, `CRG_CROSS_REPO_BUDGET_SECONDS` (default 300, `0` = 
 When it is spent no further repo is started: the ones not searched are listed in
 `skipped_repos` (capped at 20; `skipped_repos_total` and `skipped_repos_truncated` give
 the real count), `truncated` is set and the summary says so. The first repo always runs.
+Up to `CRG_CROSS_REPO_WORKERS` repos (default 4, `1` = one at a time, at most 32) are
+searched at once, each on its own graph connection; the rows are ordered the same way
+whichever search finishes first.
 The repos not searched still get an exact-name lookup (an indexed query, bounded to 30
 seconds in all), so an `exact`, `exact_ci` or `qualified` match in one of them is returned;
 only their `prefix`, `tokens` and `fuzzy` matches are missing. `exact_lookup_repos_total`

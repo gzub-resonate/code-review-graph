@@ -694,6 +694,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` 또는 `cross_repo_requests_tool` 한 번의 호출이 새 저장소 시작을 멈추고 나머지를 `skipped_repos`에 나열하기까지의 시간(초). `0`은 제한 없음 | `300` |
+| `CRG_CROSS_REPO_WORKERS` | `cross_repo_search_tool` 한 번의 호출이 동시에 검색하는 저장소 수. `1`은 하나씩 검색합니다. 32보다 큰 값은 32로 처리됩니다 | `4` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
 | `CRG_CONTEXT_HISTORY` | `1`로 설정하면 각 `context_savings` 추정치를 로컬 로그 `.code-review-graph/context-history.jsonl`에 기록합니다. `code-review-graph context-history`로 확인합니다. 토큰 수, 도구 이름, 타임스탬프, 상세 수준, 파일 수와 깊이를 남기며 파일 이름, 경로, 소스 코드는 남기지 않고 외부로 보내지 않습니다 | - |

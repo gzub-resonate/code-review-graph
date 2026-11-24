@@ -327,3 +327,113 @@ def test_no_exact_lookup_when_nothing_was_skipped(five_repos):
 def test_the_summary_says_how_many_skipped_repos_got_the_exact_lookup(late_exact_repos):
     reply = search(query="getMetricsBatch")
     assert "exact names were still looked up in 3 of them" in reply["summary"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 4), ("1", 1), ("8", 8), (" 6 ", 6), ("32", 32), ("500", 32),
+        ("0", 4), ("-3", 4), ("many", 4), ("2.5", 4), ("", 4),
+    ],
+)
+def test_worker_count_setting(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv(constants.CROSS_REPO_WORKERS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, raw)
+    assert constants.cross_repo_workers() == expected
+
+
+def _watch_concurrency(monkeypatch, delay=0.05):
+    """Wrap the per-repo search to record how many run at once and in which threads."""
+    import threading
+    import time
+
+    original = registry_tools._search_repo
+    state = {"now": 0, "peak": 0, "threads": set()}
+    lock = threading.Lock()
+
+    def wrapped(store, query, kind, limit):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+            state["threads"].add(threading.get_ident())
+        time.sleep(delay)
+        try:
+            return original(store, query, kind, limit)
+        finally:
+            with lock:
+                state["now"] -= 1
+
+    monkeypatch.setattr(registry_tools, "_search_repo", wrapped)
+    return state
+
+
+def test_repos_are_searched_in_parallel_up_to_the_worker_count(tmp_path, registry, monkeypatch):
+    for alias in "abcdefgh":
+        named_repo(tmp_path, registry, alias, ["getMetricsBatch", *WEAK])
+    monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, "4")
+    state = _watch_concurrency(monkeypatch)
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == list("abcdefgh")
+    assert 2 <= state["peak"] <= 4
+    assert len(state["threads"]) > 1
+
+
+def test_one_worker_searches_one_repo_at_a_time(tmp_path, registry, monkeypatch):
+    for alias in "abcd":
+        named_repo(tmp_path, registry, alias, ["getMetricsBatch", *WEAK])
+    monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, "1")
+    state = _watch_concurrency(monkeypatch)
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == list("abcd")
+    assert state["peak"] == 1
+
+
+def test_the_answer_does_not_depend_on_which_search_finishes_first(tmp_path, registry, monkeypatch):
+    import time
+
+    for alias in "abcde":
+        named_repo(tmp_path, registry, alias, ["getMetricsBatch", *WEAK, f"{alias}Only"])
+    original = registry_tools._search_repo
+    lag = {"a": 0.25, "b": 0.2, "c": 0.1, "d": 0.05, "e": 0.0}  # the first repos finish last
+
+    def slow_first(store, query, kind, limit):
+        time.sleep(lag[str(store.db_path).split("/")[-3]])
+        return original(store, query, kind, limit)
+
+    monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, "1")
+    sequential = search(query="getMetricsBatch")
+    monkeypatch.setattr(registry_tools, "_search_repo", slow_first)
+    monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, "5")
+    parallel = search(query="getMetricsBatch")
+    assert parallel["repos_searched"] == sequential["repos_searched"] == list("abcde")
+    assert [(r["repo"], r["qualified_name"], r["match"]) for r in parallel["results"]] == [
+        (r["repo"], r["qualified_name"], r["match"]) for r in sequential["results"]
+    ]
+
+
+@pytest.mark.parametrize("workers", ["1", "2", "8"])
+def test_the_budget_skips_the_same_repos_for_any_worker_count(five_repos, monkeypatch, workers):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, workers)
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == ["a", "b"]
+    assert reply["skipped_repos"] == ["c", "d", "e"]
+
+
+def test_one_failing_repo_does_not_stop_the_others(tmp_path, registry, monkeypatch):
+    for alias in "abc":
+        named_repo(tmp_path, registry, alias, ["getMetricsBatch"])
+    original = registry_tools._search_repo
+
+    def fails_for_b(store, query, kind, limit):
+        if "/b/" in str(store.db_path):
+            raise RuntimeError("corrupt graph")
+        return original(store, query, kind, limit)
+
+    monkeypatch.setattr(registry_tools, "_search_repo", fails_for_b)
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched"] == ["a", "c"]
+    assert {row["repo"] for row in reply["results"]} == {"a", "c"}

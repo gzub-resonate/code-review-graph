@@ -28,6 +28,10 @@
   out of the full search still get a plain exact-name lookup (at most 30 s in all), so an exact
   match in a late repo is returned instead of lost to the time limit (`exact_lookup_repos_total`
   counts them); their fuzzy matches are not searched.
+- `cross_repo_search_tool` searches up to `CRG_CROSS_REPO_WORKERS` repos at once (default 4, `1` = one
+  after another, at most 32), each on its own graph connection. The rows come back in the same order
+  whatever search finishes first, and the time budget is checked in registry order each time a worker
+  is free, so the repos it skips do not depend on timing.
 - Every `cross_repo_search_tool` row has a `match` field: `exact`, `exact_ci`, `qualified`, `prefix`,
   `tokens` or `fuzzy`.
 - `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The
