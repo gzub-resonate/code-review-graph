@@ -907,12 +907,14 @@ def get_docs_section_tool(
 
     Args:
         section_name: The section to retrieve (e.g. "review-delta", "usage").
-        repo_root: Repository root path. Auto-detected if omitted.
+        repo_root: Repository root path. Optional: the reference is bundled
+            with the server, so a ``--multi-repo`` server answers without one.
+            A repo's own copy of the docs is preferred when one is named.
     """
-    return _resolve_attr("get_docs_section")(
-        section_name=section_name,
-        repo_root=_resolve_repo_root(repo_root),
-    )
+    # The section is bundled Markdown, so a multi-repo server has no repository to
+    # choose and must not demand one; a named repo is still checked against the registry.
+    root = None if (_multi_repo and not repo_root) else _resolve_repo_root(repo_root)
+    return _resolve_attr("get_docs_section")(section_name=section_name, repo_root=root)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -1195,20 +1197,23 @@ async def get_architecture_overview_tool(
                       and aggregates cross-community edges to one row per
                       community pair (typical reduction: 600KB -> <5KB);
                       "standard" returns full per-edge detail.
-        max_results: Maximum cross-community rows and warnings to return;
-            cross_community_edges_total reports the full count. Default: 100.
+        max_results: Maximum communities (largest first), cross-community rows
+            and warnings to return; ``communities_total`` and
+            ``cross_community_edges_total`` report the full counts. Default: 100.
         max_members: Maximum member names per community in standard mode.
             Default: 10.
         cursor: The ``next_cursor`` of a previous reply, to read the next
-            cross-community rows and warnings. Omit it for the first page.
+            communities, cross-community rows and warnings together. Omit it
+            for the first page.
         include_config: Also include the communities made only of JSON and YAML
             document nodes, with the coupling rows and warnings about them.
             Default: false; ``config_communities_hidden`` reports how many were
             left out. A cursor made with one value is refused for the other.
 
     Returns:
-        The overview. When more cross-community rows or warnings remain the
-        reply carries ``next_cursor``; a page after the first adds ``offset``.
+        The overview. When more communities, cross-community rows or warnings
+        remain the reply carries ``next_cursor``; a page after the first adds
+        ``offset``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(

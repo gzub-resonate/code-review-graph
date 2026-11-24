@@ -359,8 +359,10 @@ def get_architecture_overview_func(
                       (typical reduction: 600KB -> <5KB);
                       "standard" returns the full overview including
                       per-edge cross-community detail.
-        max_results: Maximum cross-community rows and warnings to return
-                     (default 100, capped at 200).
+        max_results: Maximum communities, cross-community rows and warnings
+                     to return (default 100, capped at 200).
+                     ``communities_total`` reports the untruncated community
+                     count. Communities come largest first.
                      ``cross_community_edges_total`` reports the
                      untruncated count.
         max_members: (standard only) Maximum member names per community
@@ -369,10 +371,9 @@ def get_architecture_overview_func(
         cursor: ``next_cursor`` from the previous reply, to read the next
                 cross-community rows and warnings. Omit it for the first
                 page. A cursor is opaque and only valid for the same
-                ``detail_level`` on the same graph. The two lists advance
-                together; the community list and each community's member
-                names are not paged (read a community's members with
-                ``get_community_tool``).
+                ``detail_level`` on the same graph. The three lists advance
+                together; each community's member names are not paged (read a
+                community's members with ``get_community_tool``).
         include_config: Also include the communities made only of JSON and YAML
                 document nodes, with the coupling rows and warnings about them
                 (default False). Their number is reported as
@@ -412,8 +413,19 @@ def get_architecture_overview_func(
         # One warning per highly-coupled community pair grows quadratically
         # with the community count, so it needs the same bound. Both lists
         # advance together under one cursor.
+        # The community list grows with the repo (hundreds of rows on a service repo), so it is
+        # one page too, largest first with ties by id. All three lists share one offset.
+        ordered = sorted(
+            overview["communities"],
+            key=lambda c: (-int(c.get("size", 0)), int(c.get("id", 0))),
+        )
+        communities_total = len(ordered)
         shown, page = _page_together(
-            {"cross": overview["cross_community_edges"], "warnings": overview["warnings"]},
+            {
+                "communities": ordered,
+                "cross": overview["cross_community_edges"],
+                "warnings": overview["warnings"],
+            },
             max_results, _MAX_CROSS_EDGES, cursor,
             scope=make_scope(
                 "get_architecture_overview_tool", detail_level=detail_level,
@@ -422,10 +434,11 @@ def get_architecture_overview_func(
             stamp=graph_stamp(store),
         )
         cross = shown["cross"]
+        overview["communities"] = shown["communities"]
         overview["cross_community_edges"] = cross
         overview["warnings"] = shown["warnings"]
         truncated = page.truncated
-        n_communities = len(overview["communities"])
+        n_communities = communities_total
         n_warnings = warn_total
         cross_label = (
             "community pairs"
@@ -441,6 +454,7 @@ def get_architecture_overview_func(
                 f"{n_warnings} warning(s)"
             ),
             **overview,
+            "communities_total": communities_total,
             "cross_community_edges_total": cross_total,
             "truncated": truncated,
             **page.fields(),
