@@ -1992,6 +1992,27 @@ class TestCommunityTools:
             kind="CALLS", source=f"{db_py}::query",
             target=f"{db_py}::connect", file_path=db_py, line=10,
         ))
+        # A third member, so the db cluster is not folded into auth as thin.
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="close",
+            file_path=db_py,
+            line_start=42, line_end=48, language="python",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source=f"{db_py}::close",
+            target=f"{db_py}::connect", file_path=db_py, line=44,
+        ))
+        # A class owning all three, like AuthService owns the auth functions.
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="Pool",
+            file_path=db_py,
+            line_start=3, line_end=49, language="python",
+        ))
+        for member in ("query", "connect", "close"):
+            self.store.upsert_edge(EdgeInfo(
+                kind="CONTAINS", source=f"{db_py}::Pool",
+                target=f"{db_py}::{member}", file_path=db_py,
+            ))
 
         # Cross-cluster edge: login -> query
         self.store.upsert_edge(EdgeInfo(
