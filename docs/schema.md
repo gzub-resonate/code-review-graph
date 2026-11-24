@@ -583,3 +583,10 @@ Each migration runs in its own transaction and updates `schema_version` on succe
 | 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |
 | 14 | No schema change: `file_hash` cleared on Ruby `File` nodes so the next update re-parses them under the new namespaced class identities |
 | 15 | Dropped `community_summaries`, `flow_snapshots` and `risk_index` with `idx_risk_index_score`, as nothing read them; dropped `idx_nodes_qualified`, `idx_edges_source` and `idx_edges_target`, as other indexes cover them. The file keeps its size until `VACUUM`; later writes reuse the freed pages |
+
+## Terraform block types
+
+HCL nodes keep the kinds `Class` (`resource`, `data`, `module`) and `Function` (`variable`, `output`,
+`local`, `provider`). The block type is in `extra.hcl_type`, and tools return it as `hcl_type`. A
+node's `name` also starts with it (`resource.aws_s3_bucket.logs`, `var.region`). Flows start at a
+root module's `main.tf` (else `terragrunt.hcl`) `File` node and are named `terraform:<dir>`.
