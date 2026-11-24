@@ -292,6 +292,32 @@ def cross_repo_budget_seconds() -> float:
     return value
 
 
+#: Name of the variable that sets how many repos ``cross_repo_search_tool`` searches at once.
+CROSS_REPO_WORKERS_ENV = "CRG_CROSS_REPO_WORKERS"
+CROSS_REPO_WORKERS_DEFAULT = 4
+#: Upper bound: each worker holds an open graph database and a query embedding at a time.
+CROSS_REPO_WORKERS_MAX = 32
+
+
+def cross_repo_workers() -> int:
+    """Return how many repos one ``cross_repo_search_tool`` call searches at once.
+
+    ``1`` searches them one after another, as before. Resolved on every call, so a
+    long-lived server sees a change made with the variable. A value below 1 or one that
+    is not a whole number logs a warning and falls back to
+    :data:`CROSS_REPO_WORKERS_DEFAULT`; a larger one than :data:`CROSS_REPO_WORKERS_MAX`
+    is cut to it.
+    """
+    value = env_int(CROSS_REPO_WORKERS_ENV, CROSS_REPO_WORKERS_DEFAULT)
+    if value < 1:
+        logger.warning(
+            "Ignoring invalid %s=%r (below 1); using the default %s.",
+            CROSS_REPO_WORKERS_ENV, value, CROSS_REPO_WORKERS_DEFAULT,
+        )
+        return CROSS_REPO_WORKERS_DEFAULT
+    return min(value, CROSS_REPO_WORKERS_MAX)
+
+
 # ---------------------------------------------------------------------------
 # Configurable limits (override via environment variables)
 # ---------------------------------------------------------------------------
