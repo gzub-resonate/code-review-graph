@@ -452,7 +452,7 @@ class TestResolutionInAnswers:
 
     def test_graph_stats_reports_the_repository_wide_split(self, repo):
         stats = list_graph_stats(repo_root=repo["root"])
-        assert stats["calls_by_resolution"] == {"direct": 7, "unresolved": 2}
+        assert stats["calls_by_resolution"] == {"direct": 7, "unresolved": 2, "external": 0}
 
 
 class TestFilteringUsesTheIndex:

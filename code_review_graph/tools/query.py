@@ -2413,12 +2413,14 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
         # CALLS is the largest edge kind and the one a reader trusts most, so
         # say up front how much of it is bound to a node and how much is a
         # bare name the query layer can only match by name.
-        calls_by_resolution = store.count_edges_by_resolution("CALLS")
+        calls_by_resolution = store.count_calls_by_classification()
         summary_parts.append("")
         summary_parts.append(
             "CALLS by target resolution: "
             f"{calls_by_resolution['direct']} direct, "
-            f"{calls_by_resolution['unresolved']} unresolved"
+            f"{calls_by_resolution['unresolved']} unresolved, "
+            f"{calls_by_resolution['external']} external (builtins and "
+            "third-party code, never in the repository)"
         )
 
         # Add embedding info if available
