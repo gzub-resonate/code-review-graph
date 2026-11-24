@@ -855,6 +855,9 @@ head: str = None             # Or a ref/commit to read the changed files from; b
                              # `pull_request.new_code` scores the production symbols the pull request adds (totals; and
                              # beyond minimal, scored rows with `coverage`, `reasons` and linked `tests`), and the
                              # overall `risk_score` becomes the higher of that and the changed symbols' (`risk_breakdown`)
+                             # Config paths the pull request adds, changes or removes (YAML, JSON, Spring properties) are
+                             # in `changed_yaml_paths` / `changed_json_paths`, each with `change`. A pull request already
+                             # merged (head is an ancestor of the base) says so and sets `already_merged`.
 ```
 Main tool for code review. Maps changed files to affected functions, YAML and JSON
 paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and
@@ -1180,7 +1183,12 @@ new file has it) and **removed** (only the base graph has it), `reached` (what d
 over the same edge kinds the impact radius follows, `depth` hops out; `reached_tests` counts the tests among them
 separately), `same_repo_files` and the changed members no test
 names (`untested`). `contract_changes` lists routes the pull request adds or removes. `endpoints` lists the endpoints it
-adds, removes or reaches, each with `external_callers`; `external_callers` lists the client calls in the other registered
+adds, removes or reaches, or whose handler it adds or changes, each with `external_callers`; `same_file_endpoints` lists
+the other endpoints of the changed files, which are not affected and whose callers are not counted. `config_changes`
+lists the YAML, JSON and Spring `.properties` paths the pull request adds, changes or removes (`change`, `kind`, `path`,
+`line`, `value_type`; values are compared by hash and never returned; at most 200 per file, 1000 in all, 50 files, with
+`config_changes_truncated`). A pull request whose head is already an ancestor of the base answers `already_merged: true`
+and a summary saying the graph already includes it. `external_callers` lists the client calls in the other registered
 repos (Feign, JavaScript and TypeScript) that reach them, read from each repo's stored endpoint index. `schema_changes`
 lists the DDL in migration files the pull request adds or changes. `notes` states what the answer rests on: a stacked
 pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow

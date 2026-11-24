@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
+import json
 import logging
 import os
 import re
@@ -65,6 +67,12 @@ DEFAULT_DEPTH = 3
 MAX_REACHED_NODES = 5_000
 #: Nodes all the reach walks of one request may visit together.
 MAX_REACH_VISITS = 50_000
+
+#: Config nodes read for one pull request, per file and in all; the rest are counted, not listed.
+MAX_CONFIG_PATHS_PER_FILE = 200
+MAX_CONFIG_PATHS = 1_000
+#: Config files compared (head against base) for one pull request.
+MAX_CONFIG_FILES = 50
 
 #: Node kinds that count as a symbol a pull request can change, add or remove.
 _SYMBOL_KINDS = ("Function", "Test", "Class")
@@ -445,6 +453,21 @@ def git_file_reader(repo_root: str, head: str) -> Callable[[str], Optional[bytes
     return read
 
 
+def merge_base(repo_root: str, base_ref: str, head: str) -> Optional[str]:
+    """The commit the base and the head last share, or ``None`` when Git cannot say.
+
+    A shallow clone often lacks it. When it equals the head, the head is an ancestor of the
+    base: the pull request is already merged (or has nothing the base lacks).
+    """
+    base_ref = resolve_commit(repo_root, base_ref, "base")
+    head = resolve_commit(repo_root, head, "head")
+    try:
+        out = _git(repo_root, "merge-base", base_ref, head, limit=256).strip()
+    except PullRequestError:
+        return None
+    return out if _COMMIT_RE.fullmatch(out) else None
+
+
 def blob_sizes(repo_root: str, head: str, paths: list[str]) -> dict[str, Optional[int]]:
     """The size in bytes of each path at *head* (``None`` if absent), in one Git call.
 
@@ -482,6 +505,138 @@ def _key(kind: str, name: str, parent: Optional[str]) -> tuple[str, str, str]:
     return (kind, name, parent or "")
 
 
+#: Node kinds that are one path of a configuration document.
+CONFIG_KINDS = ("YamlPath", "JsonPath", "ConfigProperty")
+_CONFIG_SUFFIXES = (".yml", ".yaml", ".json", ".properties")
+#: Generated lock files: huge, and no one reviews their paths.
+_CONFIG_SKIP_NAMES = frozenset({"package-lock.json", "npm-shrinkwrap.json"})
+#: Value types of a node that holds other nodes; its own value is the sum of theirs.
+_CONTAINER_TYPES = frozenset({"mapping", "object", "array", "sequence", "mixed"})
+_TRAILING_COMMENT_RE = re.compile(r"\s+#.*$")
+
+
+def is_config_file(path: str) -> bool:
+    """A YAML, JSON or ``.properties`` file whose paths a pull request review lists."""
+    name = path.rsplit("/", 1)[-1].lower()
+    return name.endswith(_CONFIG_SUFFIXES) and name not in _CONFIG_SKIP_NAMES
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _json_value_hashes(text: str) -> dict[str, str]:
+    """Hash of the value at each path the parser names, read from the JSON text itself.
+
+    A minified JSON file has every path on one line, so line text cannot tell which value
+    changed. Paths are spelled as the parser spells them; an array's items share one path
+    (``a[*]``), hashed together in sorted order.
+    """
+    from .parser import _yaml_path_child
+
+    try:
+        root = json.loads(text)
+    except (ValueError, RecursionError):
+        return {}
+    out: dict[str, str] = {}
+
+    def walk(value: Any, path: str, depth: int) -> str:
+        if depth > 64:
+            return ""
+        if isinstance(value, dict):
+            parts = sorted(
+                f"{key}={walk(item, _yaml_path_child(path, str(key)), depth + 1)}"
+                for key, item in value.items()
+            )
+            digest = _digest("{" + ",".join(parts) + "}")
+        elif isinstance(value, list):
+            items = sorted(walk(item, f"{path}[*]", depth + 1) for item in value)
+            digest = _digest("[" + ",".join(items) + "]")
+        else:
+            digest = _digest(json.dumps(value, sort_keys=True, default=str))
+        previous = out.get(path)
+        out[path] = digest if previous is None else _digest(previous + digest)
+        return digest
+
+    walk(root, "$", 0)
+    return out
+
+
+def _config_signatures(
+    path: str, text: str, nodes: list[Any],
+) -> dict[tuple[str, str, int], tuple[Any, Optional[str]]]:
+    """Config nodes of one parsed file by ``(kind, path, document)``, each with a value hash.
+
+    A node that holds others (a mapping, a list) has no hash of its own: it is added or
+    removed with its path, and a changed value shows on the leaf below it. A leaf is hashed
+    from its own source lines with a trailing comment dropped; in a JSON file from the parsed
+    value. The hash never leaves this module, so no value reaches a client.
+    """
+    lines = text.splitlines()
+    json_values = _json_value_hashes(text) if path.lower().endswith(".json") else {}
+    out: dict[tuple[str, str, int], tuple[Any, Optional[str]]] = {}
+    for node in nodes:
+        if node.kind not in CONFIG_KINDS:
+            continue
+        extra = node.extra or {}
+        index = extra.get("document_index")
+        key = (node.kind, node.name, index if isinstance(index, int) else 0)
+        if key in out:
+            continue
+        digest: Optional[str] = None
+        if extra.get("value_type") not in _CONTAINER_TYPES:
+            if node.name in json_values:
+                digest = json_values[node.name]
+            elif node.line_start and node.line_end:
+                chunk = lines[node.line_start - 1:node.line_end]
+                digest = _digest("\n".join(_TRAILING_COMMENT_RE.sub("", ln).strip()
+                                           for ln in chunk))
+        out[key] = (node, digest)
+    return out
+
+
+def _config_graph_node(root: Path, rel: str, info: Any) -> GraphNode:
+    """A parsed config node as a graph node under the checkout's absolute path."""
+    index = (info.extra or {}).get("document_index")
+    suffix = f"#doc{index}" if isinstance(index, int) and index else ""
+    absolute = str(root / rel)
+    return GraphNode(
+        id=0, kind=info.kind, name=info.name,
+        qualified_name=f"{absolute}::{info.name}{suffix}",
+        file_path=absolute, line_start=info.line_start or 0, line_end=info.line_end or 0,
+        language=info.language or "", parent_name=info.parent_name, params=info.params,
+        return_type=info.return_type, is_test=False, file_hash=None,
+        extra=dict(info.extra or {}),
+    )
+
+
+def config_diff(
+    root: Path, change: "FileChange", head_nodes: list[Any], head_text: str,
+    base_nodes: list[Any], base_text: str, limit: int = MAX_CONFIG_PATHS_PER_FILE,
+) -> tuple[list[tuple[str, GraphNode]], bool]:
+    """The config paths a file adds, changes or removes, as ``(change, node)`` rows.
+
+    Paths are matched by kind, path and document; a path in both is changed when the hash of
+    its value differs. Added and changed rows carry the head's node, removed rows the base's.
+    Returns the rows (at most *limit*) and whether more were left out.
+    """
+    head = _config_signatures(change.path, head_text, head_nodes)
+    base = _config_signatures(change.old_path or change.path, base_text, base_nodes)
+    rows: list[tuple[str, GraphNode]] = []
+    for key, (node, digest) in head.items():
+        before = base.get(key)
+        if before is None:
+            rows.append(("added", _config_graph_node(root, change.path, node)))
+        elif digest is not None and before[1] is not None and digest != before[1]:
+            rows.append(("changed", _config_graph_node(root, change.path, node)))
+    for key, (node, _digest_) in base.items():
+        if key not in head:
+            rows.append(
+                ("removed", _config_graph_node(root, change.old_path or change.path, node))
+            )
+    return rows[:limit], len(rows) > limit
+
+
 @dataclass
 class FileReport:
     """What one changed file does to the graph."""
@@ -501,6 +656,9 @@ class FileReport:
     untested: list[str] = None  # type: ignore[assignment]
     #: Added production symbols and every test symbol of the file, for ``new_code`` scoring.
     new_symbols: list[NewSymbol] = field(default_factory=list)
+    #: Config paths the file adds, changes or removes: ``(change, node)`` rows.
+    config: list[tuple[str, GraphNode]] = field(default_factory=list)
+    config_truncated: bool = False
 
     def __post_init__(self) -> None:
         if self.untested is None:
@@ -565,6 +723,7 @@ def analyse(
     depth: int = DEFAULT_DEPTH,
     parser: Any = None,
     sizes: Optional[dict[str, Optional[int]]] = None,
+    read_base: Optional[Callable[[str], Optional[bytes]]] = None,
 ) -> dict[str, Any]:
     """Compare the pull request's files with the base *store* and return the raw findings.
 
@@ -575,6 +734,11 @@ def analyse(
 
     A file is read only after its size (*sizes*, from :func:`blob_sizes`) is known to be within
     the limit, the parse limit has room, and the per-request byte budget is not spent.
+
+    *read_base* reads a file as the base had it; with it, the YAML, JSON and ``.properties``
+    files of the pull request are compared path by path (``FileReport.config``). Without it,
+    config files are not compared. ``endpoints_touched`` holds the new-side endpoints whose
+    handler the pull request adds or changes, or whose own lines it edits.
     """
     if parser is None:
         from .parser import CodeParser
@@ -583,13 +747,18 @@ def analyse(
     root = Path(repo_root)
     reports: list[FileReport] = []
     head_endpoint_nodes: list[GraphNode] = []
+    touched_endpoint_nodes: list[GraphNode] = []
+    config_files = 0
+    config_total = 0
     base_endpoint_nodes: list[GraphNode] = []
     schema: list[dict[str, str]] = []
     all_seeds: list[str] = []
     parsed_count = 0
     bytes_read = 0
 
-    def fetch(path: str) -> tuple[Optional[bytes], Optional[str]]:
+    def fetch(
+        path: str, reader: Optional[Callable[[str], Optional[bytes]]] = None,
+    ) -> tuple[Optional[bytes], Optional[str]]:
         """The file's bytes, or why they were not read; checks come before the read."""
         nonlocal bytes_read
         size = sizes.get(path) if sizes else None
@@ -597,9 +766,9 @@ def analyse(
             return None, "larger than the parse limit"
         if bytes_read >= MAX_TOTAL_BYTES:
             return None, "past the per-request byte limit"
-        blob = read_head(path)
+        blob = (reader or read_head)(path)
         if blob is None:
-            return None, "could not read the file at the head"
+            return None, "could not read the file"
         if len(blob) > MAX_FILE_BYTES:
             return None, "larger than the parse limit"
         bytes_read += len(blob)
@@ -616,6 +785,7 @@ def analyse(
         report = FileReport(change.path, change.status, [], [], [], [])
 
         head_symbols: list[Any] = []
+        head_endpoints: list[Any] = []
         head_nodes: list[Any] = []
         head_edges: list[Any] = []
         head_text = ""
@@ -642,12 +812,34 @@ def analyse(
                     head_nodes, head_edges = nodes, edges
                     head_text = blob.decode("utf-8", errors="replace")
                     head_symbols = [n for n in nodes if n.kind in _SYMBOL_KINDS]
-                    head_endpoint_nodes.extend(
-                        _as_graph_node(n) for n in nodes if n.kind == "Endpoint"
-                    )
+                    head_endpoints = [n for n in nodes if n.kind == "Endpoint"]
+                    head_endpoint_nodes.extend(_as_graph_node(n) for n in head_endpoints)
         if not report.parsed:
             reports.append(report)
             continue
+
+        if read_base is not None and is_config_file(change.path):
+            if config_files >= MAX_CONFIG_FILES or config_total >= MAX_CONFIG_PATHS:
+                report.config_truncated = True
+            else:
+                config_files += 1
+                base_blob, _why = fetch(base_path, read_base)
+                if base_blob is not None or change.status == "added":
+                    try:
+                        base_cfg = parser.parse_bytes(
+                            Path(str(root / base_path)), base_blob or b"",
+                        )[0]
+                    except Exception as exc:  # noqa: BLE001 - the config diff is best effort
+                        logger.warning("Could not parse base %s: %s", base_path, exc)
+                    else:
+                        report.config, report.config_truncated = config_diff(
+                            root, change, head_nodes, head_text, base_cfg,
+                            (base_blob or b"").decode("utf-8", errors="replace"),
+                            min(MAX_CONFIG_PATHS_PER_FILE, MAX_CONFIG_PATHS - config_total),
+                        )
+                        config_total += len(report.config)
+                else:
+                    report.config_truncated = True
 
         by_key: dict[tuple[str, str, str], list[GraphNode]] = {}
         for node in base_symbols:
@@ -655,6 +847,7 @@ def analyse(
         head_keys = set()
         added_keys: set[tuple[str, str, str]] = set()
         file_ranges = ranges.get(change.path, [])
+        touched_spans: list[tuple[int, int]] = []
         for sym in head_symbols:
             key = _key(sym.kind, sym.name, sym.parent_name)
             head_keys.add(key)
@@ -662,12 +855,20 @@ def analyse(
             if not matches:
                 report.added.append(sym.name)
                 added_keys.add(key)
+                touched_spans.append((sym.line_start or 0, sym.line_end or 0))
             elif sym.kind in _CHANGEABLE_KINDS and any(
                 sym.line_start <= end and sym.line_end >= start for start, end in file_ranges
             ):
                 report.changed.append(sym.name)
+                touched_spans.append((sym.line_start or 0, sym.line_end or 0))
                 report.seeds.extend(m.qualified_name for m in matches)
                 report.changed_qns.extend(m.qualified_name for m in matches)
+        for ep in head_endpoints:
+            at = ep.line_start or 0
+            if any(lo <= at <= hi for lo, hi in touched_spans) or any(
+                start <= (ep.line_end or at) and end >= at for start, end in file_ranges
+            ):
+                touched_endpoint_nodes.append(_as_graph_node(ep))
         for key, nodes_ in by_key.items():
             if key not in head_keys:
                 report.removed.append(key[1])
@@ -723,12 +924,14 @@ def analyse(
                 report.untested.append(seed_node.name)
 
     _clients_h, servers_head = extract_endpoints(head_endpoint_nodes, root)
+    _clients_t, servers_touched = extract_endpoints(touched_endpoint_nodes, root)
     _clients_b, servers_base = extract_endpoints(base_endpoint_nodes, root)
     _c, servers_reached = extract_endpoints(list(reached_endpoints.values()), root)
     return {
         "files": reports,
         "reached": reached,
         "endpoints_head": servers_head,
+        "endpoints_touched": servers_touched,
         "endpoints_base": servers_base,
         "endpoints_reached": servers_reached,
         "schema": schema,

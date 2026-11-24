@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `pr_blast_radius_tool` and `detect_changes_tool` with `pr` or `head` now report the configuration
+  a pull request changes. A YAML, JSON or Spring `.properties` file of the pull request is parsed in
+  memory and compared with the base, path by path; each path the pull request adds, changes (its
+  value hash differs, so a comment or a reformatting is not a change) or removes is listed. A Spring
+  `application.yml` is indexed as `ConfigProperty` nodes, which `changed_yaml_paths` skipped, so an
+  8-line timeout change to it used to show `changed_yaml_path_count: 0`. `pr_blast_radius_tool`
+  adds `config_changes` (file, `change`, kind, path, line, value type; never the value), and
+  `detect_changes_tool` puts the same paths in `changed_yaml_paths` and `changed_json_paths` with a
+  `change` field. Lists are capped per file (200), in all (1000) and by files compared (50); the
+  result says when they are cut.
+- `pr_blast_radius_tool` no longer counts every endpoint of a changed file as affected. `endpoints`
+  and `external_callers` now cover a route the pull request adds or removes, an endpoint whose
+  handler it adds or changes (or whose own lines it edits) and one a changed symbol reaches. The
+  other endpoints of the same files come back in `same_file_endpoints` and their callers are not
+  counted.
+- A pull request that is already merged (its head commit is an ancestor of the base) is no longer a
+  bare "No files differ" or "No changed files detected". Both tools say "Pull request already merged
+  into <base>; the graph already includes it" and set `already_merged`. It is read from Git's merge
+  base, not from GitHub.
+
 ### Added
 
 - `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has

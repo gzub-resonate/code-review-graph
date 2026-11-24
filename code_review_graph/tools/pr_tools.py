@@ -19,6 +19,29 @@ _MAX_ENDPOINTS_SHOWN = 50
 _MAX_CALLERS_SHOWN = 50
 _MAX_NAMES_PER_FILE = 12
 _MAX_DEPTH = 6
+_MAX_CONFIG_SHOWN = 100
+_CONFIG_CHANGES = ("added", "changed", "removed")
+
+
+def _config_rows(reports: list[pbr.FileReport]) -> list[dict[str, Any]]:
+    """Every config path a pull request adds, changes or removes, one row each."""
+    rows: list[dict[str, Any]] = []
+    for report in reports:
+        for change, node in report.config:
+            rows.append({
+                "file": _sanitize_name(report.path), "change": change, "kind": node.kind,
+                "path": _sanitize_name(node.name), "line": node.line_start,
+                "value_type": _sanitize_name(str(node.extra.get("value_type") or "")),
+            })
+    return rows
+
+
+def _config_summary(rows: list[dict[str, Any]]) -> str:
+    counts = {k: sum(1 for r in rows if r["change"] == k) for k in _CONFIG_CHANGES}
+    return (
+        f" {len(rows)} config path(s) changed ({counts['added']} added, "
+        f"{counts['changed']} changed, {counts['removed']} removed)."
+    )
 
 
 def _names(values: list[str]) -> list[str]:
@@ -154,7 +177,10 @@ def pr_blast_radius_func(
         if loaded["found"] is None:
             return {
                 "status": "ok",
-                "summary": "No files differ between the base and the head.",
+                "summary": no_change_summary(
+                    loaded, "No files differ between the base and the head.",
+                ),
+                "already_merged": loaded["already_merged"],
                 "files": [], "total_files": 0, "notes": loaded["notes"],
             }
         return _build_result(
@@ -164,6 +190,17 @@ def pr_blast_radius_func(
         return {"status": "error", "error": _sanitize_name(str(exc))}
     finally:
         store.close()
+
+
+def no_change_summary(loaded: dict[str, Any], default: str) -> str:
+    """The answer for a pull request with no changed files: say when it is already merged."""
+    if not loaded.get("already_merged"):
+        return default
+    base = _sanitize_name(str(loaded.get("base_name") or "")) or "the base"
+    return (
+        f"Pull request already merged into {base}; the graph already includes it "
+        "(its head commit is an ancestor of the base, so no file differs)."
+    )
 
 
 def load_pull_request(
@@ -212,9 +249,15 @@ def _load_pull_request(
             "Git has no merge base for the base and head (a shallow clone): the files are "
             "compared directly, so changes made on the base since they diverged can show up."
         )
+    common = pbr.merge_base(repo, base_ref, head_sha)
+    base_name = base or pbr.default_branch(repo)
     out: dict[str, Any] = {
         "found": None, "changes": changes, "notes": notes,
         "base_ref": base_ref, "head_sha": head_sha,
+        # The head is an ancestor of the base (or is it): the graph, built at the base,
+        # already holds everything the pull request holds.
+        "already_merged": common is not None and common == head_sha,
+        "base_name": base_name,
     }
     if not changes:
         return out
@@ -223,6 +266,7 @@ def _load_pull_request(
     out["found"] = pbr.analyse(
         store, repo, changes, ranges, pbr.git_file_reader(repo, head_sha), depth=depth,
         sizes=sizes,
+        read_base=pbr.git_file_reader(repo, (common if merge_based and common else base_ref)),
     )
     stacked = _stacked_note(repo, base_ref, head_sha, base)
     if stacked:
@@ -258,6 +302,7 @@ def _build_result(
     head_servers = attach_endpoints(root.name, root, ([], found["endpoints_head"]))[1]
     base_servers = attach_endpoints(root.name, root, ([], found["endpoints_base"]))[1]
     reached_servers = attach_endpoints(root.name, root, ([], found["endpoints_reached"]))[1]
+    touched_servers = attach_endpoints(root.name, root, ([], found["endpoints_touched"]))[1]
 
     head_keys = {_route_key(s): s for s in head_servers}
     base_keys = {_route_key(s): s for s in base_servers}
@@ -266,9 +311,19 @@ def _build_result(
         + [_endpoint_row(base_keys[k], change="route removed")
            for k in base_keys if k not in head_keys]
     )
+    # Affected: a route the pull request adds or removes, an endpoint whose handler it adds
+    # or changes (or whose own lines it edits), and an endpoint a changed symbol reaches.
+    # The other endpoints of a changed file are listed apart: nothing about them changed.
     affected: dict[tuple[str, str], fl.ServerEndpoint] = {}
-    for server in [*head_servers, *base_servers, *reached_servers]:
+    for server in [
+        *(head_keys[k] for k in head_keys if k not in base_keys),
+        *(base_keys[k] for k in base_keys if k not in head_keys),
+        *touched_servers, *reached_servers,
+    ]:
         affected.setdefault(_route_key(server), server)
+    same_file = [
+        _endpoint_row(s) for s in head_servers if _route_key(s) not in affected
+    ]
 
     external: list[dict[str, Any]] = []
     external_info: dict[str, Any] = {}
@@ -289,6 +344,7 @@ def _build_result(
             _sanitize_name(f"{s.http_method} {s.route}"), 0))
         for s in affected.values()
     ]
+    config_rows = _config_rows(reports)
     files = []
     for report in sorted(reports, key=lambda r: (-r.reached, r.path)):
         row: dict[str, Any] = {
@@ -302,6 +358,11 @@ def _build_result(
             row["untested"] = _names(report.untested)
         if report.note:
             row["note"] = report.note
+        if report.config:
+            row["config_changes"] = {
+                kind: sum(1 for change, _n in report.config if change == kind)
+                for kind in _CONFIG_CHANGES
+            }
         files.append(row)
 
     if found.get("reach_truncated"):
@@ -311,6 +372,9 @@ def _build_result(
     if unparsed:
         notes.append(f"{unparsed} file(s) could not be parsed (see each file's note); they "
                      "are listed but contribute no symbols.")
+    if any(r.config_truncated for r in reports):
+        notes.append("Config paths are capped per file, in all, and in the number of config "
+                     "files compared; the list is not complete.")
     if any(s.file and s.file.endswith(".py") for s in head_servers):
         notes.append("Python routes are read from the changed files only; a router prefix set "
                      "in a file this pull request does not touch is not applied.")
@@ -323,7 +387,9 @@ def _build_result(
         "reached": sum(r.reached for r in reports),
         "reached_tests": sum(r.reached_tests for r in reports),
         "endpoints": len(endpoints),
+        "same_file_endpoints": len(same_file),
         "external_callers": len(external),
+        "config_paths_changed": len(config_rows),
     }
     return {
         "status": "ok",
@@ -332,6 +398,12 @@ def _build_result(
             f"{totals['symbols_added']} added, {totals['symbols_removed']} removed; "
             f"{totals['endpoints']} endpoints affected, {totals['external_callers']} "
             "external callers."
+            + (_config_summary(config_rows) if config_rows else "")
+            + (
+                f" {len(same_file)} other endpoint(s) in changed files are not affected "
+                "(see same_file_endpoints)."
+                if same_file else ""
+            )
         ),
         "depth": depth,
         "totals": totals,
@@ -339,6 +411,12 @@ def _build_result(
         "files_truncated": len(files) > _MAX_FILES_SHOWN,
         "contract_changes": contract[:_MAX_ENDPOINTS_SHOWN],
         "endpoints": endpoints[:_MAX_ENDPOINTS_SHOWN],
+        "same_file_endpoints": same_file[:_MAX_ENDPOINTS_SHOWN],
+        "config_changes": config_rows[:_MAX_CONFIG_SHOWN],
+        "config_changes_total": len(config_rows),
+        "config_changes_truncated": (
+            len(config_rows) > _MAX_CONFIG_SHOWN or any(r.config_truncated for r in reports)
+        ),
         "external_callers": external[:_MAX_CALLERS_SHOWN],
         "external_callers_total": len(external),
         "external_info": external_info,
