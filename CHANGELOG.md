@@ -26,6 +26,16 @@
 
 ### Added
 
+- Terraform and Terragrunt flows. A root module (a directory with `terragrunt.hcl`, or `.tf` files that
+  no other directory calls) is now a flow entry point, named `terraform:<dir>`. The flow follows each
+  `module "x" { source = "./path" }` call, and a Terragrunt `terraform { source = ... }`, into the
+  called directory, and ends at the `resource`, `data` and `module` blocks they declare. Variables,
+  outputs, locals and providers are not steps. A root that creates many resources ranks high (resource
+  count replaces the external-call weight in its criticality). Nothing is added to the schema: the
+  schema version is unchanged and the node kinds stay `Class` and `Function`. The block type is read
+  from the `extra.hcl_type` the parser already wrote (`resource`, `data`, `module`, `variable`,
+  `output`, `local`, `provider`) and is now returned as `hcl_type` by node results and by the steps of
+  `get_flow`. On a copy of resonate-terraform the flow count went from 100 to 1067.
 - `detect_changes_tool` with `pr` or `head` now scores the code a pull request adds. That code has
   no callers in the graph, so it used to look safe: a pull request adding 75 production symbols
   reported one changed function. `pull_request.new_code` gives the totals (symbols added, tests

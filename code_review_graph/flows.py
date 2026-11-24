@@ -454,6 +454,158 @@ _LANGUAGE_ENTRY_NAME_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
 
 
 # ---------------------------------------------------------------------------
+# Terraform / HCL flows
+# ---------------------------------------------------------------------------
+
+#: ``hcl_type`` values a Terraform flow walks through: what a root module creates
+#: or calls. ``variable``, ``output``, ``local`` and ``provider`` blocks are inputs
+#: and wiring, so they stay out of the path (they are still nodes in the graph).
+_HCL_FLOW_BLOCK_TYPES = frozenset({"resource", "data", "module"})
+
+#: File names, in order, that stand for a Terraform directory as a flow entry.
+_HCL_PRIMARY_FILES = ("main.tf", "terragrunt.hcl")
+
+
+class _HclFlowGraph:
+    """Root modules and module-call edges read from the HCL nodes of one graph."""
+
+    def __init__(self) -> None:
+        self.roots: list[GraphNode] = []
+        #: source qualified name -> target qualified names, merged into ``calls_out``.
+        self.edges: dict[str, list[str]] = {}
+        #: entry qualified name -> display name of the flow (``terraform:<dir>``).
+        self.names: dict[str, str] = {}
+
+
+def _hcl_dir(path: str) -> str:
+    return str(Path(path).parent)
+
+
+def _hcl_primary(files: list[GraphNode]) -> GraphNode:
+    for wanted in _HCL_PRIMARY_FILES:
+        for node in files:
+            if Path(node.file_path).name == wanted:
+                return node
+    return min(files, key=lambda n: n.file_path)
+
+
+def build_hcl_flow_graph(store: GraphStore, nodes: Iterable[GraphNode]) -> _HclFlowGraph:
+    """Find Terraform root modules and the edges a flow follows from them.
+
+    A module is a directory. Its entry node is the ``File`` node of ``main.tf``
+    (else ``terragrunt.hcl``, else the first ``.tf``). It reaches every
+    ``resource``, ``data`` and ``module`` block declared in the directory's HCL
+    files. A ``module "x" { source = "./path" }`` block reaches the entry node of
+    the directory it names, and a Terragrunt ``terraform { source = ... }`` block
+    reaches the module directory it names. A *root module* is a directory with
+    ``terragrunt.hcl`` or ``.tf`` files that no other directory calls this way.
+    """
+    graph = _HclFlowGraph()
+    hcl_nodes = [n for n in nodes if n.language == "hcl"]
+    if not hcl_nodes:
+        return graph
+    repo_root = store.get_repo_root()
+
+    files_by_dir: dict[str, list[GraphNode]] = {}
+    file_nodes: dict[str, GraphNode] = {}
+    blocks_by_dir: dict[str, list[GraphNode]] = {}
+    module_by_line: dict[tuple[str, int], GraphNode] = {}
+    for node in hcl_nodes:
+        if ".terraform" in Path(node.file_path).parts:
+            continue
+        directory = _hcl_dir(node.file_path)
+        if node.kind == "File":
+            files_by_dir.setdefault(directory, []).append(node)
+            file_nodes[node.file_path] = node
+            continue
+        hcl_type = node.extra.get("hcl_type")
+        if hcl_type in _HCL_FLOW_BLOCK_TYPES:
+            blocks_by_dir.setdefault(directory, []).append(node)
+            if hcl_type == "module":
+                module_by_line[(node.file_path, node.line_start)] = node
+
+    primary = {d: _hcl_primary(f) for d, f in files_by_dir.items()}
+
+    for directory, blocks in blocks_by_dir.items():
+        entry = primary.get(directory)
+        if entry is None:
+            continue
+        blocks.sort(key=lambda n: (n.file_path, n.line_start, n.qualified_name))
+        graph.edges.setdefault(entry.qualified_name, []).extend(
+            b.qualified_name for b in blocks
+        )
+
+    called_dirs: set[str] = set()
+    rows = store._conn.execute(  # bounded: IMPORTS_FROM edges of HCL files only
+        "SELECT source_qualified, target_qualified, file_path, line, extra "
+        "FROM edges WHERE kind = 'IMPORTS_FROM' ORDER BY file_path, line, id"
+    ).fetchall()
+    for row in rows:
+        source_file = row["file_path"]
+        target_dir = (
+            _hcl_dir(row["target_qualified"])
+            if row["target_qualified"] in file_nodes else None
+        )
+        if source_file not in file_nodes or target_dir is None or target_dir not in primary:
+            continue
+        module = module_by_line.get((source_file, row["line"]))
+        if module is not None:
+            origin = module.qualified_name
+        elif source_file.lower().endswith(".hcl"):
+            try:
+                extra = json.loads(row["extra"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                extra = {}
+            if not isinstance(extra, dict) or extra.get("block") != "terraform":
+                continue
+            origin_dir = primary.get(_hcl_dir(source_file))
+            if origin_dir is None:
+                continue
+            origin = origin_dir.qualified_name
+        else:
+            continue
+        if target_dir == _hcl_dir(source_file):
+            continue
+        target = primary[target_dir].qualified_name
+        if target not in graph.edges.setdefault(origin, []):
+            graph.edges[origin].append(target)
+        called_dirs.add(target_dir)
+
+    for directory, files in sorted(files_by_dir.items()):
+        names = {Path(f.file_path).name for f in files}
+        if directory in called_dirs:
+            continue
+        if "terragrunt.hcl" not in names and not any(n.endswith(".tf") for n in names):
+            continue
+        entry = primary[directory]
+        if directory not in blocks_by_dir and not graph.edges.get(entry.qualified_name):
+            continue
+        graph.roots.append(entry)
+        graph.names[entry.qualified_name] = "terraform:" + _hcl_display_dir(directory, repo_root)
+    return graph
+
+
+def _hcl_display_dir(directory: str, repo_root: Optional[str]) -> str:
+    """*directory* relative to the repository root, in POSIX form."""
+    if repo_root:
+        try:
+            return Path(directory).relative_to(repo_root).as_posix() or "."
+        except ValueError:
+            pass
+    return Path(directory).as_posix()
+
+
+def load_flow_adjacency(store: GraphStore) -> FlowAdjacency:
+    """The store's flow adjacency plus the Terraform module-call edges."""
+    adj = store.load_flow_adjacency()
+    hcl = build_hcl_flow_graph(store, adj.nodes_by_qn.values())
+    for source, targets in hcl.edges.items():
+        adj.calls_out.setdefault(source, []).extend(targets)
+    adj.flow_names.update(hcl.names)
+    return adj
+
+
+# ---------------------------------------------------------------------------
 # Entry-point detection
 # ---------------------------------------------------------------------------
 
@@ -527,6 +679,7 @@ def detect_entry_points(
 
     entry_points: list[GraphNode] = []
     seen_qn: set[str] = set()
+    hcl_graph = build_hcl_flow_graph(store, store.get_nodes_by_kind(["File", "Class", "Function"]))
 
     # Stored file paths are absolute; the root turns them back into project
     # paths so ``tests/`` means the repository's own tests and not a parent
@@ -561,6 +714,16 @@ def detect_entry_points(
         if is_entry and node.qualified_name not in seen_qn:
             entry_points.append(node)
             seen_qn.add(node.qualified_name)
+
+    # Terraform root modules: nothing calls them, so they are entry points whatever
+    # their ``File`` node's kind.
+    for root in hcl_graph.roots:
+        if root.qualified_name in seen_qn:
+            continue
+        if not include_tests and _is_test_file(root.file_path, repo_root):
+            continue
+        entry_points.append(root)
+        seen_qn.add(root.qualified_name)
 
     return entry_points
 
@@ -618,7 +781,7 @@ def _trace_single_flow(
     })
 
     flow: dict = {
-        "name": _sanitize_name(ep.name),
+        "name": _sanitize_name(adj.flow_names.get(ep.qualified_name, ep.name)),
         "entry_point": ep.qualified_name,
         "entry_point_id": ep.id,
         "path": path_ids,
@@ -654,7 +817,7 @@ def trace_flows(
     if not entry_points:
         return []
 
-    adj = store.load_flow_adjacency()
+    adj = load_flow_adjacency(store)
     flows: list[dict] = []
 
     for ep in entry_points:
@@ -732,6 +895,23 @@ def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
     depth = flow.get("depth", 0)
     # Normalize: 0 => 0.0, 10+ => 1.0
     depth_score = min(depth / 10.0, 1.0)
+
+    # --- Terraform: a root module is weighed by what it creates ---
+    if nodes[0].language == "hcl":
+        creates = sum(
+            1 for n in nodes
+            if n.kind != "File" and n.extra.get("hcl_type") == "resource"
+        )
+        resource_score = min(creates / 20.0, 1.0)
+        # No calls leave an HCL flow, so the external-call weight moves to what it creates.
+        criticality = (
+            file_spread * 0.30
+            + resource_score * 0.30
+            + security_score * 0.15
+            + test_gap * 0.15
+            + depth_score * 0.10
+        )
+        return round(min(max(criticality, 0.0), 1.0), 4)
 
     # --- Weighted sum ---
     criticality = (
@@ -955,7 +1135,7 @@ def incremental_trace_flows(
     # ------------------------------------------------------------------
     new_flows: list[dict] = []
     if relevant_eps:
-        adj = store.load_flow_adjacency()
+        adj = load_flow_adjacency(store)
         for ep in relevant_eps:
             flow = _trace_single_flow(adj, ep, max_depth)
             if flow is not None:
@@ -1073,7 +1253,12 @@ def get_flow_by_id(store: GraphStore, flow_id: int) -> Optional[dict]:
     for nid in path_ids:
         node = store.get_node_by_id(nid)
         if node:
+            step_extra: dict = {}
+            hcl_type = node.extra.get("hcl_type")
+            if node.language == "hcl" and isinstance(hcl_type, str):
+                step_extra["hcl_type"] = _sanitize_name(hcl_type)
             steps.append({
+                **step_extra,
                 "node_id": node.id,
                 "name": _sanitize_name(node.name),
                 "kind": node.kind,
