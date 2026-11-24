@@ -163,6 +163,24 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
     return repo_root if repo_root else _default_repo_root
 
 
+def _require_a_named_change(
+    changed_files: Optional[list[str]], pr: Optional[int], head: Optional[str],
+) -> None:
+    """Refuse a review that names no change when the server has no working tree to diff.
+
+    ``serve --multi-repo`` serves checkouts of each default branch. A call with no ``pr``,
+    ``head`` or ``changed_files`` would diff the checkout's last commit and present that as
+    the review, so it is refused with what to pass instead.
+    """
+    if _multi_repo and pr is None and not head and changed_files is None:
+        raise ToolError(
+            "This server holds each repository's default branch, so there is no working tree "
+            "to diff and a call without a change would review the last commit on that branch. "
+            "Pass pr=<number> (or head=<ref or commit>, with base=<parent branch> for a "
+            "stacked pull request), or changed_files=[...]."
+        )
+
+
 def _registered_repo_root(repo_root: Optional[str]) -> str:
     """Return the registered repository a ``--multi-repo`` call names.
 
@@ -1239,8 +1257,12 @@ async def detect_changes_tool(
         the tests added with it, new endpoints, size and security-looking names; the
         overall ``risk_score`` is the higher of that and the changed symbols' score,
         and ``risk_breakdown`` shows both.
+
+        On a ``serve --multi-repo`` server a call naming no pull request, head or
+        changed files is refused, since the checkout has no working tree to diff.
     """
     root = _resolve_repo_root(repo_root)
+    _require_a_named_change(changed_files, pr, head)
     return await _offload(
         "detect_changes_tool",
         lambda: detect_changes_func(
@@ -1416,6 +1438,7 @@ async def get_hub_nodes_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1429,12 +1452,16 @@ async def get_hub_nodes_tool(
             kind, and total_degree only. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_tests: Include test methods and test files. Default: false,
+            so tests are left out before ranking, totals and paging. A cursor
+            made with one value is refused for the other.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_hub_nodes_tool",
         lambda: get_hub_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1446,6 +1473,7 @@ async def get_bridge_nodes_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -1460,6 +1488,9 @@ async def get_bridge_nodes_tool(
             kind, and betweenness only. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_tests: Include test methods and test files. Default: false,
+            so tests are left out before ranking, totals and paging. A cursor
+            made with one value is refused for the other.
 
     Returns:
         Ranked bridges. When more remain the reply carries ``next_cursor``.
@@ -1469,6 +1500,7 @@ async def get_bridge_nodes_tool(
         "get_bridge_nodes_tool",
         lambda: get_bridge_nodes_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1480,6 +1512,7 @@ async def get_knowledge_gaps_tool(
     max_per_category: int = 15,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1496,6 +1529,11 @@ async def get_knowledge_gaps_tool(
             file paths. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next rows
             of every category together. Omit it for the first page.
+        include_tests: Include test nodes. Default: false, so tests are left
+            out of every category before totals and paging. Config-document
+            nodes (JsonPath, YamlPath, Output, ConfigProperty) are never
+            listed as isolated. A cursor made with one value is refused for
+            the other.
 
     Returns:
         Gaps by category. When any category has more rows the reply carries
@@ -1507,6 +1545,7 @@ async def get_knowledge_gaps_tool(
         lambda: get_knowledge_gaps_func(
             repo_root=root, max_per_category=max_per_category,
             detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1518,6 +1557,7 @@ async def get_surprising_connections_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     cursor: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Find unexpected architectural coupling via composite surprise scoring.
 
@@ -1532,6 +1572,9 @@ async def get_surprising_connections_tool(
             source, target, kind, and score only. Default: standard.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_tests: Include test methods and test files. Default: false,
+            so tests are left out before ranking, totals and paging. A cursor
+            made with one value is refused for the other.
 
     Returns:
         Ranked surprising edges. When more remain the reply carries
@@ -1542,6 +1585,7 @@ async def get_surprising_connections_tool(
         "get_surprising_connections_tool",
         lambda: get_surprising_connections_func(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
+            include_tests=include_tests,
         ),
         root,
     )
@@ -1550,6 +1594,7 @@ async def get_surprising_connections_tool(
 @mcp.tool(annotations={"readOnlyHint": True})
 async def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
+    include_tests: bool = False,
 ) -> dict:
     """Auto-generate review questions from graph analysis.
 
@@ -1559,12 +1604,14 @@ async def get_suggested_questions_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        include_tests: Include test nodes. Default: false, so the questions
+            are about production code.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "get_suggested_questions_tool",
         lambda: get_suggested_questions_func(
-            repo_root=root,
+            repo_root=root, include_tests=include_tests,
         ),
         root,
     )
@@ -1633,10 +1680,17 @@ async def cross_repo_search_tool(
 ) -> dict:
     """Search for code entities across registered repositories.
 
-    Runs hybrid search on each searched repo's graph database and interleaves
-    results by repository-local rank. Equal ranks follow registry order, and up
-    to ``limit`` results per searched repo may be returned. Register repos first
-    with the CLI 'register' command.
+    Runs hybrid search on each searched repo's graph database and merges the
+    results. Scores are not comparable between repos, so rows are ordered by
+    match tier first, then by repository-local rank, then registry order. Every
+    row has ``match``: ``exact`` (name equals the query), ``exact_ci`` (same
+    ignoring case), ``qualified`` (the qualified name ends with the query, as in
+    ``Class.method``), ``prefix``, ``tokens`` (every word of the query is in the
+    name) or ``fuzzy``. Up to ``limit`` results per searched repo may be
+    returned, and a repo's exact match is never cut by it. A call has a time
+    budget (``CRG_CROSS_REPO_BUDGET_SECONDS``, default 60, 0 = unlimited): when it
+    is spent no new repo is started, the ones left come back in ``skipped_repos``
+    and ``truncated`` is set. Register repos first with the CLI 'register' command.
 
     Args:
         query: Search string to match against node names.
@@ -1704,6 +1758,11 @@ async def cross_repo_requests_tool(
     ``feign`` or ``js``. A match through a catch-all route such as a Next.js
     ``[...path]`` proxy, or through a naming convention, has ``confidence``
     ``low``.
+
+    A call has a time budget (``CRG_CROSS_REPO_BUDGET_SECONDS``, default 60,
+    0 = unlimited). When it is spent no further client repo is started; those
+    left come back in ``skipped_repos``, ``truncated`` is set, and ``counts`` and
+    ``total`` leave them out.
 
     Args:
         repos: Optional aliases or folder names of the client repos to list

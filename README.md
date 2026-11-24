@@ -679,6 +679,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations (build, update, watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | Timeout in seconds for each Git command that discovers what changed, when a review tool or command was not given an explicit file list. Running out reports an error, never "no changes" | `5`, or `CRG_GIT_TIMEOUT` when you set that explicitly |
+| `CRG_DEFAULT_IGNORE` | Extra ignore patterns applied to every repository, in addition to its own `.code-review-graphignore` (same glob syntax; separated by commas or newlines). For example `src/generated/**,.claude/**`. A `!path` line in a repository's `.code-review-graphignore` spares a path these patterns exclude. Too many (over 200) or too long (over 256 characters) patterns, control characters and `!` entries are an error | - |
 | `CRG_DATA_DIR` | Directory for graph databases and generated artefacts. `install`'s record of the files it wrote stays in `.code-review-graph/` in the repository | - |
 | `CRG_HOME` | Folder for per-user state: the multi-repo registry (`registry.json`), the daemon's `watch.toml`, its pid and state files, and `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | Set to `1` to let the generated git hooks run in linked git worktrees | - |
@@ -695,6 +696,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum callees followed per hop when `tests_for` and `detect-changes` look for tests. The first by name are kept, so one graph always gives one answer | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | Hops to walk up incoming `CALLS` when looking for a tested caller of an untested changed symbol. Reported as a note, never as coverage | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |
+| `CRG_CROSS_REPO_BUDGET_SECONDS` | Seconds one `cross_repo_search_tool` or `cross_repo_requests_tool` call may run before it stops starting new repos and lists the rest in `skipped_repos`. `0` means no limit | `60` |
 | `CRG_TOOL_TIMEOUT` | Timeout in seconds for read-only MCP tools (`0` disables). Does not bound the tools that write: build, postprocess, embed, wiki and apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | Window for `detect-changes --churn` commit counts | `90` |
 | `CRG_CONTEXT_HISTORY` | Set to `1` to keep a local log of each `context_savings` estimate in `.code-review-graph/context-history.jsonl`; read it with `code-review-graph context-history`. Holds token counts, tool names, a timestamp, a detail level and file and depth counts, never file names, paths or source text, and is never sent anywhere | - |

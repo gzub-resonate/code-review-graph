@@ -2225,6 +2225,13 @@ def find_dead_code(
         if node.language == "asl":
             continue
 
+        # A Dockerfile build stage (``stage:0``, ``stage:builder``) is a Class
+        # node, but the builder runs it, not a call: nothing "uses" it in the
+        # CALLS sense, so it is never dead code. (CI jobs are not modelled as
+        # nodes, so they need no exclusion here.)
+        if node.language == "dockerfile" or node.extra.get("dockerfile_type"):
+            continue
+
         # The XSLT processor picks a template with a match from the input
         # document, named or not, so nothing calling it says nothing about
         # whether it runs.
