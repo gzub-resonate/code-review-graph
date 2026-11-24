@@ -1056,6 +1056,7 @@ async def get_architecture_overview_tool(
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -1069,10 +1070,13 @@ async def get_architecture_overview_tool(
                       and aggregates cross-community edges to one row per
                       community pair (typical reduction: 600KB -> <5KB);
                       "standard" returns full per-edge detail.
-        max_results: Maximum cross-community rows and warnings to return;
-            cross_community_edges_total reports the full count. Default: 100.
+        max_results: Maximum communities (largest first), cross-community rows
+            and warnings to return; communities_total and
+            cross_community_edges_total report the full counts. Default: 100.
         max_members: Maximum member names per community in standard mode.
             Default: 10.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page
+            of communities. Omit it for the first page.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1082,6 +1086,7 @@ async def get_architecture_overview_tool(
             detail_level=detail_level,
             max_results=max_results,
             max_members=max_members,
+            cursor=cursor,
         ),
         root,
     )

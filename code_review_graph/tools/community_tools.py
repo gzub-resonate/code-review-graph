@@ -10,6 +10,7 @@ from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
+from ..paging import graph_stamp, make_scope, paginate, shown_range
 from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
 
 # ---------------------------------------------------------------------------
@@ -257,6 +258,7 @@ def get_architecture_overview_func(
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
@@ -271,17 +273,24 @@ def get_architecture_overview_func(
                       (typical reduction: 600KB -> <5KB);
                       "standard" returns the full overview including
                       per-edge cross-community detail.
-        max_results: Maximum cross-community rows and warnings to return
-                     (default 100, capped at 200).
-                     ``cross_community_edges_total`` reports the
-                     untruncated count.
+        max_results: Maximum communities, cross-community rows and warnings
+                     to return (default 100, capped at 200). Communities
+                     come largest first; ``communities_total`` and
+                     ``cross_community_edges_total`` report the untruncated
+                     counts.
         max_members: (standard only) Maximum member names per community
                      (default 10, capped at 25). Standard mode returned
                      >600k tokens on this repo without these bounds.
+        cursor: ``next_cursor`` from the previous reply, to read the next
+                page of ``communities``. Omit it for the first page. A cursor
+                is opaque and only valid for the same graph. Cross-community
+                rows and warnings are capped, not paged, and come with every
+                page.
 
     Returns:
-        Architecture overview with communities, cross-community edges,
-        warnings, and a ``truncated`` flag.
+        Architecture overview with communities (one page, largest first),
+        ``communities_total``, cross-community edges, warnings, a
+        ``truncated`` flag, and ``next_cursor`` while communities remain.
     """
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
@@ -298,6 +307,17 @@ def get_architecture_overview_func(
                 _cap_members(c, max_members)
                 for c in overview.get("communities", [])
             ]
+        # Largest first, ties by id, so a page never repeats or skips a row.
+        ordered = sorted(
+            overview.get("communities", []),
+            key=lambda c: (-c.get("size", 0), c.get("id", 0)),
+        )
+        page = paginate(
+            ordered, max_results, _MAX_CROSS_EDGES, cursor,
+            scope=make_scope("get_architecture_overview_tool"),
+            stamp=graph_stamp(store),
+        )
+        overview["communities"] = page.items
         cross, cross_total, truncated = _bounded(
             overview["cross_community_edges"], max_results, _MAX_CROSS_EDGES,
         )
@@ -308,8 +328,8 @@ def get_architecture_overview_func(
             overview["warnings"], max_results, _MAX_CROSS_EDGES,
         )
         overview["warnings"] = warnings
-        truncated = truncated or warn_cut
-        n_communities = len(overview["communities"])
+        truncated = truncated or warn_cut or page.truncated
+        n_communities = page.total
         n_cross = len(cross)
         n_warnings = warn_total
         cross_label = (
@@ -320,14 +340,17 @@ def get_architecture_overview_func(
         result = {
             "status": "ok",
             "summary": (
-                f"Architecture: {n_communities} communities, "
+                f"Architecture: {n_communities} communities"
+                + shown_range(page) + ", "
                 f"{cross_total} {cross_label}"
                 + _shown_of(n_cross, cross_total) + ", "
                 f"{n_warnings} warning(s)"
             ),
             **overview,
+            "communities_total": page.total,
             "cross_community_edges_total": cross_total,
             "truncated": truncated,
+            **page.fields(),
         }
         result["_hints"] = generate_hints(
             "get_architecture_overview_tool", result, get_session()

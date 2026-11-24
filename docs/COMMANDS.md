@@ -740,9 +740,16 @@ max_members: int = 25        # Member entries returned (max 25)
 ```
 repo_root: str | None
 detail_level: str = "minimal"    # "minimal" (default) or "standard"
-max_results: int = 100           # Cross-community rows and warnings (max 200)
+max_results: int = 100           # Communities, cross-community rows and warnings (max 200)
 max_members: int = 10            # Member names per community in standard mode (max 25)
+cursor: str | None = None        # next_cursor of the previous reply, for the next page of communities
 ```
+`communities` holds one page, largest first (`max_results` rows in both detail
+levels); `communities_total` reports the untruncated count. While more
+communities remain the reply carries `next_cursor` (and `truncated: true`);
+pass it back as `cursor` for the next page. A cursor is opaque and only valid
+for the same graph. Cross-community rows and warnings are capped at
+`max_results`, not paged, and come with every page.
 `cross_community_edges_total` reports the untruncated row count.
 Minimal responses may include estimated `context_savings` metadata.
 

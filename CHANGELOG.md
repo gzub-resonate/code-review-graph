@@ -35,6 +35,21 @@
 
 ### Fixed
 
+- `get_architecture_overview_tool` now caps and pages its `communities` list.
+  `max_results` bounded only the cross-community rows and warnings, so a repo
+  with hundreds of communities got every one of them even in minimal mode.
+  `communities` now holds one page, largest first, in both detail levels;
+  `communities_total` reports the full count; while more remain the reply
+  carries `next_cursor`, and the new `cursor` argument returns the next page.
+  The cursor module `paging.py` is the one the other list tools use.
+- Test classes follow the class they test into its community. Scala, Java and
+  Kotlin test classes (`FooTest`, `FooSpec`, `FooSuite`, `FooIT`, `TestFoo`)
+  carry no TESTED_BY edge, so they formed two-member communities apart from
+  `Foo`; the name is now the link. Small clusters of tests with no subject are
+  grouped into one `tests` community per module.
+- A directory with a very large set of JSON/YAML rows is cut into equal
+  slices of at most 200 rows instead of becoming one community of
+  thousands.
 - Community detection no longer splits a class from its own members. A class
   and the methods it CONTAINS, and a method and the endpoint it HANDLES, are
   detected as one unit (Leiden runs on one vertex per owner, with the group's
