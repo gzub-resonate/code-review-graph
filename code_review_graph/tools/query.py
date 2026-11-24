@@ -1773,10 +1773,16 @@ def query_graph(
                     continue
                 seen_states.add(other_qn)
                 other = store.get_node(other_qn)
+                before = len(edges_out)
                 if other:
                     add_result(node_to_dict(other), edge)
                 else:
                     edges_out.append(edge_to_dict(edge))
+                if len(edges_out) > before:
+                    # Carry only the transition fields the parser lists.
+                    for key in ("via", "index", "error_equals", "default"):
+                        if key in edge.extra:
+                            edges_out[-1][key] = edge.extra[key]
 
         elif pattern == "triggers_of":
             for edge in store.get_edges_by_source(qn):

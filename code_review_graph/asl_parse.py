@@ -125,6 +125,31 @@ def _asl_quote_placeholders(source: bytes) -> bytes:
     return bytes(out)
 
 
+_ASL_ERROR_NAME = re.compile(r"(?:States\.[A-Za-z]+|[A-Za-z_][A-Za-z0-9_.]*)")
+_MAX_ASL_ERROR_NAMES = 5
+_MAX_ASL_ERROR_NAME_LEN = 64
+
+
+def _asl_error_equals(rule: Any) -> list[str]:
+    """Error names a Catch rule lists, in order.
+
+    Only ``States.*`` names and plain identifier-shaped custom names up to 64
+    characters are kept, at most five; anything else is dropped.
+    """
+    names = rule.get("ErrorEquals") if isinstance(rule, _AslObj) else None
+    kept: list[str] = []
+    for name in names if isinstance(names, list) else []:
+        if (
+            isinstance(name, str)
+            and len(name) <= _MAX_ASL_ERROR_NAME_LEN
+            and _ASL_ERROR_NAME.fullmatch(name)
+        ):
+            kept.append(name)
+            if len(kept) >= _MAX_ASL_ERROR_NAMES:
+                break
+    return kept
+
+
 def _sanitize_asl_name(name: str) -> str:
     """Drop control characters from a state or machine name and cap its length."""
     return re.sub(r"[\x00-\x1f\x7f]", "", name)[:256]
@@ -343,7 +368,9 @@ def parse_asl(
     A file node, one ``Class`` node for the machine and one ``Function`` node per
     state, nested Parallel branches and Map processors included. Flow becomes
     ``TRANSITIONS_TO`` edges (``extra.via`` is ``next``, ``default``, ``choice``,
-    ``catch``, ``branch`` or ``map``); a Task that calls a nameable resource gets a
+    ``catch``, ``branch`` or ``map``; a Catch edge adds a bounded ``error_equals``, the
+    Default edge ``default``; a state with Retry or Catch gets ``has_retry`` or
+    ``has_catch``); a Task that calls a nameable resource gets a
     ``REFERENCES`` edge to ``external:aws-<service>:<name>``. Values never enter the
     graph. An unreadable or oversized definition keeps only its file node.
     """
@@ -457,6 +484,10 @@ def parse_asl(
                     state, state.get("Resource"),
                 )
                 extra.update(task_extra)
+            for field, flag in (("Retry", "has_retry"), ("Catch", "has_catch")):
+                block = state.get(field)
+                if isinstance(block, list) and block:
+                    extra[flag] = True
             state_ql = state.get("QueryLanguage")
             if state_ql in ("JSONPath", "JSONata"):
                 extra["query_language"] = state_ql
@@ -498,6 +529,7 @@ def parse_asl(
 
             def transition(
                 next_name: Any, via: str, line: int, index: Optional[int] = None,
+                more: Optional[dict[str, Any]] = None,
             ) -> None:
                 if not isinstance(next_name, str):
                     return
@@ -508,6 +540,8 @@ def parse_asl(
                 edge_extra: dict[str, Any] = {"via": via}
                 if index is not None:
                     edge_extra["index"] = index
+                if more:
+                    edge_extra.update(more)
                 edges.append(edge_cls(
                     kind="TRANSITIONS_TO", source=qualified, target=target_qualified,
                     file_path=file_path, line=line, extra=edge_extra,
@@ -515,7 +549,10 @@ def parse_asl(
 
             transition(state.get("Next"), "next", state.line_start)
             if state_type == "Choice":
-                transition(state.get("Default"), "default", state.line_start)
+                transition(
+                    state.get("Default"), "default", state.line_start,
+                    more={"default": True},
+                )
                 choices = state.get("Choices")
                 for index, rule in enumerate(choices if isinstance(choices, list) else []):
                     if isinstance(rule, _AslObj):
@@ -523,7 +560,10 @@ def parse_asl(
             catches = state.get("Catch")
             for index, rule in enumerate(catches if isinstance(catches, list) else []):
                 if isinstance(rule, _AslObj):
-                    transition(rule.get("Next"), "catch", rule.line_start, index)
+                    transition(
+                        rule.get("Next"), "catch", rule.line_start, index,
+                        more={"error_equals": _asl_error_equals(rule)},
+                    )
 
             if depth + 1 >= _MAX_ASL_NESTING:
                 if state_type in ("Parallel", "Map"):
