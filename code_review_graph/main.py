@@ -1085,6 +1085,7 @@ async def list_communities_tool(
     max_results: int = 50,
     max_members: int = 10,
     cursor: Optional[str] = None,
+    include_config: bool = False,
 ) -> dict:
     """List detected code communities in the codebase.
 
@@ -1106,6 +1107,11 @@ async def list_communities_tool(
             count. Default: 10.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        include_config: Also list the communities made only of JSON and YAML
+            document nodes. Default: false, because data files make hundreds
+            of equal slices that bury the code; ``config_communities_hidden``
+            reports how many were left out. A cursor made with one value is
+            refused for the other.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1113,7 +1119,7 @@ async def list_communities_tool(
         lambda: list_communities_func(
             repo_root=root, sort_by=sort_by, min_size=min_size,
             detail_level=detail_level, max_results=max_results,
-            max_members=max_members, cursor=cursor,
+            max_members=max_members, cursor=cursor, include_config=include_config,
         ),
         root,
     )
@@ -1170,6 +1176,7 @@ async def get_architecture_overview_tool(
     max_results: int = 100,
     max_members: int = 10,
     cursor: Optional[str] = None,
+    include_config: bool = False,
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -1189,6 +1196,10 @@ async def get_architecture_overview_tool(
             Default: 10.
         cursor: The ``next_cursor`` of a previous reply, to read the next
             cross-community rows and warnings. Omit it for the first page.
+        include_config: Also include the communities made only of JSON and YAML
+            document nodes, with the coupling rows and warnings about them.
+            Default: false; ``config_communities_hidden`` reports how many were
+            left out. A cursor made with one value is refused for the other.
 
     Returns:
         The overview. When more cross-community rows or warnings remain the
@@ -1203,6 +1214,7 @@ async def get_architecture_overview_tool(
             max_results=max_results,
             max_members=max_members,
             cursor=cursor,
+            include_config=include_config,
         ),
         root,
     )
@@ -1447,6 +1459,7 @@ async def get_hub_nodes_tool(
     cursor: Optional[str] = None,
     include_tests: bool = False,
     exclude_leaf_primitives: bool = False,
+    include_config: bool = False,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1466,6 +1479,9 @@ async def get_hub_nodes_tool(
         exclude_leaf_primitives: Skip nodes that call or reference no indexed
             non-test node, such as design-system components that many files
             use. Default: false.
+        include_config: Include JSON, YAML, output and property document
+            nodes. Default: false, so they are left out before ranking, totals
+            and paging. A cursor made with one value is refused for the other.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1474,6 +1490,7 @@ async def get_hub_nodes_tool(
             repo_root=root, top_n=top_n, detail_level=detail_level, cursor=cursor,
             include_tests=include_tests,
             exclude_leaf_primitives=exclude_leaf_primitives,
+            include_config=include_config,
         ),
         root,
     )

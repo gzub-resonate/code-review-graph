@@ -1017,6 +1017,37 @@ def _dedupe_community_names(
 # ---------------------------------------------------------------------------
 
 
+def _top_level_key(path: str) -> str:
+    """Return the first key of a document path (``$.jobs[].name`` gives ``jobs``)."""
+    rest = path.lstrip("$").lstrip(".")
+    for i, ch in enumerate(rest):
+        if ch in ".[":
+            return rest[:i]
+    return rest
+
+
+def _slice_name(base: str, chunk: Sequence[GraphNode], number: int) -> str:
+    """Name one slice of a large config group after what it holds.
+
+    *chunk* is in document order. A slice that spans files is named by the first
+    and last file (``taskdefs-json-api-to-worker``). A slice inside one file is
+    named by its first and last top-level key (``data-json-votes-a-to-m``). When
+    neither tells slices apart, the number is the only thing left.
+    """
+    first, last = chunk[0], chunk[-1]
+    first_file = _to_slug(_file_stem(first.file_path))
+    last_file = _to_slug(_file_stem(last.file_path))
+    if first.file_path != last.file_path and first_file and last_file:
+        if first_file == last_file:
+            return f"{base}-{first_file}-{number}"
+        return f"{base}-{first_file}-to-{last_file}"
+    first_key = _to_slug(_top_level_key(first.name))
+    last_key = _to_slug(_top_level_key(last.name))
+    if first_file and first_key and last_key and first_key != last_key:
+        return f"{base}-{first_file}-{first_key}-to-{last_key}"
+    return f"{base}-{first_file}-{number}" if first_file else f"{base}-{number}"
+
+
 def _group_config_documents(
     nodes: list[GraphNode],
     edges: Sequence[GraphEdge | _CommunityEdge],
@@ -1048,7 +1079,10 @@ def _group_config_documents(
         if parts > 1:
             members = sorted(members, key=lambda n: (n.file_path, n.line_start, n.qualified_name))
             size = -(-len(members) // parts)
-            slices = [(f"{base}-{i + 1}", members[i * size:(i + 1) * size]) for i in range(parts)]
+            chunks = [members[i * size:(i + 1) * size] for i in range(parts)]
+            slices = [
+                (_slice_name(base, chunk, i + 1), chunk) for i, chunk in enumerate(chunks)
+            ]
         else:
             slices = [(base, members)]
         for name, part in slices:
@@ -1670,11 +1704,41 @@ def store_communities(
     return count
 
 
+def config_community_ids(store: GraphStore) -> set[int]:
+    """Ids of the stored communities whose every member is a JSON or YAML document node.
+
+    The communities table does not record that a community is config, so it is read
+    from the members' kinds in one query. Config grouping keeps documents out of
+    code communities (and the reverse), so a community is one or the other.
+    """
+    kinds = sorted(CONFIG_DOCUMENT_KINDS)
+    marks = ",".join("?" for _ in kinds)
+    rows = store._conn.execute(
+        "SELECT community_id, COUNT(*) AS total, "  # nosec B608
+        f"SUM(CASE WHEN kind IN ({marks}) THEN 1 ELSE 0 END) AS config "
+        "FROM nodes WHERE community_id IS NOT NULL GROUP BY community_id",
+        kinds,
+    ).fetchall()
+    return {row["community_id"] for row in rows if row["config"] == row["total"]}
+
+
+def count_hidden_config_communities(store: GraphStore, min_size: int = 0) -> int:
+    """How many communities ``get_communities(include_config=False)`` leaves out."""
+    config_ids = config_community_ids(store)
+    if not config_ids:
+        return 0
+    rows = store._conn.execute(
+        "SELECT id FROM communities WHERE size >= ?", (min_size,),
+    ).fetchall()
+    return sum(1 for row in rows if row["id"] in config_ids)
+
+
 def get_communities(
     store: GraphStore,
     sort_by: str = "size",
     min_size: int = 0,
     members_by_community: dict[int, list[str]] | None = None,
+    include_config: bool = True,
 ) -> list[dict[str, Any]]:
     """Retrieve stored communities from the database.
 
@@ -1684,6 +1748,8 @@ def get_communities(
         min_size: Minimum community size to include.
         members_by_community: Members to report for each community id, for a
             caller that only wants some of them. Saves one query per community.
+        include_config: Keep the communities made only of JSON and YAML document
+            nodes. Pass False to leave them out before the caller ranks or pages.
 
     Returns:
         List of community dicts.
@@ -1701,6 +1767,9 @@ def get_communities(
         f"SELECT * FROM communities WHERE size >= ? ORDER BY {sort_by} {order}, id",  # nosec B608
         (min_size,),
     ).fetchall()
+    if not include_config:
+        config_ids = config_community_ids(store)
+        rows = [row for row in rows if row["id"] not in config_ids]
 
     communities: list[dict[str, Any]] = []
     for row in rows:
@@ -1739,7 +1808,9 @@ def _is_test_community(name: str) -> bool:
     return bool(_TEST_COMMUNITY_RE.search(name))
 
 
-def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
+def get_architecture_overview(
+    store: GraphStore, include_config: bool = True,
+) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
     Builds a node-to-community mapping, counts cross-community edges,
@@ -1747,11 +1818,14 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
 
     Args:
         store: The GraphStore instance.
+        include_config: Keep the communities made only of JSON and YAML documents.
+            Without them, edges to or from those communities and the coupling
+            warnings about them are left out too.
 
     Returns:
         Dict with keys: communities, cross_community_edges, warnings.
     """
-    communities = get_communities(store)
+    communities = get_communities(store, include_config=include_config)
 
     # Build node -> community_id mapping
     node_to_community: dict[str, int] = {}

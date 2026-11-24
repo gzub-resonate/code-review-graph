@@ -767,8 +767,13 @@ detail_level: str = "standard"
 max_results: int = 50    # Communities per page (max 200)
 max_members: int = 10    # Member names per community in standard mode (max 25)
 cursor: str | None       # next_cursor of the previous reply (see Result Bounds)
+include_config: bool = False   # also list communities made only of JSON/YAML documents
 ```
 `size` reports the true member count; `members_truncated` marks a cut member list.
+Communities made only of JSON and YAML document nodes are left out unless
+`include_config` is set, before ranking, `total` and paging; `config_communities_hidden`
+reports how many were left out. A large group of data files is cut into slices named
+after what they hold (`votes-json-early-vote-k0-to-k199`, `taskdefs-json-api-to-worker`).
 
 #### `get_community_tool`
 ```
@@ -787,8 +792,12 @@ detail_level: str = "minimal"    # "minimal" (default) or "standard"
 max_results: int = 100           # Cross-community rows and warnings (max 200)
 max_members: int = 10            # Member names per community in standard mode (max 25)
 cursor: str | None               # next_cursor of the previous reply (see Paging)
+include_config: bool = False     # also include JSON/YAML-only communities and their coupling
 ```
-`cross_community_edges_total` reports the untruncated row count.
+`cross_community_edges_total` reports the untruncated row count. Without
+`include_config`, communities made only of JSON and YAML documents, and the coupling
+rows and warnings about them, are left out; `config_communities_hidden` reports how
+many.
 Minimal responses may include estimated `context_savings` metadata.
 
 ### Graph Health and Architecture Tools
@@ -801,8 +810,11 @@ detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
 cursor: str | None               # next_cursor of the previous reply (see Result Bounds)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
 exclude_leaf_primitives: bool = False  # skip nodes that build on no other node
+include_config: bool = False     # JSON/YAML/output/property nodes are left out before ranking
 ```
-Degree counts only edges that name a node. A call or reference whose target is a
+Config document nodes (the `$` root of a JSON file touches every key beneath it) are
+left out of the ranking unless `include_config` is set. A cursor made with one value
+is refused for the other. Degree counts only edges that name a node. A call or reference whose target is a
 bare name no node answers to (`get`, `parse`, `main`) is left out, as the
 `unresolved` calls of `query_graph_tool` are, so a symbol does not rank for the
 calls it makes to names it could not pin. Each row's `resolution_split` gives
