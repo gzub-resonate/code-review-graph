@@ -43,6 +43,7 @@ def get_hub_nodes_func(
     top_n: int = 10,
     detail_level: str = "standard",
     cursor: str | None = None,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -58,6 +59,9 @@ def get_hub_nodes_func(
         cursor: ``next_cursor`` from the previous reply, to read the next
             page of the ranking. Omit it for the first page. A cursor is
             opaque and only valid for the same graph.
+        include_tests: Include test nodes (default False). Tests are left out
+            before ranking, so ``total`` and ``next_cursor`` describe the
+            filtered list. A cursor is only valid for the value it was made with.
 
     Returns:
         Ranked hubs. ``total`` reports the untruncated candidate count and
@@ -69,8 +73,10 @@ def get_hub_nodes_func(
     store, _root = _get_store(repo_root or None)
     try:
         page = paginate(
-            find_hub_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_HUB_NODES, cursor,
-            scope=make_scope("get_hub_nodes_tool"), stamp=graph_stamp(store),
+            find_hub_nodes(store, top_n=_FETCH_ALL, include_tests=include_tests),
+            top_n, _MAX_HUB_NODES, cursor,
+            scope=make_scope("get_hub_nodes_tool", include_tests=include_tests),
+            stamp=graph_stamp(store),
         )
         hubs, total = page.items, page.total
         if detail_level == "minimal":
@@ -101,6 +107,7 @@ def get_bridge_nodes_func(
     top_n: int = 10,
     detail_level: str = "standard",
     cursor: str | None = None,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -116,6 +123,9 @@ def get_bridge_nodes_func(
         cursor: ``next_cursor`` from the previous reply, to read the next
             page of the ranking. Omit it for the first page. A cursor is
             opaque and only valid for the same graph.
+        include_tests: Include test nodes (default False). Tests are left out
+            before ranking, so ``total`` and ``next_cursor`` describe the
+            filtered list. A cursor is only valid for the value it was made with.
 
     Returns:
         Ranked bridges. ``total`` reports the untruncated candidate count and
@@ -127,8 +137,10 @@ def get_bridge_nodes_func(
     store, _root = _get_store(repo_root or None)
     try:
         page = paginate(
-            find_bridge_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_BRIDGE_NODES, cursor,
-            scope=make_scope("get_bridge_nodes_tool"), stamp=graph_stamp(store),
+            find_bridge_nodes(store, top_n=_FETCH_ALL, include_tests=include_tests),
+            top_n, _MAX_BRIDGE_NODES, cursor,
+            scope=make_scope("get_bridge_nodes_tool", include_tests=include_tests),
+            stamp=graph_stamp(store),
         )
         bridges, total = page.items, page.total
         if detail_level == "minimal":
@@ -159,6 +171,7 @@ def get_knowledge_gaps_func(
     max_per_category: int = 15,
     detail_level: str = "standard",
     cursor: str | None = None,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
     """Identify structural weaknesses in the codebase.
 
@@ -178,6 +191,11 @@ def get_knowledge_gaps_func(
             page. Omit it for the first page. A cursor is opaque and only
             valid for the same graph. Every category advances together: a
             page holds the same row positions of each list.
+        include_tests: Include test nodes (default False). Tests are left out
+            of every category before totals and paging, so ``summary``,
+            ``total_gaps`` and ``next_cursor`` describe the filtered lists.
+            Configuration-document nodes (JsonPath, YamlPath, Output,
+            ConfigProperty) are never reported as isolated nodes.
 
     Returns:
         Gaps by category. ``summary`` maps each category to its untruncated
@@ -191,6 +209,7 @@ def get_knowledge_gaps_func(
     try:
         raw = find_knowledge_gaps(
             store, repo_root=root, max_isolated=None, max_untested=None,
+            include_tests=include_tests,
         )
         # Totals must come from the untruncated lists: the summary counts are
         # the whole point of the tool, and capping them would hide the gap.
@@ -198,7 +217,8 @@ def get_knowledge_gaps_func(
 
         gaps, page = _page_together(
             raw, max_per_category, _MAX_GAPS_PER_CATEGORY, cursor,
-            scope=make_scope("get_knowledge_gaps_tool"), stamp=graph_stamp(store),
+            scope=make_scope("get_knowledge_gaps_tool", include_tests=include_tests),
+            stamp=graph_stamp(store),
         )
         if detail_level == "minimal":
             gaps = {c: _project(rows, _MINIMAL_GAP_FIELDS) for c, rows in gaps.items()}
@@ -227,6 +247,7 @@ def get_surprising_connections_func(
     top_n: int = 15,
     detail_level: str = "standard",
     cursor: str | None = None,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
     """Find unexpected architectural coupling in the codebase.
 
@@ -241,6 +262,9 @@ def get_surprising_connections_func(
         cursor: ``next_cursor`` from the previous reply, to read the next
             page of the ranking. Omit it for the first page. A cursor is
             opaque and only valid for the same graph.
+        include_tests: Include test nodes (default False). Tests are left out
+            before ranking, so ``total`` and ``next_cursor`` describe the
+            filtered list. A cursor is only valid for the value it was made with.
 
     Returns:
         Ranked surprising edges. ``total`` reports the untruncated count and
@@ -252,9 +276,12 @@ def get_surprising_connections_func(
     store, _root = _get_store(repo_root or None)
     try:
         page = paginate(
-            find_surprising_connections(store, top_n=_FETCH_ALL),
+            find_surprising_connections(
+                store, top_n=_FETCH_ALL, include_tests=include_tests,
+            ),
             top_n, _MAX_SURPRISING, cursor,
-            scope=make_scope("get_surprising_connections_tool"), stamp=graph_stamp(store),
+            scope=make_scope("get_surprising_connections_tool", include_tests=include_tests),
+            stamp=graph_stamp(store),
         )
         surprises, total = page.items, page.total
         if detail_level == "minimal":
@@ -282,6 +309,7 @@ def get_surprising_connections_func(
 
 def get_suggested_questions_func(
     repo_root: str | None = None,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
     """Auto-generate review questions from graph analysis.
 
@@ -295,10 +323,12 @@ def get_suggested_questions_func(
 
     Args:
         repo_root: Repository root (auto-detected if omitted).
+        include_tests: Include test nodes (default False), so the questions
+            are about production code unless this is set.
     """
     store, _root = _get_store(repo_root or None)
     try:
-        questions = generate_suggested_questions(store)
+        questions = generate_suggested_questions(store, include_tests=include_tests)
         by_priority: dict[str, list[dict[str, Any]]] = {
             "high": [], "medium": [], "low": [],
         }

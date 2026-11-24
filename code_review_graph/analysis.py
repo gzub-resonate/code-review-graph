@@ -15,7 +15,7 @@ from .constants import (
     IMPORT_CONTEXT_TYPE_ONLY,
 )
 from .graph import GraphEdge, GraphStore, _sanitize_name
-from .parser import normalize_file_path
+from .parser import is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,27 @@ _MAX_CYCLE_FILES = 10
 _MAX_CYCLE_HOPS = 10
 
 
-def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
+#: Kinds that describe a configuration or data document, not code. A key in a JSON or YAML
+#: file, a Liquid output or a Spring property is often a leaf by nature, so it is never a
+#: knowledge gap just because nothing links to it.
+CONFIG_DOCUMENT_KINDS = frozenset({"JsonPath", "YamlPath", "Output", "ConfigProperty"})
+
+
+def _is_test_node(node: Any, repo_root: str | None) -> bool:
+    """Whether *node* is test code: a Test node, a flagged one, or one in a test file."""
+    return bool(
+        node.kind == "Test"
+        or node.is_test
+        or is_test_file(node.file_path, repo_root)
+    )
+
+
+def find_hub_nodes(
+    store: GraphStore, top_n: int = 10, include_tests: bool = True,
+) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
+
+    Test nodes are left out unless *include_tests* is true, before ranking.
 
     Returns list of dicts with: name, qualified_name, kind, file,
     in_degree, out_degree, total_degree, community_id
@@ -42,9 +61,12 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
     # Get all non-File nodes
     nodes = store.get_all_nodes(exclude_files=True)
     community_map = store.get_all_community_ids()
+    root = None if include_tests else store.get_repo_root()
 
     scored: list[dict[str, Any]] = []
     for n in nodes:
+        if not include_tests and _is_test_node(n, root):
+            continue
         qn = n.qualified_name
         ind = in_degree.get(qn, 0)
         outd = out_degree.get(qn, 0)
@@ -69,13 +91,14 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
 
 
 def find_bridge_nodes(
-    store: GraphStore, top_n: int = 10
+    store: GraphStore, top_n: int = 10, include_tests: bool = True,
 ) -> list[dict]:
     """Find nodes with highest betweenness centrality.
 
     These are architectural chokepoints that sit on shortest paths
     between many node pairs. If they break, multiple communities
-    lose connectivity.
+    lose connectivity. Test nodes are left out unless *include_tests* is true; they still
+    count as paths while betweenness is computed, and are dropped before ranking.
 
     Returns list of dicts with: name, qualified_name, kind, file,
     betweenness, community_id
@@ -104,12 +127,15 @@ def find_bridge_nodes(
         for n in store.get_all_nodes(exclude_files=True)
     }
 
+    root = None if include_tests else store.get_repo_root()
     results = []
     for qn, score in bc.items():
         if score <= 0 or qn not in node_map:
             continue
         n = node_map[qn]
         if n.kind == "File":
+            continue
+        if not include_tests and _is_test_node(n, root):
             continue
         results.append({
             "name": _sanitize_name(n.name),
@@ -250,6 +276,7 @@ def find_knowledge_gaps(
     repo_root: Path | None = None,
     max_isolated: int | None = 50,
     max_untested: int | None = 20,
+    include_tests: bool = True,
 ) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
 
@@ -260,13 +287,22 @@ def find_knowledge_gaps(
     - single_file_communities: entire community in one file
     - import_cycles: files that import each other (see find_import_cycles)
 
+    Configuration-document nodes (``CONFIG_DOCUMENT_KINDS``) are never isolated nodes.
+    Unless *include_tests* is true, test nodes are left out of the node lists and a
+    community made only of test nodes is left out of the community lists.
+
     Isolated nodes and untested hotspots are cut at *max_isolated* and *max_untested*
     (``None`` keeps every row, for a caller that pages). Every list has a fixed order.
     """
     edges = store.get_all_edges()
     # Table order made explicit: the isolated list is read in node id order.
-    nodes = sorted(store.get_all_nodes(exclude_files=True), key=lambda n: n.id)
+    all_nodes = sorted(store.get_all_nodes(exclude_files=True), key=lambda n: n.id)
     community_map = store.get_all_community_ids()
+    test_root = None if include_tests else store.get_repo_root()
+    test_qns = {n.qualified_name for n in all_nodes if _is_test_node(n, test_root)}
+    nodes = all_nodes if include_tests else [
+        n for n in all_nodes if n.qualified_name not in test_qns
+    ]
 
     # Build degree map
     degree: dict[str, int] = Counter()
@@ -281,7 +317,7 @@ def find_knowledge_gaps(
     isolated = []
     for n in nodes:
         d = degree.get(n.qualified_name, 0)
-        if d <= 1:
+        if d <= 1 and n.kind not in CONFIG_DOCUMENT_KINDS:
             isolated.append({
                 "name": _sanitize_name(n.name),
                 "qualified_name": n.qualified_name,
@@ -293,14 +329,24 @@ def find_knowledge_gaps(
     # 2. Build community sizes and file maps from node data
     comm_sizes: Counter[int] = Counter()
     comm_files: dict[int, set[str]] = defaultdict(set)
-    for n in nodes:
+    # Communities are structural, so their size counts every member; but a community
+    # whose members are all tests says nothing about production code.
+    comm_prod: set[int] = set()
+    comm_test: set[int] = set()
+    for n in all_nodes:
         cid = community_map.get(n.qualified_name)
         if cid is not None:
             comm_sizes[cid] += 1
             comm_files[cid].add(n.file_path)
+            (comm_test if n.qualified_name in test_qns else comm_prod).add(cid)
 
     # Thin communities (< 3 members)
-    communities = sorted(store.get_communities_list(), key=lambda c: int(c["id"]))
+    communities = sorted(
+        (c for c in store.get_communities_list()
+         if include_tests
+         or int(c["id"]) not in comm_test - comm_prod),
+        key=lambda c: int(c["id"]),
+    )
     thin = []
     for c in communities:
         cid = int(c["id"])
@@ -352,7 +398,7 @@ def find_knowledge_gaps(
 
 
 def find_surprising_connections(
-    store: GraphStore, top_n: int = 15
+    store: GraphStore, top_n: int = 15, include_tests: bool = True,
 ) -> list[dict]:
     """Find edges with high surprise scores.
 
@@ -362,12 +408,16 @@ def find_surprising_connections(
     - Peripheral-to-hub: low-degree node to high-degree node
     - Cross-file-type: test calling production or vice versa
     - Non-standard edge kind for the node types
+
+    Unless *include_tests* is true, an edge with a test node at either end is dropped
+    before scoring and ranking.
     """
     edges = store.get_all_edges()
     nodes = store.get_all_nodes(exclude_files=True)
     community_map = store.get_all_community_ids()
 
     node_map = {n.qualified_name: n for n in nodes}
+    root = None if include_tests else store.get_repo_root()
 
     # Build degree map
     degree: dict[str, int] = Counter()
@@ -389,6 +439,8 @@ def find_surprising_connections(
         if not src or not tgt:
             continue
         if src.kind == "File" or tgt.kind == "File":
+            continue
+        if not include_tests and (_is_test_node(src, root) or _is_test_node(tgt, root)):
             continue
 
         score = 0.0
@@ -458,7 +510,7 @@ def find_surprising_connections(
 
 
 def generate_suggested_questions(
-    store: GraphStore,
+    store: GraphStore, include_tests: bool = True,
 ) -> list[dict]:
     """Auto-generate review questions from graph analysis.
 
@@ -472,7 +524,7 @@ def generate_suggested_questions(
     questions = []
 
     # Bridge node questions
-    bridges = find_bridge_nodes(store, top_n=3)
+    bridges = find_bridge_nodes(store, top_n=3, include_tests=include_tests)
     for b in bridges:
         questions.append({
             "category": "bridge_node",
@@ -486,7 +538,7 @@ def generate_suggested_questions(
         })
 
     # Hub risk questions
-    hubs = find_hub_nodes(store, top_n=3)
+    hubs = find_hub_nodes(store, top_n=3, include_tests=include_tests)
     edges = store.get_all_edges()
     tested = {
         e.source_qualified
@@ -507,7 +559,7 @@ def generate_suggested_questions(
             })
 
     # Surprising connection questions
-    surprises = find_surprising_connections(store, top_n=3)
+    surprises = find_surprising_connections(store, top_n=3, include_tests=include_tests)
     for s in surprises:
         if "cross-community" in s["reasons"]:
             questions.append({
@@ -524,7 +576,7 @@ def generate_suggested_questions(
             })
 
     # Knowledge gap questions
-    gaps = find_knowledge_gaps(store)
+    gaps = find_knowledge_gaps(store, include_tests=include_tests)
 
     for c in gaps["thin_communities"][:2]:
         questions.append({
