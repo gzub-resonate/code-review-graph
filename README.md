@@ -679,6 +679,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations (build, update, watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | Timeout in seconds for each Git command that discovers what changed, when a review tool or command was not given an explicit file list. Running out reports an error, never "no changes" | `5`, or `CRG_GIT_TIMEOUT` when you set that explicitly |
+| `CRG_DEFAULT_IGNORE` | Extra ignore patterns applied to every repository, in addition to its own `.code-review-graphignore` (same glob syntax; separated by commas or newlines). For example `src/generated/**,.claude/**`. A `!path` line in a repository's `.code-review-graphignore` spares a path these patterns exclude. Too many (over 200) or too long (over 256 characters) patterns, control characters and `!` entries are an error | - |
 | `CRG_DATA_DIR` | Directory for graph databases and generated artefacts. `install`'s record of the files it wrote stays in `.code-review-graph/` in the repository | - |
 | `CRG_HOME` | Folder for per-user state: the multi-repo registry (`registry.json`), the daemon's `watch.toml`, its pid and state files, and `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | Set to `1` to let the generated git hooks run in linked git worktrees | - |

@@ -4,6 +4,12 @@
 
 ### Added
 
+- `CRG_DEFAULT_IGNORE` sets ignore patterns for every repository without editing each one, for
+  example `src/generated/**,.claude/**` (comma or newline separated, same syntax as
+  `.code-review-graphignore`). Full builds and updates honour it, and a file already in the graph
+  that it excludes is removed on the next update. A `!path` line in a repository's own
+  `.code-review-graphignore` spares a path the setting would exclude. A bad value (over 200 patterns,
+  a pattern over 256 characters, a control character, or a `!` entry) is reported as an error.
 - `detect_changes_tool` takes `pr` (or `head`) to score a pull request's files, new ones included. The
   files are read from Git and parsed in memory as `pr_blast_radius_tool` does, matched to the base
   graph, and scored by the same analysis as a working-tree diff (risk score, flows, test gaps,
@@ -272,6 +278,7 @@
 
 ### Fixed
 
+- `refactor_tool(mode="dead_code")` no longer lists a Dockerfile build stage (`stage:0`, `stage:builder`) as dead code.
 - `detect_changes_tool` with `pr` or `head` no longer sends every added symbol name when
   `detail_level="minimal"`: the `pull_request` section then carries the two commits and the
   added and removed totals only. In the standard level the names are paged like the other lists:
