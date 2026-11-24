@@ -17,7 +17,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -491,6 +491,9 @@ class FlowAdjacency:
     has_tested_by: set[str]
     nodes_by_qn: dict[str, "GraphNode"]
     nodes_by_id: dict[int, "GraphNode"]
+    #: entry qualified name -> flow name, for entries whose own name does not say
+    #: what they are (a Terraform root module's ``main.tf``).
+    flow_names: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -5929,6 +5932,14 @@ def node_to_dict(n: GraphNode) -> dict:
         "parent_name": _sanitize_name(n.parent_name) if n.parent_name else n.parent_name,
         "is_test": n.is_test,
     }
+    if n.language == "asl" and isinstance(n.extra.get("display_name"), str):
+        # A state name repeats across machines; this names the machine it is in.
+        result["display_name"] = _sanitize_name(n.extra["display_name"])
+    hcl_type = n.extra.get("hcl_type") if n.language == "hcl" else None
+    if isinstance(hcl_type, str):
+        # Terraform block type (resource, data, module, variable, output, local, provider);
+        # the node kind stays Class or Function so the schema does not change.
+        result["hcl_type"] = _sanitize_name(hcl_type)
     if n.kind in ("YamlPath", "JsonPath"):
         yaml_metadata: dict[str, Any] = {}
         for key in (
