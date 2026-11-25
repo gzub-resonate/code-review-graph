@@ -567,6 +567,10 @@ QUERY_PATTERNS = {
     "consumers_of": "Find classes that consume a Spring configuration property",
     "file_summary": "Get a summary of all nodes in a file",
     "path_to": "Find how a given symbol or file reaches another",
+    "external_targets": (
+        "List the external targets (queues, topics, buckets, tables) the code reaches, "
+        "optionally those under a prefix such as external:rabbitmq"
+    ),
 }
 
 

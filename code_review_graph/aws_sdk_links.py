@@ -25,10 +25,45 @@ from pathlib import Path
 from typing import Any
 
 from .aws_sdk_calls import RESOLUTION, UNRESOLVED_NAME
+from .config_keys import normalize_spring_config_key
 from .graph import GraphStore
 
 STATUSES = ("matched", "not_found", "ambiguous", "unresolved", "declared")
 _TERRAFORM_OPS = frozenset({"declare", "notification", "policy"})
+
+
+def _config_prefixes(store: GraphStore) -> dict[str, set[str]]:
+    """Class simple name -> its ``@ConfigurationProperties`` prefixes, from the graph."""
+    out: dict[str, set[str]] = {}
+    rows = store._conn.execute(
+        "SELECT source_qualified, json_extract(extra, '$.config_key') FROM edges "
+        "WHERE kind = 'DEPENDS_ON_CONFIG' AND json_valid(extra) "
+        "AND json_extract(extra, '$.resolution') = 'configuration_properties'",
+    ).fetchall()
+    for source, key in rows:
+        if isinstance(key, str) and key:
+            out.setdefault(source.rsplit("::", 1)[-1].rsplit(".", 1)[-1], set()).add(key)
+    return out
+
+
+def _config_key(
+    store: GraphStore, prefixes: dict[str, set[str]], getter: Any,
+) -> tuple[str | None, bool]:
+    """The property key a bean getter reads, and whether the repo's config files define it.
+
+    Only a type with exactly one prefix is used, so the key is never a guess between two.
+    """
+    if not isinstance(getter, dict):
+        return None, False
+    found = prefixes.get(str(getter.get("type", "")), set())
+    prop = str(getter.get("property", ""))
+    if len(found) != 1 or not prop:
+        return None, False
+    key = normalize_spring_config_key(f"{next(iter(found))}.{prop}")
+    defined = store._conn.execute(
+        "SELECT 1 FROM nodes WHERE kind = 'ConfigProperty' AND name = ? LIMIT 1", (key,),
+    ).fetchone() is not None
+    return key, defined
 
 
 def read_edges(store: GraphStore) -> list[dict[str, Any]]:
@@ -40,6 +75,7 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
         (RESOLUTION,),
     ).fetchall()
     out: list[dict[str, Any]] = []
+    prefixes = _config_prefixes(store)
     for source, file_path, line, target, raw in rows:
         try:
             info = json.loads(raw or "{}")
@@ -58,6 +94,11 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
                 k: info[k] for k in ("notify_targets", "key_prefix") if k in info
             },
         })
+        if info.get("unresolved") and not out[-1]["placeholder"] and info.get("config_getter"):
+            key, defined = _config_key(store, prefixes, info["config_getter"])
+            if key:
+                out[-1]["placeholder"] = key
+                out[-1]["extra"]["config_defined"] = defined
     return out
 
 
@@ -123,6 +164,8 @@ def resolve_links(
                 row["placeholder"] = edge["placeholder"]
             if edge["extra"].get("key_prefix"):
                 row["key_prefix"] = edge["extra"]["key_prefix"]
+            if "config_defined" in edge["extra"]:
+                row["config_defined"] = edge["extra"]["config_defined"]
             if found:
                 names = [
                     all_repos[i].get("alias") or Path(all_repos[i]["path"]).name for i in found

@@ -699,6 +699,71 @@ def _unresolved_route_endpoint(
     return response
 
 
+def _query_external_targets(
+    store: GraphStore, prefix: str, minimal: bool, limit: int,
+) -> dict[str, Any]:
+    """List the ``external:`` targets edges point at, with who reaches each and how.
+
+    *prefix* narrows the list (``external:rabbitmq``, ``external:aws-s3``,
+    ``external:db-table``); empty or ``external:`` lists every family. Rows come largest
+    first: the target, its family, the edge kinds that reach it with counts, how many
+    distinct sources reach it, up to three of them, and whether any edge is unresolved.
+    """
+    prefix = (prefix or "").strip()
+    if prefix and not prefix.startswith("external:"):
+        return {
+            "status": "error",
+            "error": "external_targets takes a prefix that starts with 'external:', "
+                     "for example external:rabbitmq, or an empty target for every family.",
+        }
+    like_prefix = prefix or "external:"
+    rows = store._conn.execute(
+        "SELECT target_qualified, kind, source_qualified, "
+        "COALESCE(json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
+        "'$.unresolved'), 0) "
+        "FROM edges WHERE substr(target_qualified, 1, ?) = ?",
+        (len(like_prefix), like_prefix),
+    ).fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for target, kind, source, unresolved in rows:
+        entry = grouped.setdefault(
+            target, {"kinds": {}, "sources": {}, "unresolved": False},
+        )
+        entry["kinds"][kind] = entry["kinds"].get(kind, 0) + 1
+        entry["sources"][source] = True
+        if unresolved:
+            entry["unresolved"] = True
+    ordered = sorted(
+        grouped.items(),
+        key=lambda item: (-sum(item[1]["kinds"].values()), item[0]),
+    )
+    families: dict[str, int] = {}
+    results: list[dict[str, Any]] = []
+    for target, entry in ordered:
+        family = target.split(":", 2)[1] if target.count(":") >= 1 else target
+        families[family] = families.get(family, 0) + 1
+        if len(results) >= limit:
+            continue
+        sources = [src.split("::", 1)[-1] for src in list(entry["sources"])[:3]]
+        results.append({
+            "target": target, "family": family, "edge_kinds": entry["kinds"],
+            "source_count": len(entry["sources"]), "sources": sources,
+            "unresolved": entry["unresolved"],
+        })
+    total = len(ordered)
+    scope = prefix or "external:"
+    return {
+        "status": "ok", "pattern": "external_targets", "target": prefix,
+        "description": _QUERY_PATTERNS["external_targets"],
+        "summary": f"{total} external target(s) under {scope}"
+                   + (f", showing {len(results)}" if total > len(results) else "") + ".",
+        "result_count": total, "results_omitted": total - len(results),
+        "families": families, "results": results,
+        **({"_hint": "pass a family prefix such as external:rabbitmq to narrow"}
+           if not prefix and not minimal else {}),
+    }
+
+
 def _query_route(
     store: GraphStore, root: Path, target: str, to: str, minimal: bool,
 ) -> dict[str, Any]:
@@ -1150,7 +1215,8 @@ def query_graph(
                  imports_of, importers_of, children_of, tests_for, inheritors_of,
                  next_states_of, previous_states_of, triggers_of, triggered_by,
                  publishers_of, listeners_of, handlers_of, endpoints_for, requests_of,
-                 requesters_of, consumers_of, advises, advised_by, file_summary, path_to.
+                 requesters_of, consumers_of, advises, advised_by, file_summary, path_to,
+                 external_targets (the target is an optional 'external:<family>' prefix).
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -1213,6 +1279,10 @@ def query_graph(
                 }
             return _query_route(store, root, target, to, minimal)
         response_limit = min(max_results, 5) if minimal else max_results
+        if pattern == "external_targets":
+            if cursor:
+                raise ValueError("external_targets has no pages; narrow it with a prefix")
+            return _query_external_targets(store, target, minimal, response_limit)
         # The target as asked, before it is resolved: it is what the rows answer.
         scope_args: dict[str, Any] = {
             "pattern": pattern, "target": target, "resolution": resolution,
