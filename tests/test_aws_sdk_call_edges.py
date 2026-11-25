@@ -88,7 +88,7 @@ def test_python_inline_chain_and_other_services() -> None:
         ("external:aws-secretsmanager:prod/db", "get_secret_value", "read"),
         ("external:aws-ssm:/app/key", "get_parameter", "read"),
         ("external:aws-kinesis:clicks", "put_record", "write"),
-        ("external:aws-s3:inline-bkt", "list_objects_v2", "read"),
+        ("external:aws-s3:inline-bkt", "list_objects_v2", "list"),
     }
 
 
@@ -118,7 +118,7 @@ def test_python_more_services() -> None:
         ("external:aws-glue:etl", "start_job_run", "write"),
         ("external:aws-batch:jd", "submit_job", "write"),
         ("external:aws-s3:up-bkt", "upload_file", "write"),
-        ("external:aws-s3:pg-bkt", "list_objects_v2", "read"),
+        ("external:aws-s3:pg-bkt", "list_objects_v2", "list"),
     }
 
 
@@ -333,7 +333,7 @@ def test_js_require_destructuring() -> None:
         "  await new S3Client({}).send(new DeleteObjectCommand({ Bucket: 'cjs-bkt', Key: 'k' }));\n"
         "};\n"
     )
-    assert rows("index.js", src) == {("external:aws-s3:cjs-bkt", "delete_object", "write")}
+    assert rows("index.js", src) == {("external:aws-s3:cjs-bkt", "delete_object", "delete")}
 
 
 # -- Read / write classification --------------------------------------------------------------
@@ -342,13 +342,17 @@ def test_js_require_destructuring() -> None:
 @pytest.mark.parametrize(
     ("service", "operation", "access"),
     [
-        ("s3", "get_object", "read"), ("s3", "list_objects_v2", "read"),
+        ("s3", "get_object", "read"), ("s3", "list_objects_v2", "list"),
         ("dynamodb", "query", "read"), ("dynamodb", "scan", "read"),
         ("dynamodb", "describe_table", "read"), ("dynamodb", "batch_get_item", "read"),
-        ("s3", "put_object", "write"), ("s3", "delete_object", "write"),
+        ("s3", "put_object", "write"), ("s3", "delete_object", "delete"),
         ("dynamodb", "update_item", "write"), ("states", "start_execution", "write"),
         ("lambda", "invoke", "invoke"), ("lambda", "invoke_async", "invoke"),
         ("s3", "generate_something", "unknown"),
+        ("s3", "create_bucket", "admin"), ("s3", "put_bucket_policy", "admin"),
+        ("sqs", "receive_message", "read"), ("sqs", "delete_message", "delete"),
+        ("s3", "create_bucket", "admin"), ("s3", "put_bucket_policy", "admin"),
+        ("sqs", "receive_message", "read"), ("sqs", "delete_message", "delete"),
     ],
 )
 def test_access_classification(service: str, operation: str, access: str) -> None:

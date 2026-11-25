@@ -10,11 +10,13 @@ lists them across the registered repos.
 ``extra`` of such an edge: ``resolution="aws_sdk"``, ``service`` (the ARN service: ``s3``,
 ``dynamodb``, ``lambda``, ``states``, ``secretsmanager``, ``ssm``, ``kinesis``, ``firehose``,
 ``events``, ``ecs``, ``glue``, ``batch``), ``operation`` (snake case: ``put_object``),
-``resource`` (the name, ``?`` when it cannot be named), ``target_kind``, ``access``
-(``read``, ``write``, ``invoke``, or ``unknown`` when the operation name says nothing) and
-``sdk``. A name that cannot be worked out is still an edge, to ``external:aws-<service>:?``,
-with ``unresolved`` true and, when the value is an environment variable or a property key,
-``placeholder`` (the key, never its value).
+``sdk_operation`` (the canonical SDK name: ``PutObject``), ``resource`` (the name, ``?`` when it
+cannot be named), ``target_kind``, ``access`` (``read``, ``write``, ``delete``, ``list``,
+``admin``, ``invoke``, or ``unknown`` when the operation name says nothing) and ``sdk``.
+A name that cannot be worked out is still an edge, to ``external:aws-<service>:?``, with
+``unresolved`` true and, when the value is an environment variable or a property key,
+``placeholder`` (the key, never its value). ``aws_config_names`` later adds ``resolved_names``
+(profile -> resource name) for a placeholder that Spring configuration files define.
 
 Only names are recorded: a secret's id, never its value; a bucket and a key prefix, never an
 object. A client has to be seen being made (``boto3.client("s3")``), or a request or command
@@ -38,7 +40,9 @@ from . import aws_terraform_wiring as _wiring
 from .config_keys import normalize_spring_config_key
 from .infra_references import aws_external_target, reduce_arn
 
-__all__ = ["aws_sdk_edges", "RESOLUTION", "UNRESOLVED_NAME"]
+__all__ = [
+    "aws_sdk_edges", "RESOLUTION", "UNRESOLVED_NAME", "classify_access", "sdk_operation_name",
+]
 
 RESOLUTION = "aws_sdk"
 UNRESOLVED_NAME = "?"
@@ -153,7 +157,7 @@ _S3_POSITIONAL = {
 _READ_PREFIXES = (
     "get", "list", "describe", "query", "scan", "head", "select", "batch_get", "transact_get",
     "download", "search", "check", "exists", "does", "fetch", "read", "lookup", "validate",
-    "wait",
+    "wait", "receive",
 )
 _WRITE_PREFIXES = (
     "put", "delete", "update", "start", "create", "send", "run", "submit", "upload", "copy",
@@ -163,16 +167,71 @@ _WRITE_PREFIXES = (
 )
 
 
+_ADMIN_PREFIXES = (
+    "create_", "set_", "tag", "untag", "register", "deregister", "add_permission",
+    "remove_permission", "remove_tags", "put_bucket_", "put_public_access", "update_table",
+    "update_function", "update_state_machine", "update_stream", "update_queue", "enable_",
+    "disable_",
+)
+_ADMIN_SUFFIXES = (
+    "_policy", "_configuration", "_acl", "_tagging", "_attributes", "_attribute", "_lifecycle",
+)
+#: ``create_*`` calls that move data rather than manage a resource.
+_DATA_CREATES = frozenset({"create_multipart_upload", "create_item"})
+#: Operations whose SDK name is not the camel-cased method name.
+_SDK_OPERATION = {
+    "upload_file": "PutObject", "upload_fileobj": "PutObject", "download_file": "GetObject",
+    "download_fileobj": "GetObject", "copy": "CopyObject", "does_object_exist": "HeadObject",
+    "batch_writer": "BatchWriteItem", "send_messages": "SendMessageBatch",
+    "receive_messages": "ReceiveMessage", "publish_batch": "PublishBatch",
+}
+#: ``sdk`` values whose ``operation`` is not an SDK operation (a CLI sub-command, a URI scan,
+#: Terraform).
+_NON_SDK = frozenset({"terraform", "aws-cli", "uri-literal"})
+ACCESS_MODES = ("read", "write", "delete", "list", "admin", "invoke")
+
+
+def sdk_operation_name(operation: str) -> str:
+    """The canonical SDK operation name (``PutObject``) of a snake or camel case method name."""
+    if operation in _SDK_OPERATION:
+        return _SDK_OPERATION[operation]
+    snake = _snake(operation) if not operation.islower() else operation
+    return "".join(
+        part[:1].upper() + part[1:] for part in snake.split("_") if part
+    )
+
+
 def classify_access(service: str, operation: str) -> str:
-    """``read``, ``write``, ``invoke`` (Lambda) or ``unknown``, from the operation name alone."""
+    """``read``, ``write``, ``delete``, ``list``, ``admin``, ``invoke`` or ``unknown``.
+
+    Decided from the operation name alone: ``list_*`` lists, ``delete_*``/``purge_*`` delete,
+    ``get_*``/``describe_*``/``query``/``scan`` read, ``create_*``/``set_*``/``tag*`` and
+    policy or configuration changes administer, ``put_*``/``send_*``/``update_*`` and the like
+    write, and a Lambda ``invoke`` invokes.
+    """
     op = operation.lower()
     if service == "lambda" and (op == "invoke" or op.startswith("invoke_")):
         return "invoke"
+
+    def starts(prefix: str) -> bool:
+        return op == prefix or op.startswith(prefix + "_")
+
+    if op not in ("remove_permission", "remove_tags") and (
+        starts("delete") or starts("purge") or starts("remove") or starts("deregister")
+    ):
+        return "admin" if starts("deregister") else "delete"
+    if starts("list"):
+        return "list"
+    if op not in _DATA_CREATES and (
+        op.startswith(_ADMIN_PREFIXES)
+        or (op.startswith(("put_", "update_")) and op.endswith(_ADMIN_SUFFIXES))
+    ):
+        return "admin"
     for prefix in _READ_PREFIXES:
-        if op == prefix or op.startswith(prefix + "_"):
+        if starts(prefix):
             return "read"
     for prefix in _WRITE_PREFIXES:
-        if op == prefix or op.startswith(prefix + "_"):
+        if starts(prefix):
             return "write"
     return "unknown"
 
@@ -332,6 +391,8 @@ class _Out:
             info.update(confidence=0.6, confidence_tier="INFERRED")
         else:
             info.update(confidence=1.0, confidence_tier="EXTRACTED")
+        if sdk not in _NON_SDK:
+            info["sdk_operation"] = sdk_operation_name(operation)
         if extra:
             info.update(extra)
         self.edges.append(self.make_edge(
