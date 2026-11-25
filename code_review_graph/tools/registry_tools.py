@@ -11,6 +11,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Optional
 
+from .. import amqp_join as aj
 from .. import aws_sdk_links as al
 from .. import feign_links as fl
 from .. import infra_join as ij
@@ -763,6 +764,126 @@ def _awssdk_links(
     return result
 
 
+def _amqp_links(
+    repos: list[str] | None,
+    exchange: str | None,
+    routing_key: str | None,
+    status: str | None,
+    max_results: int,
+) -> dict[str, Any]:
+    """The ``origin="amqp"`` branch: publishers and listeners of one exchange, across repos.
+
+    ``exchange`` is required (``service``); ``routing_key`` (``route``) keeps the rows linked
+    to that key by the rules of :func:`~code_review_graph.amqp_join.link_kind`: a listener's
+    ``binding_key`` is the pattern for a publisher's key, and for a publisher row the key given
+    is the pattern. Read-only; the graphs are opened read-only, one at a time, inside the
+    call budget (repos left over are named in ``skipped_repos``).
+    """
+    from ..registry import Registry
+
+    if not exchange or not exchange.strip():
+        raise ValueError("origin=amqp needs service: the exchange name")
+    roles = ("publisher", "listener")
+    if status is not None and status not in roles:
+        raise ValueError(f"status must be one of: {', '.join(roles)}")
+    channel = exchange.strip()
+    if channel.startswith(aj.EXCHANGE_PREFIX):
+        channel = channel[len(aj.EXCHANGE_PREFIX):]
+    all_repos = Registry().list_repos()
+    selected: list[dict[str, Any]] = all_repos
+    unknown_shown: list[str] = []
+    if repos:
+        selected, unknown, _ambiguous = _select_repos(all_repos, repos)
+        unknown_shown, _total, _cut = _echoed(unknown)
+    budget = cross_repo_budget_seconds()
+    started = _now()
+    rows: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    unreadable: list[str] = []
+    without_amqp: list[str] = []
+    counts: dict[str, int] = {}
+    for entry in selected:
+        label = _sanitize_name(_repo_label(entry))
+        if budget and _now() - started > budget:
+            skipped.append(label)
+            continue
+        store = tl.open_store(entry)
+        if store is None:
+            unreadable.append(label)
+            continue
+        try:
+            if not aj.has_amqp_edges(store):
+                without_amqp.append(label)
+                continue
+            found = list(aj.read_channel_edges(store, channel))
+        except (sqlite3.Error, GraphStoreError) as exc:
+            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
+            unreadable.append(label)
+            continue
+        finally:
+            store.close()
+        root = Path(entry["path"])
+        for edge in found:
+            if routing_key:
+                if edge["role"] == "listener":
+                    how = aj.link_kind(edge["binding_key"], routing_key)
+                else:
+                    how = aj.link_kind(routing_key, edge["routing_key"])
+                if how is None:
+                    continue
+            else:
+                how = None
+            counts[edge["role"]] = counts.get(edge["role"], 0) + 1
+            if status and edge["role"] != status:
+                continue
+            row: dict[str, Any] = {
+                "role": edge["role"], "repo": label, "exchange": _sanitize_name(channel),
+                "source": _sanitize_name(str(edge["source"]).split("::", 1)[-1]),
+                "file": _sanitize_name(_relative_to(edge["file_path"], root)),
+                "line": edge["line"],
+            }
+            for key in ("routing_key", "binding_key", "queue"):
+                if isinstance(edge.get(key), str) and edge[key]:
+                    row[key] = _sanitize_name(edge[key])
+            if how:
+                row["matched_via"] = how
+            rows.append(row)
+    shown, total, truncated = _bounded(rows, max_results, 100)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "summary": (
+            f"{total} AMQP publisher/listener row(s) for exchange "
+            f"'{_sanitize_name(channel)}'"
+            + (f" linked to key '{_sanitize_name(routing_key)}'" if routing_key else "")
+            + f" across {len(selected)} repo(s)"
+        ),
+        "origin": "amqp",
+        "results": shown,
+        "counts": counts,
+        "total": total,
+        "truncated": truncated or bool(skipped),
+        "repos_searched": len(selected) - len(skipped),
+        "unreadable": unreadable,
+    }
+    if without_amqp:
+        result["repos_without_amqp"] = _bounded(
+            without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+        )[0]
+        result["repos_without_amqp_total"] = len(without_amqp)
+    if skipped:
+        result["skipped_repos"] = skipped
+    if unknown_shown:
+        result["unknown"] = unknown_shown
+    return result
+
+
+def _relative_to(file_path: str, root: Path) -> str:
+    try:
+        return str(Path(file_path).relative_to(root))
+    except ValueError:
+        return file_path
+
+
 def _infra_links(
     origin: str,
     noun: str,
@@ -984,6 +1105,16 @@ def cross_repo_requests_func(
             kind (``lambda``) or ``kind/name``, and ``status`` is one of ``matched``,
             ``not_found`` or ``ambiguous``.
 
+    ``amqp`` lists the publishers and listeners of one RabbitMQ exchange across the selected
+    repos: ``service`` is the exchange (required), ``route`` an optional key and ``status``
+    ``publisher`` or ``listener``. With ``route`` a listener row is kept when its ``binding_key``
+    matches that key and a publisher row when its ``routing_key`` matches it, using AMQP topic
+    wildcards (``*`` one word, ``#`` zero or more) only in a binding key that holds one;
+    ``matched_via`` is ``exact_key``, ``topic_pattern`` or ``key_unknown``. The exchange type is
+    never inferred. It can only find links once both repos carry the exchange edges: a repo
+    indexed before they existed is named in ``repos_without_amqp`` and shows nothing until
+    rebuilt. It does not use ``limit``, ``cursor`` or the infrastructure summary.
+
     A Feign service name that is not a registered repo name resolves through the optional
     alias file ``CRG_SERVICE_ALIASES_FILE`` (``{"alias": "repo", "prefix:p-": "repo"}``) or
     the names the repos declare (``spring.application.name``, ECS service, ECR repository);
@@ -1010,13 +1141,15 @@ def cross_repo_requests_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
-    infra_origins = ("terraform", "workflow", "stepfunction", "awssdk")
+    infra_origins = ("terraform", "workflow", "stepfunction", "awssdk", "amqp")
     if status is not None and origin not in infra_origins and status not in fl.STATUSES:
         raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
         raise ValueError(
-            "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk"
+            "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp"
         )
+    if origin == "amqp":
+        return _amqp_links(repos, service, route, status, max_results)
     if origin == "awssdk":
         return _awssdk_links(repos, service, route, status, max_results)
     if origin == "stepfunction":
