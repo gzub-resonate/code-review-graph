@@ -20,6 +20,15 @@
 - A test pins how a Step Functions `startExecution` state links to the machine it starts: a
   `REFERENCES` edge that `cross_repo_requests_tool` `origin="stepfunction"` joins to the machine
   definition (`next_states_of` keeps to transitions inside one machine).
+- Spring AMQP bindings and cross-class constants. A `@RabbitListener(bindings = @QueueBinding(..))`
+  now also writes a `CONSUMES` edge on `external:rabbitmq:<exchange>` for each (exchange, key)
+  pair, with `extra.binding_key` (wildcards `*` and `#` kept verbatim), `extra.queue` and
+  `resolution` `rabbit_listener_binding`, so a publisher and a listener on one exchange meet in
+  the graph; the existing queue-keyed edge is unchanged. String constants declared in another
+  class (`Names.EXCHANGE`, a static import, a concatenation of constants) are resolved through a
+  repository-wide `static final String` index for listener annotations, `convertAndSend` and
+  `RabbitTemplate.send` arguments and routing keys; a name bound to more than one value stays
+  unresolved. Rebuild the graph to get these edges.
 
 - Cross-repo service-name aliases and infrastructure joins, all at query time (no graph rebuild).
   A Feign service name that is not a registered repo name now resolves through an optional JSON or

@@ -38,7 +38,9 @@ enough.
 
 from __future__ import annotations
 
+import os
 import re
+import threading
 from typing import Any, Optional
 
 from .aws_sdk_calls import classify_access, sdk_operation_name
@@ -200,6 +202,13 @@ def _java_string(node, consts: dict[str, set[str]], depth: int = 0) -> Optional[
         if values and len(values) == 1:
             return next(iter(values))
         return None
+    if kind == "field_access":
+        # ``Names.EXCHANGE``: only a view backed by the repository constant index answers a
+        # dotted name; a plain dict never holds one.
+        values = consts.get("".join(_text(node).split()))
+        if values and len(values) == 1:
+            return next(iter(values))
+        return None
     if kind == "binary_expression":
         op = node.child_by_field_name("operator")
         if op is None or _text(op) != "+":
@@ -257,9 +266,9 @@ def _java_dest(
     return splitter(raw)
 
 
-def _java_collect_consts(scope) -> dict[str, set[str]]:
+def _java_collect_consts(scope, view: Optional[dict] = None) -> dict[str, set[str]]:
     """Names bound once to a string: constants, locals and ``@Value("${key}")`` fields."""
-    found: dict[str, set[str]] = {}
+    found: dict[str, set[str]] = view if view is not None else {}
 
     def add(name: str, value: str) -> None:
         found.setdefault(name, set()).add(value)
@@ -293,6 +302,215 @@ def _java_collect_consts(scope) -> dict[str, set[str]]:
 
     visit(scope)
     return found
+
+
+# -- Java: repository-wide string constants ------------------------------------------------------
+
+_CONST_SKIP_DIRS = frozenset({
+    "node_modules", "build", "target", "out", "dist", "venv", "__pycache__",
+})
+_MAX_CONST_FILES = 100_000
+_MAX_CONST_FILE_BYTES = 1_000_000
+_STRING_WORD = re.compile(rb"\bString\b")
+_STATIC_IMPORT = re.compile(r"import\s+static\s+([\w.]+)\.(\*|\w+)\s*;")
+_PLAIN_IMPORT = re.compile(r"import\s+([\w.]+)\s*;")
+_PACKAGE_DECL = re.compile(r"package\s+([\w.]+)\s*;")
+_STATIC_FINAL = re.compile(r"\b(?:static\b.*\bfinal|final\b.*\bstatic)\b", re.S)
+_JAVA_TYPE_NODES = frozenset({
+    "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
+})
+_JAVA_BODY_NODES = frozenset({
+    "class_body", "interface_body", "enum_body", "enum_body_declarations",
+})
+
+#: ``{(path, mtime_ns, size): [(keys, value or None)]}``, process-wide so every parser instance
+#: of a build reads a constants file at most once per version.
+_CONST_FILE_CACHE: dict[tuple[str, int, int], list[tuple[tuple[str, ...], Optional[str]]]] = {}
+_CONST_FILE_CACHE_LOCK = threading.Lock()
+
+
+class JavaConstIndex:
+    """``static final String`` constants of a repository, by qualified and simple class name.
+
+    A key (``Names.EXCHANGE``, ``Outer.Inner.NAME`` or ``pkg.Names.EXCHANGE``) that is bound to
+    more than one distinct value, or to a value that cannot be read, answers nothing: it is
+    never guessed.
+    """
+
+    def __init__(self) -> None:
+        self._values: dict[str, set[str]] = {}
+        self._poisoned: set[str] = set()
+
+    def add(self, keys, value: Optional[str]) -> None:
+        for key in keys:
+            if value is None:
+                self._poisoned.add(key)
+            else:
+                self._values.setdefault(key, set()).add(value)
+
+    def lookup(self, key: str) -> Optional[set[str]]:
+        if key in self._poisoned:
+            return None
+        return self._values.get(key)
+
+    def __bool__(self) -> bool:
+        return bool(self._values or self._poisoned)
+
+
+def _java_file_constants(root) -> list[tuple[tuple[str, ...], Optional[str]]]:
+    """``(keys, value)`` of each ``static final String`` field (or interface field) of a file."""
+    package = ""
+    for child in root.children:
+        if child.type == "package_declaration":
+            match = _PACKAGE_DECL.search(_text(child))
+            package = match.group(1) if match else ""
+    found: list[tuple[tuple[str, ...], Optional[str]]] = []
+
+    def field(node, chain: list[str], in_interface: bool, local: dict[str, set[str]]) -> None:
+        type_node = node.child_by_field_name("type")
+        if type_node is None or _text(type_node) not in ("String", "java.lang.String"):
+            return
+        modifiers = next((c for c in node.children if c.type == "modifiers"), None)
+        mod_text = _text(modifiers) if modifiers is not None else ""
+        if not in_interface and not _STATIC_FINAL.search(mod_text):
+            return
+        for declarator in node.children:
+            if declarator.type != "variable_declarator":
+                continue
+            name_node = declarator.child_by_field_name("name")
+            init = declarator.child_by_field_name("value")
+            if name_node is None or init is None:
+                continue
+            name = _text(name_node)
+            raw = _java_string(init, local)
+            if raw is not None and _UNKNOWN in raw:
+                raw = None
+            if raw is not None:
+                local[name] = {raw}
+            dotted = ".".join(chain)
+            keys = [f"{chain[-1]}.{name}", f"{dotted}.{name}"]
+            if package:
+                keys.append(f"{package}.{dotted}.{name}")
+            found.append((tuple(dict.fromkeys(keys)), raw))
+
+    def walk(node, chain: list[str], in_interface: bool, local: dict[str, set[str]]) -> None:
+        for child in node.children:
+            if child.type in _JAVA_TYPE_NODES:
+                name_node = child.child_by_field_name("name")
+                if name_node is not None:
+                    walk(
+                        child, chain + [_text(name_node)],
+                        child.type == "interface_declaration", {},
+                    )
+            elif child.type == "field_declaration" and chain:
+                field(child, chain, in_interface, local)
+            elif child.type in _JAVA_BODY_NODES:
+                walk(child, chain, in_interface, local)
+
+    walk(root, [], False, {})
+    return found
+
+
+def build_java_const_index(repo_root, get_parser) -> JavaConstIndex:
+    """Index the string constants of every Java file under *repo_root* (bounded)."""
+    index = JavaConstIndex()
+    parser = get_parser("java") if repo_root is not None else None
+    if parser is None:
+        return index
+    seen = 0
+    for directory, dirs, files in os.walk(str(repo_root)):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _CONST_SKIP_DIRS]
+        for name in files:
+            if not name.endswith(".java"):
+                continue
+            seen += 1
+            if seen > _MAX_CONST_FILES:
+                return index
+            path = os.path.join(directory, name)
+            try:
+                stat = os.stat(path)
+                if stat.st_size > _MAX_CONST_FILE_BYTES:
+                    continue
+                cache_key = (path, stat.st_mtime_ns, stat.st_size)
+                with _CONST_FILE_CACHE_LOCK:
+                    cached = _CONST_FILE_CACHE.get(cache_key)
+                if cached is None:
+                    with open(path, "rb") as handle:
+                        data = handle.read()
+                    cached = []
+                    if _STRING_WORD.search(data) and (b"static" in data or b"interface" in data):
+                        cached = _java_file_constants(parser.parse(data).root_node)
+                    with _CONST_FILE_CACHE_LOCK:
+                        _CONST_FILE_CACHE[cache_key] = cached
+            except (OSError, ValueError):
+                continue
+            for keys, value in cached:
+                index.add(keys, value)
+    return index
+
+
+class _ConstView(dict):
+    """File-local constants that also answer dotted and statically imported names.
+
+    ``get`` looks at the file's own bindings first, then at the repository index: a dotted
+    ``Names.EXCHANGE`` through the file's imports and package, a bare name through its static
+    imports. Several distinct values, or none, answer ``None``.
+    """
+
+    def __init__(self, index: JavaConstIndex, root) -> None:
+        super().__init__()
+        self._index = index
+        self._package = ""
+        self._imports: dict[str, str] = {}
+        self._static: list[tuple[str, str]] = []
+        for child in root.children:
+            text = _text(child)
+            if child.type == "package_declaration":
+                match = _PACKAGE_DECL.search(text)
+                self._package = match.group(1) if match else ""
+            elif child.type == "import_declaration":
+                static = _STATIC_IMPORT.search(text)
+                if static:
+                    self._static.append((static.group(1), static.group(2)))
+                    continue
+                plain = _PLAIN_IMPORT.search(text)
+                if plain:
+                    self._imports[plain.group(1).rsplit(".", 1)[-1]] = plain.group(1)
+
+    def get(self, key, default=None):  # type: ignore[override]
+        local = dict.get(self, key)
+        if local is not None:
+            return local
+        found = self._dotted(key) if "." in key else self._static_name(key)
+        return found if found is not None else default
+
+    def _dotted(self, key: str) -> Optional[set[str]]:
+        head = key.split(".", 1)[0]
+        qualified = self._imports.get(head)
+        if qualified is not None:
+            # ``import pkg.Names;`` says which class ``Names`` is; the repository may not have it.
+            return self._index.lookup(f"{qualified.rsplit('.', 1)[0]}.{key}")
+        if self._package:
+            local = self._index.lookup(f"{self._package}.{key}")
+            if local is not None:
+                return local
+        parts = key.split(".")
+        for width in (len(parts), 3, 2):
+            if width <= len(parts):
+                found = self._index.lookup(".".join(parts[-width:]))
+                if found is not None:
+                    return found
+        return None
+
+    def _static_name(self, name: str) -> Optional[set[str]]:
+        values: set[str] = set()
+        for owner, member in self._static:
+            if member not in ("*", name):
+                continue
+            found = self._index.lookup(f"{owner}.{name}")
+            if found is not None:
+                values |= found
+        return values or None
 
 
 def _ann_name(annotation) -> Optional[str]:
@@ -436,6 +654,19 @@ _FIELD = {
 }
 
 
+def _clean(value: Any) -> Any:
+    """Repository-derived text, control characters stripped and length bounded, at any depth."""
+    from .graph import _sanitize_name  # graph is heavy; import on first edge
+
+    if isinstance(value, str):
+        return _sanitize_name(value)
+    if isinstance(value, dict):
+        return {_clean(k): _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    return value
+
+
 def _edge(
     out: list,
     *,
@@ -490,10 +721,11 @@ def _edge(
                 extra[key] = value
     if extra_fields:
         extra.update(extra_fields)
+    extra = _clean(extra)
     out.append(EdgeInfo(
         kind="CONSUMES" if direction == "listen" else "PRODUCES",
         source=source,
-        target=f"{_PREFIX[service]}{name}",
+        target=f"{_PREFIX[service]}{_clean(name)}",
         file_path=file_path,
         line=line,
         extra=extra,
@@ -520,6 +752,52 @@ def _enclosing_class(node):
             return parent
         parent = parent.parent
     return None
+
+
+def _rabbit_binding_edges(binding, line_node, consts, source, file_path, out) -> int:
+    """One consume edge on the exchange of a ``@QueueBinding`` per (exchange, key) pair."""
+    queue_name: Optional[str] = None
+    for queue_ann in _nested_annotations(binding, "Queue"):
+        nodes = _ann_value_nodes(queue_ann, ("value", "name"))
+        if nodes:
+            queue_name = _java_dest(nodes[0], consts, _plain_name).name or None
+            break
+    exchanges: list[Dest] = []
+    for node in _ann_value_nodes(binding, ("exchange",)):
+        if node.type in ("annotation", "marker_annotation"):
+            inner = _ann_value_nodes(node, ("value", "name"))
+            node = inner[0] if inner else None
+        if node is not None:
+            exchanges.append(_java_dest(node, consts, _plain_name))
+    keys = [_java_dest(n, consts, _plain_name) for n in _ann_value_nodes(binding, ("key",))]
+    if not keys:
+        keys = [Dest("")]  # a fanout or headers binding states no key
+    count = 0
+    seen: set[tuple[Optional[str], Optional[str], Optional[str]]] = set()
+    for exchange in exchanges:
+        if exchange.name == "":
+            continue  # the default exchange is every queue's own name, already an edge
+        for key in keys:
+            marker = (exchange.name, key.name, key.expr)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            fields: dict[str, Any] = {"binding_key": key.name}
+            if key.unresolved:
+                fields["binding_key_unresolved"] = True
+                if key.config_key:
+                    fields["binding_key_config_key"] = key.config_key
+                if key.expr:
+                    fields["binding_key_expr"] = key.expr[:_MAX_EXPR]
+            if queue_name is not None:
+                fields["queue"] = queue_name
+            _edge(
+                out, service="rabbitmq", direction="listen", dest=exchange, source=source,
+                file_path=file_path, line=line_node.start_point[0] + 1,
+                resolution="rabbit_listener_binding", field="exchange", extra_fields=fields,
+            )
+            count += 1
+    return count
 
 
 def _java_listener_edges(method_node, consts, source, file_path, out) -> tuple[int, str | None]:
@@ -596,6 +874,11 @@ def _java_listener_edges(method_node, consts, source, file_path, out) -> tuple[i
             emit("rabbitmq", node, line_node, "rabbit_listener", _plain_name)
         if not nodes:
             emit_unnamed("rabbitmq", line_node, "rabbit_listener")
+        for binding in _nested_annotations(rabbit_ann, "QueueBinding"):
+            bound = _rabbit_binding_edges(binding, line_node, consts, source, file_path, out)
+            if bound:
+                listener_service = "rabbitmq"
+                count += bound
 
     ann = by_name.get("StreamListener")
     if ann is not None:
@@ -1060,7 +1343,8 @@ def _python_edges(function_node, source, file_path, out) -> int:
 #: ``extra.resolution`` of a consumer edge that a container invokes (a listener annotation);
 #: any other consumer edge is a method that polls the queue through an SDK receive call.
 LISTENER_RESOLUTIONS = frozenset({
-    "sqs_listener", "jms_listener", "rabbit_listener", "stream_listener", "kafka_listener",
+    "sqs_listener", "jms_listener", "rabbit_listener", "rabbit_listener_binding",
+    "stream_listener", "kafka_listener",
 })
 
 
@@ -1095,6 +1379,7 @@ def emit_messaging_edges(
     language: str,
     edges: list,
     method_extra: dict,
+    const_index: Optional[JavaConstIndex] = None,
 ) -> int:
     """Append the messaging edges of one function or method to *edges*; return their count."""
     out: list = []
@@ -1102,7 +1387,13 @@ def emit_messaging_edges(
         if node.type not in ("method_declaration", "constructor_declaration"):
             return 0
         scope = _enclosing_class(node) or node
-        consts = _java_collect_consts(scope)
+        view: Optional[dict] = None
+        if const_index:
+            root = node
+            while root.parent is not None:
+                root = root.parent
+            view = _ConstView(const_index, root)
+        consts = _java_collect_consts(scope, view)
         var_types = _java_var_types(node)
         listeners, listener_service = _java_listener_edges(node, consts, source, file_path, out)
         calls = _java_call_edges(node, consts, var_types, source, file_path, out)
