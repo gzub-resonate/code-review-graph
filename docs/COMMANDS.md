@@ -494,6 +494,30 @@ stale.
 Every `next_tool_suggestions` list, here and in the other tools, names tools as
 the server registers them, ending in `_tool`.
 
+#### Scope of the change tools
+
+`detect_changes_tool`, `get_review_context_tool`, `get_impact_radius_tool`,
+`get_affected_flows_tool` and `pr_blast_radius_tool` follow one rule. A call that names no `pr`,
+`head`, `base` or `changed_files` reviews the **last commit**: `HEAD~1..HEAD`, or the whole commit
+(from the empty tree) in a one-commit repository. This is also what a shared `serve --multi-repo`
+server, which holds only each repository's default branch, answers. The reply says so:
+
+```json
+{
+  "scope": {"kind": "last_commit", "base": "<sha>", "head": "<sha>", "files_considered": 33,
+            "reason": "no pr/head/base/changed_files given; reviewing the last commit",
+            "hint": "To widen or change the scope, pass pr=<number>, ..."},
+  "note": "Scope: last commit (<sha>..<sha>, 33 file(s)); no pr/head/base/changed_files given; ..."
+}
+```
+
+`files_considered` shows the size of a large last commit; the usual `max_results`, `max_files`,
+`max_flows` and `detail_level` limits still bound the payload. To widen the scope pass `pr`, `head`
+(with `base` for a stacked pull request), `base` for a larger range such as `base="HEAD~20"`, or
+`changed_files`. A named change reports `scope.kind: "explicit"` with a `source` (`changed_files`,
+`base`, `pull_request` or `head`) and no hint. When no commit range can be resolved (no git
+history, or no commit yet) the reply is `status: "error"` and the message carries the same hint.
+
 #### `get_impact_radius_tool`
 ```
 changed_files: list[str] | None  # Auto-detected from VCS

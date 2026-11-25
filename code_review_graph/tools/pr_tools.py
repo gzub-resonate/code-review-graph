@@ -9,8 +9,19 @@ from typing import Any, Optional
 from .. import feign_links as fl
 from .. import pr_blast_radius as pbr
 from ..endpoint_index import attach as attach_endpoints
+from ..errors import ChangeDiscoveryError
 from ..graph import _sanitize_name
-from ._common import _get_store, _validate_positive_int
+from ..incremental import get_changed_files
+from ._common import _error_response, _get_store, _validate_positive_int
+from .change_scope import (
+    KIND_LAST_COMMIT,
+    LAST_COMMIT_REASON,
+    build_scope,
+    record_explicit_scope,
+    record_scope,
+    resolve_last_commit,
+    scoped,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +148,7 @@ def _external_callers(
     return rows, info
 
 
+@scoped
 def pr_blast_radius_func(
     pr: int | None = None,
     head: str | None = None,
@@ -160,8 +172,10 @@ def pr_blast_radius_func(
         head: A ref or commit to read the new files from, when no ``pr`` is given.
             A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
         base: The branch the pull request merges into. Default: the remote's default
-            branch. A stacked pull request should name its parent branch; the result
-            then also says how many files differ from the default branch.
+            branch. With no ``pr`` and no ``head`` the last commit (HEAD~1..HEAD) is used
+            and ``scope`` says so; ``base`` then widens the range. A stacked pull request
+            should name its parent branch; the result then also says how many files differ
+            from the default branch.
         depth: Hops the reach walk follows from a changed symbol (default 3, at most 6).
         include_external: Join the affected endpoints to the client calls of the other
             registered repos (default True).
@@ -169,11 +183,53 @@ def pr_blast_radius_func(
     """
     _validate_positive_int(depth, "depth")
     depth = min(depth, _MAX_DEPTH)
-    if pr is None and not head:
-        raise ValueError("give a pull request number (pr) or a head ref (head)")
     store, root = _get_store(repo_root)
+    head_given = bool(head)
     try:
+        if pr is None and not head:
+            # No pull request named: review the last commit, as every change tool does.
+            parent, head, scope_notes = resolve_last_commit(root)
+            if base is None and scope_notes:
+                # No parent commit to compare with, so there is no base to read the old
+                # files from; say so instead of guessing.
+                files = get_changed_files(root, parent, require_vcs=True)
+                record_scope(build_scope(
+                    KIND_LAST_COMMIT, base=parent, head=head, files_considered=len(files),
+                    reason=LAST_COMMIT_REASON + "; reviewing the last commit",
+                    analysed=False,
+                ))
+                return {
+                    "status": "ok",
+                    "summary": (
+                        f"Nothing to compare: {scope_notes[0]} A blast radius needs a parent "
+                        "commit; use get_impact_radius_tool or pass changed_files, pr or head."
+                    ),
+                    "already_merged": False, "files": [], "total_files": 0,
+                    "notes": scope_notes,
+                }
+            last_commit = base is None
+            base = base or parent
+        else:
+            last_commit = False
         loaded = load_pull_request(store, str(root), pr, head, base, depth)
+        if last_commit:
+            # The parent commit is not a branch the caller named, so the "stacked pull
+            # request" comparison with the default branch does not apply.
+            loaded["notes"] = [
+                n for n in loaded["notes"] if not n.startswith("Compared with the base branch")
+            ]
+        if not last_commit:
+            source = "pull_request" if pr is not None else ("head" if head_given else "base")
+            record_explicit_scope(
+                source, len(loaded["changes"]), base=loaded["base_ref"],
+                head=loaded["head_sha"],
+            )
+        else:
+            record_scope(build_scope(
+                KIND_LAST_COMMIT, base=loaded["base_ref"], head=loaded["head_sha"],
+                files_considered=len(loaded["changes"]),
+                reason=LAST_COMMIT_REASON + "; reviewing the last commit",
+            ))
         if loaded["found"] is None:
             return {
                 "status": "ok",
@@ -188,6 +244,8 @@ def pr_blast_radius_func(
         )
     except pbr.PullRequestError as exc:
         return {"status": "error", "error": _sanitize_name(str(exc))}
+    except ChangeDiscoveryError as exc:
+        return _error_response(str(exc))
     finally:
         store.close()
 

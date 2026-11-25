@@ -12,19 +12,24 @@ one node:
   trigger), so ``listeners_of`` and execution flows start from it,
 * a producer (``sendMessage``, ``publish``, ``convertAndSend``, ``basic_publish``, ...) gets
   a ``PRODUCES`` edge,
+* an SQS ``deleteMessage``/``deleteMessageBatch`` is the consuming side and gets a ``CONSUMES``
+  edge with ``access: "delete"``,
 
 the same kinds the Kafka edges use. Targets are ``external:aws-sqs:<queue>``,
 ``external:aws-sns:<topic>``, ``external:rabbitmq:<exchange or queue>`` and
 ``external:jms:<destination>``. ``extra`` carries ``service``, ``direction``
 (``listen``/``publish``), the name under ``queue``/``topic``/``exchange`` (plus
-``routing_key``) and the ``resolution`` rule.
+``routing_key``) and the ``resolution`` rule. An SQS or SNS edge also carries ``operation``
+(snake case), ``sdk_operation`` (``SendMessage``, ``ReceiveMessage``, ``DeleteMessage``,
+``Publish`` ...) and ``access`` (``write``, ``read``, ``delete``).
 
 A name is taken only from what the source states: a string literal, an ARN or URL (its last
 segment), a constant of the same file, or a ``@Value("${key}")`` field. A property value is
 never read, so a ``${key}`` placeholder, a variable, an environment lookup or a computed string
 cannot be resolved: the edge is still written, to ``<prefix>:?unresolved`` (no real resource has
 that name, so it never joins), with ``unresolved: true`` and what is known (``config_key``,
-``env_var``, ``expr``).
+``env_var``, ``expr``, and ``config_getter`` for a ``props.getQueueName()`` call on a typed
+bean). ``aws_config_names`` later fills in ``resolved_names`` from the configuration files.
 
 Only the typed receivers and method names listed below produce an edge. Nothing is guessed from
 a method name alone, except pika's ``basic_publish``/``basic_consume``, which are specific
@@ -36,6 +41,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from .aws_sdk_calls import classify_access, sdk_operation_name
 from .config_keys import normalize_spring_config_key
 
 UNRESOLVED_NAME = "?unresolved"
@@ -70,11 +76,20 @@ _RECEIVE_METHODS = frozenset({
     "receiveMessage", "receive", "receiveAsync", "receiveAndConvert", "receiveSelected",
     "receiveSelectedAndConvert",
 })
+#: SQS calls that remove a message: the consuming side, recorded as a ``delete`` access.
+_DELETE_METHODS = frozenset({"deleteMessage", "deleteMessageBatch"})
+#: Java method -> snake case SDK operation, where it differs from the method name.
+_JAVA_OPERATION = {
+    "sendMessageAsync": "send_message", "send": "send_message", "sendAsync": "send_message",
+    "receive": "receive_message", "receiveAsync": "receive_message",
+    "sendNotification": "publish", "convertAndSend": "send_message",
+}
 #: Which of the above each service really has; the rest are ignored for that service.
 _SERVICE_METHODS: dict[str, frozenset[str]] = {
     "sqs": frozenset({
         "sendMessage", "sendMessageBatch", "sendMessageAsync", "send", "sendAsync",
-        "convertAndSend", "receiveMessage", "receive", "receiveAsync",
+        "convertAndSend", "receiveMessage", "receive", "receiveAsync", "deleteMessage",
+        "deleteMessageBatch",
     }),
     "sns": frozenset({"publish", "publishBatch", "sendNotification", "convertAndSend"}),
     "rabbitmq": frozenset({
@@ -105,7 +120,7 @@ _PLACEHOLDER = re.compile(r"\$\{\s*([^}:\s]+)\s*(?::[^}]*)?\}")
 class Dest:
     """One destination name as far as the source states it."""
 
-    __slots__ = ("name", "config_key", "env_var", "expr")
+    __slots__ = ("name", "config_key", "env_var", "expr", "getter")
 
     def __init__(
         self,
@@ -113,7 +128,9 @@ class Dest:
         config_key: Optional[str] = None,
         env_var: Optional[str] = None,
         expr: Optional[str] = None,
+        getter: Optional[tuple[str, str]] = None,
     ) -> None:
+        self.getter = getter
         self.name = name
         self.config_key = config_key
         self.env_var = env_var
@@ -122,6 +139,10 @@ class Dest:
     @property
     def unresolved(self) -> bool:
         return self.name is None
+
+
+def _snake_case(name: str) -> str:
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
 
 
 def _text(node) -> str:
@@ -193,11 +214,43 @@ def _java_string(node, consts: dict[str, set[str]], depth: int = 0) -> Optional[
     return None
 
 
-def _java_dest(node, consts: dict[str, set[str]], splitter) -> Dest:
+_BEAN_GETTER = re.compile(r"(?:get|is)([A-Z]\w*)")
+
+
+def _java_getter(node, var_types: Optional[dict[str, str]]) -> Optional[tuple[str, str]]:
+    """``(declared type, property)`` of a bean getter call such as ``props.getQueueName()``."""
+    if not var_types or node.type != "method_invocation" or _args(node):
+        return None
+    name = node.child_by_field_name("name")
+    owner = node.child_by_field_name("object")
+    if name is None or owner is None:
+        return None
+    match = _BEAN_GETTER.fullmatch(_text(name))
+    if match is None:
+        return None
+    if owner.type == "field_access":
+        target = owner.child_by_field_name("object")
+        field = owner.child_by_field_name("field")
+        owner = field if target is not None and target.type == "this" else None
+    if owner is None or owner.type != "identifier":
+        return None
+    declared = var_types.get(_text(owner))
+    if not declared:
+        return None
+    prop = match.group(1)
+    return declared, prop[0].lower() + prop[1:]
+
+
+def _java_dest(
+    node, consts: dict[str, set[str]], splitter, var_types: Optional[dict[str, str]] = None,
+) -> Dest:
     raw = _java_string(node, consts)
     if raw is None:
         expr = " ".join(_text(node).split())[:_MAX_EXPR]
         key = None
+        getter = _java_getter(node, var_types)
+        if getter:
+            return Dest(None, expr=expr, getter=getter)
         # ``@Value("${key}") String queue`` is stored as a placeholder constant, so an
         # unresolved identifier here never has one; a literal with one is handled below.
         return Dest(None, config_key=key, expr=expr)
@@ -396,6 +449,7 @@ def _edge(
     field: Optional[str] = None,
     routing_key: Optional[Dest] = None,
     extra_fields: Optional[dict[str, Any]] = None,
+    operation: Optional[str] = None,
 ) -> None:
     from .parser import EdgeInfo  # parser imports this module
 
@@ -414,8 +468,21 @@ def _edge(
             extra["routing_key_unresolved"] = True
             if routing_key.config_key:
                 extra["routing_key_config_key"] = routing_key.config_key
+    if service in ("sqs", "sns"):
+        if operation is None:
+            operation = (
+                "receive_message" if direction == "listen"
+                else "send_message" if service == "sqs" else "publish"
+            )
+        extra["operation"] = operation
+        extra["sdk_operation"] = sdk_operation_name(operation)
+        extra["access"] = classify_access(service, operation)
     if dest.unresolved:
         extra["unresolved"] = True
+        if dest.getter:
+            extra["config_getter"] = {
+                "type": dest.getter[0][:128], "property": dest.getter[1][:128],
+            }
         for key, value in (
             ("config_key", dest.config_key), ("env_var", dest.env_var), ("expr", dest.expr),
         ):
@@ -595,7 +662,10 @@ def _java_call_edges(method_node, consts, var_types, source, file_path, out) -> 
         method = _text(name_node)
         if method not in _SERVICE_METHODS[service]:
             return 0
-        direction = "listen" if method in _RECEIVE_METHODS else "publish"
+        direction = "listen" if method in _RECEIVE_METHODS | _DELETE_METHODS else "publish"
+        operation = _JAVA_OPERATION.get(method) or _snake_case(method)
+        if method == "convertAndSend" and service == "sns":
+            operation = "publish"
         line = invocation.start_point[0] + 1
         args = _args(invocation)
         resolution = f"{service}_client_call"
@@ -614,14 +684,14 @@ def _java_call_edges(method_node, consts, var_types, source, file_path, out) -> 
                 _edge(
                     out, service=service, direction=direction,
                     dest=Dest(None, expr="<no destination>"), source=source,
-                    file_path=file_path, line=line, resolution=resolution,
+                    file_path=file_path, line=line, resolution=resolution, operation=operation,
                 )
                 return 1
             for node in dests:
                 _edge(
                     out, service=service, direction=direction,
-                    dest=_java_dest(node, consts, splitter), source=source,
-                    file_path=file_path, line=line, resolution=resolution,
+                    dest=_java_dest(node, consts, splitter, var_types), source=source,
+                    file_path=file_path, line=line, resolution=resolution, operation=operation,
                 )
             return len(dests)
 
@@ -685,7 +755,10 @@ def _java_call_edges(method_node, consts, var_types, source, file_path, out) -> 
 
 _PY_SERVICES = frozenset({"sqs", "sns"})
 _PY_SQS_PUBLISH = frozenset({"send_message", "send_message_batch", "send_messages"})
-_PY_SQS_LISTEN = frozenset({"receive_message", "receive_messages"})
+_PY_SQS_LISTEN = frozenset({
+    "receive_message", "receive_messages", "delete_message", "delete_message_batch",
+    "delete_messages",
+})
 _PY_SNS_PUBLISH = frozenset({"publish", "publish_batch"})
 _PY_ENV = re.compile(
     r"""(?:environ(?:\.get)?|getenv)\W+['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
@@ -953,6 +1026,7 @@ def _python_edges(function_node, source, file_path, out) -> int:
             _edge(
                 out, service=service, direction=direction, dest=bound, source=source,
                 file_path=file_path, line=line, resolution="boto3_resource_call",
+                operation=method,
             )
             count += 1
             return
@@ -973,7 +1047,7 @@ def _python_edges(function_node, source, file_path, out) -> int:
         )
         _edge(
             out, service=service, direction=direction, dest=dest, source=source,
-            file_path=file_path, line=line, resolution="boto3_client_call",
+            file_path=file_path, line=line, resolution="boto3_client_call", operation=method,
         )
         count += 1
 

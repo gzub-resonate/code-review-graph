@@ -163,26 +163,6 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
     return repo_root if repo_root else _default_repo_root
 
 
-def _require_a_named_change(
-    changed_files: Optional[list[str]], pr: Optional[int], head: Optional[str],
-) -> None:
-    """Refuse a review that names no change when the server has no working tree to diff.
-
-    ``serve --multi-repo`` serves checkouts of each default branch. A call with no ``pr``,
-    ``head`` or ``changed_files`` would diff the checkout's last commit and present that as
-    the review, so it is refused with what to pass instead.
-    """
-    if _multi_repo and pr is None and not head and changed_files is None:
-        raise ToolError(
-            "This server holds each repository's default branch, so there is no working tree "
-            "to diff and a call without a change would review the last commit on that branch. "
-            "Pass pr=<number> (or head=<ref or commit>, with base=<parent branch> for a "
-            "stacked pull request), or changed_files=[...]. "
-            'Example: detect_changes_tool(repo_root="/data/repos/<repo>", pr=123) or '
-            'detect_changes_tool(repo_root="/data/repos/<repo>", changed_files=["src/app.py"]).'
-        )
-
-
 def _registered_repo_root(repo_root: Optional[str]) -> str:
     """Return the registered repository a ``--multi-repo`` call names.
 
@@ -595,6 +575,13 @@ async def get_impact_radius_tool(
     ``unresolved_call_sites`` counts call sites that name a changed symbol but
     were never bound to it, so an empty radius is not mistaken for proof.
 
+    Scope: with no ``pr``, ``head``, ``base`` or ``changed_files`` this reviews the last
+    commit (HEAD~1..HEAD; the whole commit in a one-commit repository). The reply carries
+    a ``scope`` object (``kind``, ``base``, ``head``, ``files_considered``, ``reason``) and
+    a ``note`` on how to widen it: pass ``pr``, ``head``, ``base`` (for example
+    ``base="HEAD~20"``) or ``changed_files``. A named change reports ``scope.kind:
+    "explicit"``. Every change tool follows this rule.
+
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         max_depth: Number of hops to traverse in the dependency graph. Default: 2.
@@ -748,6 +735,13 @@ async def get_review_context_tool(
 
     Combines impact analysis with source snippets and review guidance.
     Use this for comprehensive code reviews.
+
+    Scope: with no ``pr``, ``head``, ``base`` or ``changed_files`` this reviews the last
+    commit (HEAD~1..HEAD; the whole commit in a one-commit repository). The reply carries
+    a ``scope`` object (``kind``, ``base``, ``head``, ``files_considered``, ``reason``) and
+    a ``note`` on how to widen it: pass ``pr``, ``head``, ``base`` (for example
+    ``base="HEAD~20"``) or ``changed_files``. A named change reports ``scope.kind:
+    "explicit"``. Every change tool follows this rule.
 
     Args:
         changed_files: Files to review. Auto-detected from git diff if omitted.
@@ -1106,6 +1100,13 @@ async def get_affected_flows_tool(
     Useful during code review to understand which user-facing or critical paths
     are impacted by a change. Auto-detects changed files from git if not specified.
 
+    Scope: with no ``pr``, ``head``, ``base`` or ``changed_files`` this reviews the last
+    commit (HEAD~1..HEAD; the whole commit in a one-commit repository). The reply carries
+    a ``scope`` object (``kind``, ``base``, ``head``, ``files_considered``, ``reason``) and
+    a ``note`` on how to widen it: pass ``pr``, ``head``, ``base`` (for example
+    ``base="HEAD~20"``) or ``changed_files``. A named change reports ``scope.kind:
+    "explicit"``. Every change tool follows this rule.
+
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
@@ -1336,11 +1337,13 @@ async def detect_changes_tool(
         overall ``risk_score`` is the higher of that and the changed symbols' score,
         and ``risk_breakdown`` shows both.
 
-        On a ``serve --multi-repo`` server a call naming no pull request, head or
-        changed files is refused, since the checkout has no working tree to diff.
+        Scope: a call that names no ``pr``, ``head``, ``base`` or ``changed_files`` reviews
+        the last commit (HEAD~1..HEAD; the whole commit in a one-commit repository), and the
+        reply carries a ``scope`` object (``kind: "last_commit"``, ``base``, ``head``,
+        ``files_considered``, ``reason``) and a ``note`` saying how to widen it. A named
+        change reports ``scope.kind: "explicit"``. Every change tool follows this rule.
     """
     root = _resolve_repo_root(repo_root)
-    _require_a_named_change(changed_files, pr, head)
     return await _offload(
         "detect_changes_tool",
         lambda: detect_changes_func(
@@ -2020,12 +2023,20 @@ async def pr_blast_radius_tool(
     changed members no test names. A stacked pull request should pass its parent branch as
     ``base``; the result then also says how many files differ from the default branch.
 
+    Scope: with no ``pr`` and no ``head`` this reviews the last commit (HEAD~1..HEAD), and
+    ``base`` widens the range (for example ``base="HEAD~20"``). The reply carries a
+    ``scope`` object (``kind``, ``base``, ``head``, ``files_considered``, ``reason``) and a
+    ``note`` on how to widen it. A named pull request or head reports ``scope.kind:
+    "explicit"``. In a one-commit repository there is no parent to compare with and the
+    reply says so. Every change tool follows this rule.
+
     Args:
         pr: A pull request number. The server fetches ``refs/pull/<pr>/head`` from the
             checkout's ``origin`` into a temporary repository that is removed afterwards.
         head: A ref or commit to read the new files from, when no ``pr`` is given.
             A full commit SHA, or a branch the checkout lacks, is fetched from origin first.
         base: The branch the pull request merges into. Default: the remote's default branch.
+            With no ``pr`` and no ``head`` it is the start of the range ending at HEAD.
         depth: Hops the reach walk follows from a changed symbol. Default: 3, at most 6.
         include_external: Join the affected endpoints to the client calls of the other
             registered repos. Default: True.

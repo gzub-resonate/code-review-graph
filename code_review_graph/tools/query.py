@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..analysis import is_generated_file
+from ..aws_sdk_links import merge_resolved_names
 from ..config_keys import normalize_spring_config_key
 from ..constants import (
     IMPORT_CONTEXT_KEY,
@@ -63,6 +64,7 @@ from ._common import (
     _unmatched_file_warning,
     _validate_positive_int,
 )
+from .change_scope import discover_changes_with_scope, record_explicit_scope, scoped
 from .query_extras import (
     AUTO_RESOLVE_PATTERNS,
     ENDPOINT_DIRECTIONS,
@@ -731,15 +733,18 @@ def _query_external_targets(
     rows = store._conn.execute(
         "SELECT target_qualified, kind, source_qualified, "
         "COALESCE(json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
-        "'$.unresolved'), 0) "
+        "'$.unresolved'), 0), "
+        "CASE WHEN json_valid(extra) THEN json_extract(extra, '$.resolved_names') END "
         "FROM edges WHERE substr(target_qualified, 1, ?) = ?",
         (len(like_prefix), like_prefix),
     ).fetchall()
     grouped: dict[str, dict[str, Any]] = {}
-    for target, kind, source, unresolved in rows:
+    for target, kind, source, unresolved, resolved_names in rows:
         entry = grouped.setdefault(
-            target, {"kinds": {}, "sources": {}, "unresolved": False},
+            target, {"kinds": {}, "sources": {}, "unresolved": False, "names": {}},
         )
+        if resolved_names:
+            merge_resolved_names(entry["names"], resolved_names)
         entry["kinds"][kind] = entry["kinds"].get(kind, 0) + 1
         entry["sources"][source] = True
         if unresolved:
@@ -760,6 +765,7 @@ def _query_external_targets(
             "target": target, "family": family, "edge_kinds": entry["kinds"],
             "source_count": len(entry["sources"]), "sources": sources,
             "unresolved": entry["unresolved"],
+            **({"names": entry["names"]} if entry["names"] else {}),
         })
     total = len(ordered)
     scope = prefix or "external:"
@@ -878,6 +884,7 @@ def _query_route(
     return response
 
 
+@scoped
 def get_impact_radius(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
@@ -942,7 +949,11 @@ def get_impact_radius(
     store, root = _get_store(repo_root)
     try:
         if changed_files is None:
-            changed_files, base = discover_review_changes(root, base)
+            changed_files, base = discover_changes_with_scope(
+                root, base, discover=discover_review_changes,
+            )
+        else:
+            record_explicit_scope("changed_files", len(changed_files))
 
         if cursor and not changed_files:
             raise CursorError(

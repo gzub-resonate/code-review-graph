@@ -3,7 +3,7 @@
 After the core Tree-sitter parse (full_build or incremental_update), five
 post-processing steps must run to populate derived tables:
 
-1. Resolve evidence-backed bare edge endpoints
+1. Resolve evidence-backed bare edge endpoints (and AWS names read from Spring config)
 2. Compute node signatures
 3. Sync the FTS5 search index (per-file delta, or a full rebuild)
 4. Trace execution flows
@@ -61,6 +61,7 @@ def run_post_processing(
     warnings: list[str] = []
 
     _resolve_bare_endpoints(store, result, warnings)
+    _resolve_config_names(store, result, warnings)
     _compute_signatures(store, result, warnings)
     _sync_fts_index(store, result, warnings, changed_files)
     _trace_flows(store, result, warnings)
@@ -102,6 +103,21 @@ def _resolve_bare_endpoints(
         warnings.append(
             f"Call-target resolution failed: {type(e).__name__}: {e}"
         )
+
+
+def _resolve_config_names(
+    store: GraphStore,
+    result: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    """Record per-profile resource names for AWS edges whose name lives in Spring config."""
+    from .aws_config_names import resolve_config_names
+
+    try:
+        result["config_names"] = resolve_config_names(store._conn)
+    except (sqlite3.Error, OSError, ValueError) as e:
+        logger.warning("Config name resolution failed: %s", e)
+        warnings.append(f"Config name resolution failed: {type(e).__name__}: {e}")
 
 
 def _compute_signatures(

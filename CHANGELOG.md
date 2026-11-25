@@ -27,6 +27,18 @@
   implementations only the interface edge remains; injected fields keep their `@Qualifier`,
   `@Primary` and bean-name resolution.
 
+- The change tools share one rule for a call that names no change: `detect_changes_tool`,
+  `get_review_context_tool`, `get_impact_radius_tool`, `get_affected_flows_tool` and
+  `pr_blast_radius_tool` review the last commit (`HEAD~1..HEAD`; the whole commit, from the empty
+  tree, in a one-commit repository) and label it. The reply carries a `scope` object (`kind`
+  `last_commit`, `base`, `head`, `files_considered`, `reason`, `hint`) and a `note` with one shared
+  hint: pass `pr`, `head`, `base` (for example `base="HEAD~20"`) or `changed_files` to widen it. A
+  named change reports `scope.kind: "explicit"` and behaves as before. Where a call used to
+  fail or silently differ (`detect_changes_tool` on a `serve --multi-repo` server refused it,
+  `pr_blast_radius_tool` required a `pr` or `head`, `get_affected_flows_tool` did not say what it
+  looked at), it now returns the labelled result. A repository with no commit or no git history
+  still answers with an error, which carries the same hint. In a one-commit repository
+  `pr_blast_radius_tool` has no parent to compare with and says so (`scope.analysed: false`).
 
 - `query_graph_tool` pattern `endpoints`: lists `Endpoint` nodes as one compact line each
   (method, path, owner, file:line, direction) with `direction_counts`, filtered by an optional
@@ -63,6 +75,31 @@
   carries `triggered_by`. A reference to a resource in another file of the same directory is named
   at query time; one that cannot be named from the files (a name taken from a variable) is left
   unresolved. No value is stored.
+
+- AWS resource names held in Spring configuration are resolved per profile. After every build or
+  update, an unresolved bucket, queue or topic edge (a `@Value("${key}")` field, or a bean getter
+  such as `props.getQueueName()` on an SQS or SNS call) gets `resolved_names`
+  (`{"default": ..., "dev": ..., "prod": ...}`) read from `application`/`bootstrap` `.yml`,
+  `.yaml` and `.properties` files, their `-<profile>` variants and multi-document files
+  (`spring.config.activate.on-profile`). `${ENV_VAR:default}` stores the default; with no default
+  the profile stays unresolved and `env_placeholder` names the variable. `cross_repo_requests_tool`
+  `origin="awssdk"` joins each profile's name to Terraform declarations by exact equality (`names`,
+  `matched_profiles`; SQS and SNS publish and listen edges are now rows too), and `query_graph`
+  `external_targets` shows the names. Security policy: a value is stored only when it names an AWS
+  resource at a call (bucket, queue, topic, table, rule, function, stream); keys that look like
+  secrets are masked (`names_masked`); URLs and ARNs are reduced to the resource name; values over
+  128 characters, with whitespace or an `@`, or outside `[A-Za-z0-9._:/${}-]` are dropped; no other
+  configuration value is stored. This changes what a build writes: rebuild graphs after upgrading.
+  `bootstrap.*` files are now indexed as Spring configuration.
+- SQS and SNS edges (Java, Python) carry `operation`, `sdk_operation` and `access`, and an SQS
+  `deleteMessage`/`deleteMessageBatch` is recorded as a `CONSUMES` edge with `access: "delete"`;
+  S3 and other SDK edges carry `sdk_operation` (`PutObject`, `GetObject`, `DeleteObjects` ...).
+
+### Changed
+
+- `access` on AWS SDK edges now distinguishes `delete` (`delete_*`, `purge_*`), `list`
+  (`list_*`) and `admin` (`create_*`, `set_*`, tagging, policy and configuration changes) from
+  `read` and `write`; `invoke` and `unknown` are unchanged.
 
 ### Fixed
 

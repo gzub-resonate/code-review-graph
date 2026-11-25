@@ -211,7 +211,9 @@ def test_mcp_one_commit_repo_says_so_in_the_summary(one_commit: Path) -> None:
     result = detect_changes_func(repo_root=str(one_commit))
 
     assert result["status"] == "ok", result
-    assert result["summary"].startswith(f"Note: {ONE_COMMIT_NOTE}")
+    # The default scope is the last commit; in a one-commit repository that is all of it.
+    assert result["summary"].startswith("Note: this repository has one commit;")
+    assert result["scope"]["kind"] == "last_commit"
 
 
 # --- new files are reviewed whole ---------------------------------------------
