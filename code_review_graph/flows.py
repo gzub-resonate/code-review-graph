@@ -377,7 +377,7 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     # Java Spring
     re.compile(r"(Get|Post|Put|Delete|Patch|RequestMapping)Mapping", re.IGNORECASE),
     re.compile(r"(Scheduled|EventListener|Bean|Configuration)", re.IGNORECASE),
-    re.compile(r"(KafkaListener|RabbitListener|JmsListener)", re.IGNORECASE),
+    re.compile(r"(KafkaListener|RabbitListener|JmsListener|StreamListener)", re.IGNORECASE),
     # AWS SQS / RabbitMQ listeners are invoked by their container, not by code.
     re.compile(r"(SqsListener|RabbitHandler)", re.IGNORECASE),
     # Spring web error handlers, advice classes and bean lifecycle callbacks.
@@ -713,9 +713,18 @@ def _add_asl_edges(store: GraphStore, adj: FlowAdjacency) -> None:
 
 
 def _flow_name(entry: GraphNode) -> str:
-    """The flow's name: the machine for a state machine's start state, else the entry's name."""
+    """The flow's name.
+
+    A state machine's start state is named after the machine; a Java method after its
+    class (``OrderController.list``), because a bare ``list`` or ``handle`` names dozens of
+    unrelated flows; anything else after the entry itself.
+    """
     machine = entry.extra.get("state_machine") if entry.language == "asl" else None
-    return _sanitize_name(machine if isinstance(machine, str) and machine else entry.name)
+    if isinstance(machine, str) and machine:
+        return _sanitize_name(machine)
+    if entry.language == "java" and entry.parent_name:
+        return _sanitize_name(f"{entry.parent_name}.{entry.name}")
+    return _sanitize_name(entry.name)
 
 
 def detect_entry_points(
@@ -1262,6 +1271,185 @@ def incremental_trace_flows(
 
 
 # ---------------------------------------------------------------------------
+# Entry kinds, schedules, queues and duplicate groups
+# ---------------------------------------------------------------------------
+
+#: How a flow starts. ``http``: a route handler; ``scheduler``: a ``@Scheduled`` method;
+#: ``queue_listener``: a listener annotation, or a worker that polls a queue; ``event``: an
+#: ``@EventListener``; ``main``: a ``main`` method; ``other``: anything else.
+ENTRY_KINDS = ("http", "scheduler", "queue_listener", "event", "main", "other")
+
+_MAX_ROUTES = 3
+
+
+def _json_dict(raw: object) -> dict:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) and raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _queue_triggers(store: GraphStore) -> dict[int, list[dict]]:
+    """Queue-trigger edges by the node id of the method that consumes: target, via, line."""
+    rows = store._conn.execute(
+        "SELECT n.id AS node_id, e.target_qualified, e.extra FROM edges e "
+        "JOIN nodes n ON n.qualified_name = e.source_qualified "
+        "WHERE e.kind = 'HANDLES' AND json_valid(e.extra) "
+        "AND json_extract(e.extra, '$.trigger') = 'queue' ORDER BY e.id"
+    ).fetchall()
+    triggers: dict[int, list[dict]] = {}
+    for row in rows:
+        extra = _json_dict(row["extra"])
+        entry = {
+            "target": _sanitize_name(row["target_qualified"]),
+            "via": extra.get("via") or "listener",
+        }
+        if entry not in triggers.setdefault(row["node_id"], []):
+            triggers[row["node_id"]].append(entry)
+    return triggers
+
+
+def add_entry_metadata(store: GraphStore, flows: list[dict]) -> None:
+    """Say, in place, how each flow starts.
+
+    Adds ``entry_kind`` (one of :data:`ENTRY_KINDS`) and, when they apply, ``route`` (the
+    HTTP routes the entry serves), ``schedule`` (the ``@Scheduled`` timing as written, with
+    the key and default of any property placeholder) and ``queues`` (the queue targets the
+    flow reads, each with ``via``: ``listener`` when the entry is itself a listener,
+    ``poll`` when a method in the flow receives from the queue). A flow whose entry or
+    path reads a queue is ``queue_listener`` unless it starts at an HTTP route.
+    Nothing is resolved from configuration: a placeholder stays text.
+    """
+    entry_ids = sorted({f["entry_point_id"] for f in flows if f.get("entry_point_id") is not None})
+    if not entry_ids:
+        return
+    conn = store._conn
+    nodes: dict[int, GraphNode] = {}
+    for node_id in entry_ids:
+        node = store.get_node_by_id(node_id)
+        if node is not None:
+            nodes[node_id] = node
+
+    handles: dict[str, list[tuple[str, dict]]] = {}
+    qns = sorted({n.qualified_name for n in nodes.values()})
+    for start in range(0, len(qns), _SQL_BATCH):
+        batch = qns[start:start + _SQL_BATCH]
+        for row in conn.execute(
+            "SELECT source_qualified, target_qualified, extra FROM edges "  # nosec B608
+            f"WHERE kind = 'HANDLES' AND source_qualified IN ({','.join('?' * len(batch))}) "
+            "ORDER BY id",
+            batch,
+        ).fetchall():
+            handles.setdefault(row["source_qualified"], []).append(
+                (row["target_qualified"], _json_dict(row["extra"]))
+            )
+    triggers = _queue_triggers(store)
+
+    for flow in flows:
+        entry = nodes.get(flow.get("entry_point_id"))
+        if entry is None:
+            continue
+        edges = handles.get(entry.qualified_name, [])
+        routes: list[str] = []
+        for target, extra in edges:
+            label = f"{extra.get('http_method', '')} {extra.get('route', '')}".strip()
+            if extra.get("route") and label not in routes:
+                routes.append(label)
+        queues = list(triggers.get(entry.id, []))
+        for node_id in flow.get("path", [])[1:]:
+            queues.extend(t for t in triggers.get(node_id, []) if t["via"] == "poll")
+        schedules = entry.extra.get("schedules")
+        is_event = any(t.startswith("event::") for t, _ in edges)
+
+        if routes or entry.extra.get("spring_endpoint"):
+            kind = "http"
+        elif queues:
+            kind = "queue_listener"
+        elif schedules or entry.extra.get("scheduled"):
+            kind = "scheduler"
+        elif is_event or entry.extra.get("spring_event_listener"):
+            kind = "event"
+        elif entry.name == "main":
+            kind = "main"
+        else:
+            kind = "other"
+        flow["entry_kind"] = kind
+        if routes:
+            flow["route"] = ", ".join(routes[:_MAX_ROUTES])
+        if isinstance(schedules, list) and schedules:
+            flow["schedule"] = schedules
+        if queues:
+            unique: list[dict] = []
+            for queue in queues:
+                if queue not in unique:
+                    unique.append(queue)
+            flow["queues"] = unique
+
+
+def _tree_key(flow: dict) -> frozenset[int]:
+    return frozenset(flow.get("path", [])[1:])
+
+
+def group_duplicate_flows(flows: list[dict]) -> list[dict]:
+    """Merge flows whose call tree below the entry is the same set of nodes.
+
+    A public and an admin controller that both delegate to one service method trace to the
+    same tree, so they are one flow with two entry points. The most critical member of a
+    group stands for it (ties: the first in the list) and keeps its position; it gains
+    ``entry_points`` (every member, representative first: ``flow_id``, ``name``,
+    ``entry_kind`` and ``route`` when known) and ``group_size``. A flow with no twin is
+    returned untouched.
+    """
+    groups: dict[frozenset[int], list[dict]] = {}
+    for flow in flows:
+        key = _tree_key(flow)
+        if key:
+            groups.setdefault(key, []).append(flow)
+    merged: list[dict] = []
+    seen: set[frozenset[int]] = set()
+    for flow in flows:
+        key = _tree_key(flow)
+        members = groups.get(key) if key else None
+        if not members or len(members) == 1:
+            merged.append(flow)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        rep = max(members, key=lambda f: f.get("criticality", 0))
+        ordered = [rep] + [m for m in members if m is not rep]
+        entry_points = []
+        for member in ordered:
+            item = {"flow_id": member["id"], "name": member["name"]}
+            for field in ("entry_kind", "route"):
+                if member.get(field):
+                    item[field] = member[field]
+            entry_points.append(item)
+        merged.append({**rep, "entry_points": entry_points, "group_size": len(members)})
+    return merged
+
+
+def _structural_twins(store: GraphStore, flow: dict) -> list[dict]:
+    """The other flows whose call tree below the entry is the same as *flow*'s."""
+    key = _tree_key(flow)
+    if not key:
+        return []
+    twins: list[dict] = []
+    for row in store._conn.execute(
+        "SELECT id, name, path_json FROM flows WHERE id != ? AND node_count = ? ORDER BY id",
+        (flow["id"], flow["node_count"]),
+    ).fetchall():
+        try:
+            path = json.loads(row["path_json"])
+        except (TypeError, ValueError):
+            continue
+        if frozenset(path[1:]) == key:
+            twins.append({"flow_id": row["id"], "name": _sanitize_name(row["name"])})
+    return twins
+
+
+# ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
 
@@ -1270,6 +1458,7 @@ def get_flows(
     store: GraphStore,
     sort_by: str = "criticality",
     limit: int = 50,
+    with_entry_metadata: bool = False,
 ) -> list[dict]:
     """Retrieve stored flows from the database.
 
@@ -1277,6 +1466,8 @@ def get_flows(
         store: The graph store.
         sort_by: Column to sort by (``criticality``, ``depth``, ``node_count``).
         limit: Maximum number of flows to return.
+        with_entry_metadata: Also say how each flow starts (see
+            :func:`add_entry_metadata`).
     """
     allowed_sort = {"criticality", "depth", "node_count", "file_count", "name"}
     if sort_by not in allowed_sort:
@@ -1305,6 +1496,8 @@ def get_flows(
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         })
+    if with_entry_metadata:
+        add_entry_metadata(store, results)
     return results
 
 
@@ -1343,7 +1536,7 @@ def get_flow_by_id(store: GraphStore, flow_id: int) -> Optional[dict]:
                 "qualified_name": _sanitize_name(node.qualified_name),
             })
 
-    return {
+    flow = {
         "id": row["id"],
         "name": _sanitize_name(row["name"]),
         "entry_point_id": row["entry_point_id"],
@@ -1356,6 +1549,11 @@ def get_flow_by_id(store: GraphStore, flow_id: int) -> Optional[dict]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    add_entry_metadata(store, [flow])
+    twins = _structural_twins(store, flow)
+    if twins:
+        flow["same_call_tree_as"] = twins
+    return flow
 
 
 def get_affected_flows(

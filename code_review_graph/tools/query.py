@@ -132,7 +132,9 @@ _MAX_BARE_TARGET_CANDIDATES = 20
 _CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
 
 #: Patterns that can ask who points at something outside the repository.
-_EXTERNAL_TARGET_PATTERNS = frozenset({"callers_of", "references_to", "importers_of"})
+_EXTERNAL_TARGET_PATTERNS = frozenset(
+    {"callers_of", "references_to", "importers_of", "listeners_of"}
+)
 
 
 def _is_external_target(pattern: str, target: str) -> bool:
@@ -142,7 +144,7 @@ def _is_external_target(pattern: str, target: str) -> bool:
     ``external:<kind>:<name>``. No node has that name, so it is read from the
     edges that end there instead of being searched for as a symbol.
     """
-    return pattern in _EXTERNAL_TARGET_PATTERNS and target.startswith("external:")
+    return pattern in _EXTERNAL_TARGET_PATTERNS and target.startswith(("external:", "kafka:"))
 
 
 class _RowWindow:

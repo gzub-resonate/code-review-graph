@@ -79,7 +79,8 @@ from .infra_references import (
     reduce_lambda_name,
     reduce_replacement_var,
 )
-from .messaging_edges import emit_messaging_edges
+from .java_scheduling import schedule_timing
+from .messaging_edges import emit_messaging_edges, trigger_edge
 from .npm_alias_resolver import NpmAliasResolver
 from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
 
@@ -17954,6 +17955,7 @@ class CodeParser:
                 "annotation": "Scheduled",
                 "schedule_kind": schedule_kind,
                 **attributes,
+                "timing": schedule_timing(attributes),
             }
             nodes.append(NodeInfo(
                 kind="Scheduler",
@@ -18362,24 +18364,30 @@ class CodeParser:
                 topics = self._get_kafka_annotation_topics(mod)
                 if topics:
                     for topic in topics:
-                        edges.append(EdgeInfo(
+                        consumer = EdgeInfo(
                             kind="CONSUMES",
                             source=qualified_source,
                             target=f"kafka:{topic}",
                             file_path=file_path,
                             line=method_node.start_point[0] + 1,
-                            extra={"topic": topic, "kafka_type": "KafkaListener"},
-                        ))
+                            extra={
+                                "topic": topic,
+                                "kafka_type": "KafkaListener",
+                                "resolution": "kafka_listener",
+                            },
+                        )
+                        edges.extend((consumer, trigger_edge(consumer)))
                 else:
                     # @KafkaListener without resolvable topic (config placeholder)
-                    edges.append(EdgeInfo(
+                    consumer = EdgeInfo(
                         kind="CONSUMES",
                         source=qualified_source,
                         target="kafka:config",
                         file_path=file_path,
                         line=method_node.start_point[0] + 1,
-                        extra={"kafka_type": ann_name},
-                    ))
+                        extra={"kafka_type": ann_name, "resolution": "kafka_listener"},
+                    )
+                    edges.extend((consumer, trigger_edge(consumer)))
 
     def _get_docstring_summary(self, node, language: str) -> Optional[str]:
         """Extract a bounded documentation summary for a definition node."""
@@ -19062,6 +19070,10 @@ class CodeParser:
                 if schedule_count:
                     method_extra["scheduled"] = True
                     method_extra["schedule_count"] = schedule_count
+                    method_extra["schedules"] = [
+                        {"kind": node.extra["schedule_kind"], **node.extra["timing"]}
+                        for node in nodes[-schedule_count:]
+                    ]
             listener_count = self._emit_spring_event_listener_edges(
                 child,
                 name,
