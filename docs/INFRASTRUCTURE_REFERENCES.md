@@ -46,6 +46,42 @@ before anything is stored:
   credentials is unclear, or an unexpected character in a ref) is recorded as `dynamic` with no
   text, and its edge points at the `dynamic` target.
 
+## AWS names held in Spring configuration
+
+A bucket, queue or topic whose name is a property (`@Value("${a.b.queue}")`, or a
+`@ConfigurationProperties` getter such as `props.getQueueName()`) cannot be named from the source,
+so its call edge points at `external:aws-<service>:?`. After every build or update the graph reads
+the repository's Spring configuration files and records, on that edge, `resolved_names`: the name
+per profile, for the profiles that define the key (`{"default": "jobs", "dev": "jobs-dev"}`).
+`cross_repo_requests_tool` with `origin="awssdk"` joins each profile's name, by exact equality, to
+the resource a Terraform declaration names (`status: matched`, `names`, `matched_profiles`), and
+`query_graph` `external_targets` lists the names of an unresolved target compactly.
+
+Files read: `application` and `bootstrap` (`.yml`, `.yaml`, `.properties`) and their `-<profile>`
+variants, never test resources; multi-document YAML whose documents carry
+`spring.config.activate.on-profile` (or the legacy `spring.profiles`), and `#---` properties
+files. A negated or compound profile expression is skipped. When several files of one module
+disagree on a key for one profile, that profile stays unresolved. `${ENV_VAR:default}` stores the
+default; without one the profile stays unresolved and `env_placeholder` names the variable.
+
+**Policy on values.** A value is stored only when it is the name of an AWS resource at an SDK or
+messaging call (bucket, queue, topic, table, rule, function, stream, delivery stream); no other
+configuration value, and no secret id or parameter name, is ever stored. In addition:
+
+- a key with a secret-looking token (password, secret, token, key, credential, private, auth,
+  certificate, signature, passphrase ...) is masked even when it names a resource: the edge says
+  `names_masked: true` and no value;
+- a value with whitespace, an `@` (credentials in a URL), more than 128 characters or a character
+  outside `[A-Za-z0-9._:/${}-]` is dropped;
+- a queue URL or an ARN is reduced to its final resource name; the account id and the host are
+  never stored, and a bare account id, an access-key id or a long token-like run is dropped;
+- the result must be a valid name for that kind of resource.
+
+This changes what a graph build writes: rebuild (or update) graphs after upgrading. Every edge of
+an SQS, SNS, S3, DynamoDB or other AWS call also carries `sdk_operation` (the canonical name:
+`SendMessage`, `ReceiveMessage`, `DeleteMessage`, `PutObject` ...) and `access`: `read`, `write`,
+`delete`, `list`, `admin` or `invoke`.
+
 ## Terragrunt inputs
 
 `inputs` holds values, so it is read through an allowlist of keys and nothing else. An unlisted

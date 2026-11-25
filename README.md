@@ -638,7 +638,7 @@ The assistant uses these once the graph is built. The 25 tools that only read ca
 | `get_wiki_page_tool` | One wiki page |
 | `list_repos_tool` | Registered repositories |
 | `cross_repo_search_tool` | Search registered repositories; `repos` limits the search to a subset |
-| `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories |
+| `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories; `origin="awssdk"` joins AWS SDK calls, including names read per profile from Spring configuration (only resource names are stored; see [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration)) |
 | `pr_blast_radius_tool` | What a pull request's changed files reach, new files included, read from Git and reached through the base graph |
 
 **MCP prompts** (5 workflow templates):

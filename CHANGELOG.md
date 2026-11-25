@@ -40,6 +40,31 @@
   at query time; one that cannot be named from the files (a name taken from a variable) is left
   unresolved. No value is stored.
 
+- AWS resource names held in Spring configuration are resolved per profile. After every build or
+  update, an unresolved bucket, queue or topic edge (a `@Value("${key}")` field, or a bean getter
+  such as `props.getQueueName()` on an SQS or SNS call) gets `resolved_names`
+  (`{"default": ..., "dev": ..., "prod": ...}`) read from `application`/`bootstrap` `.yml`,
+  `.yaml` and `.properties` files, their `-<profile>` variants and multi-document files
+  (`spring.config.activate.on-profile`). `${ENV_VAR:default}` stores the default; with no default
+  the profile stays unresolved and `env_placeholder` names the variable. `cross_repo_requests_tool`
+  `origin="awssdk"` joins each profile's name to Terraform declarations by exact equality (`names`,
+  `matched_profiles`; SQS and SNS publish and listen edges are now rows too), and `query_graph`
+  `external_targets` shows the names. Security policy: a value is stored only when it names an AWS
+  resource at a call (bucket, queue, topic, table, rule, function, stream); keys that look like
+  secrets are masked (`names_masked`); URLs and ARNs are reduced to the resource name; values over
+  128 characters, with whitespace or an `@`, or outside `[A-Za-z0-9._:/${}-]` are dropped; no other
+  configuration value is stored. This changes what a build writes: rebuild graphs after upgrading.
+  `bootstrap.*` files are now indexed as Spring configuration.
+- SQS and SNS edges (Java, Python) carry `operation`, `sdk_operation` and `access`, and an SQS
+  `deleteMessage`/`deleteMessageBatch` is recorded as a `CONSUMES` edge with `access: "delete"`;
+  S3 and other SDK edges carry `sdk_operation` (`PutObject`, `GetObject`, `DeleteObjects` ...).
+
+### Changed
+
+- `access` on AWS SDK edges now distinguishes `delete` (`delete_*`, `purge_*`), `list`
+  (`list_*`) and `admin` (`create_*`, `set_*`, tagging, policy and configuration changes) from
+  `read` and `write`; `invoke` and `unknown` are unchanged.
+
 ### Fixed
 
 - Fewer false positives in `refactor_tool` dead-code results for Java. At query time, constructors

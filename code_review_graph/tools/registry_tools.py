@@ -752,6 +752,10 @@ def _awssdk_links(
                 row[key] = _sanitize_name(value)
             elif isinstance(value, list):
                 row[key] = [_sanitize_name(str(item)) for item in value]
+            elif isinstance(value, dict):
+                row[key] = {
+                    _sanitize_name(str(k)): _sanitize_name(str(v)) for k, v in value.items()
+                }
     return result
 
 

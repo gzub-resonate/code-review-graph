@@ -261,6 +261,16 @@ def _run_postprocess(
     warnings: list[str] = []
     build_result["postprocess_level"] = postprocess
 
+    if not skip_resolvers:
+        # Edges were written even at level "none"; their config-held names are filled in here.
+        try:
+            from code_review_graph.aws_config_names import resolve_config_names
+
+            build_result["config_names"] = resolve_config_names(store._conn)
+        except (sqlite3.Error, OSError, ValueError) as e:
+            logger.warning("Config name resolution failed: %s", e)
+            warnings.append(f"Config name resolution failed: {type(e).__name__}: {e}")
+
     if postprocess == "none":
         _run_embedding_refresh(
             store,

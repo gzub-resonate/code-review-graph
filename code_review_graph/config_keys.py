@@ -6,13 +6,13 @@ import re
 from pathlib import Path
 
 _SPRING_CONFIG_NAME = re.compile(
-    r"^application(?:-[A-Za-z0-9_.-]+)?\.(?:properties|ya?ml)$",
+    r"^(?:application|bootstrap)(?:-[A-Za-z0-9_.-]+)?\.(?:properties|ya?ml)$",
     re.IGNORECASE,
 )
 
 
 def is_spring_config_path(path: Path) -> bool:
-    """Return whether *path* uses Spring Boot's application-file convention."""
+    """Return whether *path* uses Spring Boot's application or bootstrap file convention."""
     return bool(_SPRING_CONFIG_NAME.fullmatch(path.name))
 
 
