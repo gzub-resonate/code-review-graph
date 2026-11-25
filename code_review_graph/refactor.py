@@ -2059,6 +2059,31 @@ _MANAGED_CLASS_ANNOTATION = re.compile(
 _MIGRATION_PATH = re.compile(r"(^|/)(db/)?migrations?/|(^|/)V\d+(_\d+)*__[^/]*\.sql$", re.I)
 
 
+#: Class annotations that make Spring create and wire the class: nothing in the
+#: code names it, so a missing caller says nothing about whether it is used.
+_SPRING_WIRED_CLASS_ANNOTATION = re.compile(
+    r"^(?:[\w.]+\.)?(?:Component|Service|Repository|Controller|RestController|Configuration"
+    r"|ConfigurationProperties|ConfigurationPropertiesScan|SpringBootApplication)"
+    r"(?:\s*\(.*)?$",
+    re.DOTALL,
+)
+#: Beans whose properties are bound by name (``setFoo`` for ``foo``) or through a
+#: record's constructor, so their setters and record accessors have no caller.
+_SPRING_BOUND_CLASS_ANNOTATION = re.compile(
+    r"^(?:[\w.]+\.)?(?:ConfigurationProperties|Component)(?:\s*\(.*)?$", re.DOTALL,
+)
+_JAVA_SETTER_NAME = re.compile(r"^set[A-Z]")
+
+
+def _java_class_annotations(cls: Any) -> list[str]:
+    """Annotations the parser stored on a Java class node, as written."""
+    names: list[str] = []
+    for key in ("decorators", "spring_annotations"):
+        value = cls.extra.get(key) or ()
+        names.extend([value] if isinstance(value, str) else value)
+    return names
+
+
 def _framework_managed_classes(store: GraphStore) -> set[str]:
     """Qualified names of Java classes whose members a framework invokes."""
     managed: set[str] = set()
@@ -2071,6 +2096,57 @@ def _framework_managed_classes(store: GraphStore) -> set[str]:
         if any(_MANAGED_CLASS_ANNOTATION.match(d) for d in decorators):
             managed.add(cls.qualified_name)
     return managed
+
+
+class _JavaWiring:
+    """Java classes Spring creates, and the record components of Java records."""
+
+    def __init__(self, store: GraphStore) -> None:
+        self.wired: set[str] = set()
+        self.property_bound: set[str] = set()
+        self.record_components: dict[str, frozenset[str]] = {}
+        for cls in store.get_nodes_by_kind(kinds=["Class"]):
+            if cls.language != "java":
+                continue
+            annotations = _java_class_annotations(cls)
+            if any(_SPRING_WIRED_CLASS_ANNOTATION.match(a) for a in annotations):
+                self.wired.add(cls.qualified_name)
+            if any(_SPRING_BOUND_CLASS_ANNOTATION.match(a) for a in annotations):
+                self.property_bound.add(cls.qualified_name)
+            components = cls.extra.get("record_components")
+            if components:
+                self.record_components[cls.qualified_name] = frozenset(components)
+
+    def skips(self, node: Any) -> bool:
+        """Is *node* something Java or Spring reaches without a call in the code?
+
+        * a constructor (``new C(...)``, an enum constant, a record's canonical
+          constructor, a private constructor of a utility class) -- the class is
+          judged on its own evidence;
+        * a class Spring wires (``@Component``, ``@RestController`` ...);
+        * the public setter of a ``@ConfigurationProperties`` / ``@Component``
+          class, which binding calls by property name;
+        * an accessor a record declares for one of its own components, which
+          serialisation, binding and ``record.component()`` reach.
+        """
+        if node.language != "java":
+            return False
+        if node.kind == "Class":
+            return node.qualified_name in self.wired
+        if node.kind != "Function" or not node.parent_name:
+            return False
+        extra = node.extra or {}
+        if extra.get("java_constructor"):
+            return True
+        parent_qn = f"{node.file_path}::{node.parent_name}"
+        params = (node.params or "").strip("() ")
+        if node.name in self.record_components.get(parent_qn, ()) and not params:
+            return True
+        return (
+            parent_qn in self.property_bound
+            and bool(_JAVA_SETTER_NAME.match(node.name))
+            and bool(params)
+        )
 
 
 def _is_framework_managed_member(node: Any, managed_classes: set[str]) -> bool:
@@ -2444,6 +2520,7 @@ def find_dead_code(
         relative_path, line, and language fields.
     """
     managed_classes = _framework_managed_classes(store)
+    java_wiring = _JavaWiring(store)
     # Query candidate nodes.
     candidates = store.get_nodes_by_kind(
         kinds=[kind] if kind else ["Function", "Class"],
@@ -2508,11 +2585,13 @@ def find_dead_code(
         f"WHEN instr(e.extra, '\"{INHERITED_ENDPOINT_KEY}\"') AND json_valid(e.extra) "
         f"THEN json_extract(e.extra, '$.{INHERITED_ENDPOINT_KEY}') END, "
         f"CASE WHEN instr(e.extra, '\"{INHERITED_THROUGH_KEY}\"') AND json_valid(e.extra) "
-        f"THEN json_extract(e.extra, '$.{INHERITED_THROUGH_KEY}') END "
+        f"THEN json_extract(e.extra, '$.{INHERITED_THROUGH_KEY}') END, "
+        "CASE WHEN e.kind = 'CALLS' AND instr(e.extra, '\"class_receiver\"') "
+        "AND json_valid(e.extra) THEN json_extract(e.extra, '$.receiver_type') END "
         "FROM edges e LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
         "WHERE e.kind IN ('CALLS', 'TESTED_BY', 'IMPORTS_FROM', 'INHERITS', 'REFERENCES')"
     ):
-        edge_kind, source, target, file_path, language, claimed, through = row
+        edge_kind, source, target, file_path, language, claimed, through, class_receiver = row
         # The class hierarchy and import graph describe the code, not its use,
         # so a story still counts here. Only liveness evidence skips stories.
         if edge_kind == "INHERITS":
@@ -2530,6 +2609,12 @@ def find_dead_code(
         ):
             bare_files_by_language.setdefault((edge_kind, target, language), set()).add(file_path)
             bare_files_all.setdefault((edge_kind, target), set()).add(file_path)
+        if isinstance(class_receiver, str) and language == "java":
+            # ``Util.make()``: the file names ``Util`` as the receiver, whether or
+            # not the call itself resolved to one overload. That is a use of the class.
+            leaf = class_receiver.rsplit(".", 1)[-1]
+            bare_files_by_language.setdefault(("REFERENCES", leaf, language), set()).add(file_path)
+            bare_files_all.setdefault(("REFERENCES", leaf), set()).add(file_path)
         if edge_kind == "CALLS":
             # ``Util.make()`` with ``make`` inherited names no node, so its
             # target went back to ``make``, or on to ``Base.make`` when the
@@ -2580,12 +2665,21 @@ def find_dead_code(
         name_counts[row[0]] = row[1]
 
     def _is_plausible_caller(
-        edge_file: str, node_file: str, node_name: str = "",
+        edge_file: str, node_file: str, node_name: str = "", same_package: bool = False,
     ) -> bool:
         """A bare-name edge is plausible if it comes from the same file,
         from a file that has an IMPORTS_FROM edge whose target matches
         the node's file path, or the name is globally unique (no ambiguity)."""
         if edge_file == node_file:
+            return True
+        if (
+            same_package
+            and edge_file.endswith(".java")
+            and node_file.endswith(".java")
+            and edge_file.rpartition("/")[0] == node_file.rpartition("/")[0]
+        ):
+            # Java: two files in one directory share a package, so a class name
+            # one writes without an import can only mean the other's class.
             return True
         # Unique names (only one definition) have no ambiguity -- accept all callers.
         if node_name and name_counts.get(node_name, 0) == 1:
@@ -2762,6 +2856,10 @@ def find_dead_code(
         if _is_imported_commonjs_default_export(node, incoming_kinds):
             continue
 
+        # Java constructors, Spring-wired classes, bound setters and record accessors.
+        if java_wiring.skips(node):
+            continue
+
         # Members of a Spring advice class or a picocli @Command class are reached
         # through the framework, and a table created by a migration is never "called".
         if _is_framework_managed_member(node, managed_classes) or _is_migration_table(node):
@@ -2897,7 +2995,7 @@ def find_dead_code(
                     and _bare_files(node.name, node.language or "", "INHERITS")):
                 incoming.add("INHERITS")
         if node.kind == "Class" and "REFERENCES" not in incoming and any(
-            _is_plausible_caller(file, node.file_path, node.name)
+            _is_plausible_caller(file, node.file_path, node.name, same_package=True)
             for file in _bare_files(node.name, node.language or "", "REFERENCES")
         ):
             incoming.add("REFERENCES")

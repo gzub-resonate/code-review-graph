@@ -17,6 +17,21 @@
 
 ### Fixed
 
+- Fewer false positives in `refactor_tool` dead-code results for Java. At query time, constructors
+  (of utility, enum, record and inner classes) are never reported, the class being judged on its
+  own evidence; classes annotated `@Component`, `@Service`, `@Repository`, `@Controller`,
+  `@RestController`, `@Configuration` or `@ConfigurationProperties` are not reported; public setters
+  of `@ConfigurationProperties` and `@Component` classes and a record's own accessor overrides are
+  not reported; and a class named as the receiver of a call (`Util.make()`) counts as used even
+  when the call matches several overloads, including from another file of the same package. Other
+  members of those classes are still reported.
+- Java parsing (rebuild the graph to get these): records are now `Class` nodes (with
+  `type_form: record` and `record_components`), so their methods and compact constructors belong to
+  the record and a call on a record-typed value resolves to it; `import static pkg.Cls.NAME;` and
+  `import static pkg.Cls.*;` add a `REFERENCES` edge to the class, and a bare call to an imported
+  static method goes to `Cls.method`; a call through a field or parameter typed `Outer.Inner`, or
+  typed with a class that an `import pkg.*;` brings in, resolves to that class. Ambiguous receivers
+  stay unresolved.
 - The Step Functions link passes no longer treat a Terraform declaration edge as a state machine's
   call, which would have linked a Lambda resource to itself.
 - `cross_repo_requests_tool` no longer reports every `receiver_inferred` JavaScript match as `low`. It
