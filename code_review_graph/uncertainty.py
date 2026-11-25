@@ -594,8 +594,8 @@ def empty_query_confidence(
                                 else unresolved_stale_note(target))
             if target.startswith("external:"):
                 return _bounded(_interpolated_target(
-                    "no edges for this target: nothing in the graph ends at '", target,
-                    "'; it is an edge end, not a node, so this 0 means no edge reaches it",
+                    "no edges for this target: nothing ends at '", target,
+                    "' (an edge end, not a node)",
                 ))
             return _bounded(not_indexed_note(target))
 

@@ -742,6 +742,7 @@ def test_feign_rows_are_unchanged_by_js_rows(tmp_path, registry):
         "client_repo": "web", "client_file": "Client.java", "client_line": 3,
         "http_method": "GET", "route": "/orders", "service": "orders-service",
         "status": "matched", "origin": "feign", "target_resolution": "exact",
+        "matched_via": "repo_name",
         "candidates": [{
             "repo": "orders-service", "file": "Controller.java", "line": 10,
             "http_method": "GET", "route": "/orders",

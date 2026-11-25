@@ -20,6 +20,7 @@ import pytest
 import code_review_graph.incremental as incremental_module
 import code_review_graph.tools.docs as docs_module
 from code_review_graph import main as crg_main
+from code_review_graph.http_access_log import ClientAccessLog
 from code_review_graph.http_origin_guard import LoopbackOriginGuard
 
 
@@ -124,6 +125,8 @@ class TestServeMainTransport:
             incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
         )
         monkeypatch.setattr(crg_main.mcp, "run", fake_run)
+        # The client access log is on unless CRG_HTTP_CLIENT_LOG turns it off.
+        monkeypatch.delenv("CRG_HTTP_CLIENT_LOG", raising=False)
         crg_main.main(
             repo_root="/tmp/r",
             transport="streamable-http",
@@ -140,7 +143,7 @@ class TestServeMainTransport:
         # covered end-to-end in tests/test_http_origin_guard.py; this only asserts
         # the entry point wires it up.
         assert [middleware.cls for middleware in call["middleware"]] == [
-            LoopbackOriginGuard
+            ClientAccessLog, LoopbackOriginGuard,
         ]
 
     def test_streamable_http_without_host_port_raises(self):

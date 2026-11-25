@@ -635,7 +635,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | एक विकी पृष्ठ |
 | `list_repos_tool` | दर्ज रिपॉज़िटरी |
 | `cross_repo_search_tool` | दर्ज रिपॉज़िटरी में खोज; `repos` से खोज को एक उपसमूह तक सीमित किया जा सकता है |
-| `cross_repo_requests_tool` | Spring Feign कॉल को अन्य दर्ज रिपॉज़िटरी में उनके संबंधित एंडपॉइंट से जोड़ता है |
+| `cross_repo_requests_tool` | Spring Feign कॉल को अन्य दर्ज रिपॉज़िटरी में उनके संबंधित एंडपॉइंट से जोड़ता है; Feign सेवा नाम वैकल्पिक alias फ़ाइल या रेपो द्वारा घोषित नामों (Spring application name, ECS service, ECR repository; देखें [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md)) के ज़रिए रिपॉज़िटरी तक पहुँचते हैं; `origin="awssdk"` AWS SDK कॉल जोड़ता है, जिनमें प्रोफ़ाइल के अनुसार Spring कॉन्फ़िगरेशन से पढ़े गए नाम भी शामिल हैं (केवल संसाधन नाम संग्रहीत होते हैं; देखें [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration)) |
 | `pr_blast_radius_tool` | पुल रिक्वेस्ट की बदली गई फ़ाइलों (नई फ़ाइलों सहित) को Git से पढ़कर आधार ग्राफ़ के ज़रिए प्रभाव क्षेत्र निकालता है |
 
 **MCP प्रॉम्प्ट** (5 वर्कफ़्लो टेम्पलेट):
@@ -693,6 +693,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | जब `tests_for` और `detect-changes` टेस्ट खोजते हैं, तब हर हॉप पर अधिकतम कितने कॉली देखे जाएँ। नाम के क्रम में पहले वाले रखे जाते हैं, इसलिए एक ग्राफ़ हमेशा एक ही उत्तर देता है | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | बिना टेस्ट वाले बदले हुए सिंबल का टेस्ट किया गया कॉलर खोजते समय आने वाले `CALLS` पर ऊपर की ओर कितने हॉप चलें। यह केवल सूचना है, कवरेज नहीं | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |
+| `CRG_SERVICE_ALIASES_FILE` | JSON या YAML फ़ाइल का पथ जो Feign सेवा नामों को दर्ज रिपॉज़िटरी से मैप करती है (`{"alias": "repo", "prefix:billing-api-": "billing-api"}`); देखें [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) | सेट नहीं |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` या `cross_repo_requests_tool` की एक कॉल नए रेपो शुरू करना बंद करने और बाकी को `skipped_repos` में सूचीबद्ध करने से पहले कितने सेकंड चल सकती है। `0` का मतलब कोई सीमा नहीं | `300` |
 | `CRG_CROSS_REPO_WORKERS` | `cross_repo_search_tool` की एक कॉल एक साथ कितने रेपो खोजती है। `1` का मतलब एक-एक करके खोजना। 32 से बड़े मान 32 माने जाते हैं | `4` |
 | `CRG_TOOL_TIMEOUT` | केवल-पठन MCP टूल की समय सीमा (सेकंड; `0` से बंद)। लिखने वाले टूल (build / postprocess / embed / wiki / apply-refactor) पर लागू नहीं | `0` |
