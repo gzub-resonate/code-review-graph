@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, cast
 
-from ..amqp_join import EXCHANGE_PREFIX, link_kind
+from ..amqp_join import EXCHANGE_PREFIX, PUBLISH_KINDS, link_kind
 from ..analysis import is_generated_file
 from ..aws_sdk_links import merge_resolved_names
 from ..config_keys import normalize_spring_config_key
@@ -735,6 +735,8 @@ def _query_external_targets(
     ``external:db-table``); empty or ``external:`` lists every family. Rows come largest
     first: the target, its family, the edge kinds that reach it with counts, how many
     distinct sources reach it, up to three of them, and whether any edge is unresolved.
+    A target whose edges carry AMQP keys also lists up to five ``routing_keys`` (publishers)
+    and ``binding_keys`` (listeners).
     An AWS target (or a name resolved from configuration) that a Terraform ``declare`` edge
     names gets ``matched`` and ``declared_by`` (``repo``, ``file``, ``line``): the declaration
     in this graph, else the first one in another registered repository.
@@ -754,15 +756,26 @@ def _query_external_targets(
         "CASE WHEN json_valid(extra) THEN json_extract(extra, '$.resolved_names') END, "
         "file_path, line, "
         "CASE WHEN json_valid(extra) AND json_extract(extra, '$.sdk') = 'terraform' "
-        "AND json_extract(extra, '$.operation') = 'declare' THEN 1 ELSE 0 END "
+        "AND json_extract(extra, '$.operation') = 'declare' THEN 1 ELSE 0 END, "
+        "CASE WHEN json_valid(extra) THEN json_extract(extra, '$.routing_key') END, "
+        "CASE WHEN json_valid(extra) THEN json_extract(extra, '$.binding_key') END "
         "FROM edges WHERE substr(target_qualified, 1, ?) = ?",
         (len(like_prefix), like_prefix),
     ).fetchall()
     grouped: dict[str, dict[str, Any]] = {}
-    for target, kind, source, unresolved, resolved_names, file_path, line, declares in rows:
+    for (
+        target, kind, source, unresolved, resolved_names, file_path, line, declares,
+        routing_key, binding_key,
+    ) in rows:
         entry = grouped.setdefault(
-            target, {"kinds": {}, "sources": {}, "unresolved": False, "names": {}},
+            target,
+            {"kinds": {}, "sources": {}, "unresolved": False, "names": {},
+             "routing_keys": {}, "binding_keys": {}},
         )
+        if isinstance(routing_key, str) and routing_key:
+            entry["routing_keys"][routing_key] = True
+        if isinstance(binding_key, str) and binding_key:
+            entry["binding_keys"][binding_key] = True
         if declares and "declared_by" not in entry:
             entry["declared_by"] = _declared_in_graph(file_path, line, root)
         if resolved_names:
@@ -788,6 +801,10 @@ def _query_external_targets(
             "source_count": len(entry["sources"]), "sources": sources,
             "unresolved": entry["unresolved"],
             **({"names": entry["names"]} if entry["names"] else {}),
+            **({"routing_keys": [_sanitize_name(k) for k in list(entry["routing_keys"])[:5]]}
+               if entry["routing_keys"] else {}),
+            **({"binding_keys": [_sanitize_name(k) for k in list(entry["binding_keys"])[:5]]}
+               if entry["binding_keys"] else {}),
             **({"matched": True, "declared_by": entry["declared_by"]}
                if "declared_by" in entry else {}),
         })
@@ -2109,10 +2126,10 @@ def query_graph(
                     edges_out.append(edge_to_dict(edge))
 
         elif pattern in ("publishers_of", "listeners_of"):
-            edge_kind = "PUBLISHES" if pattern == "publishers_of" else "HANDLES"
+            edge_kinds = PUBLISH_KINDS if pattern == "publishers_of" else ("HANDLES",)
             amqp_channel = qn.startswith(EXCHANGE_PREFIX)
             for edge in store.get_edges_by_target(qn):
-                if edge.kind != edge_kind:
+                if edge.kind not in edge_kinds:
                     continue
                 amqp_fields: dict[str, Any] = {}
                 if amqp_channel:

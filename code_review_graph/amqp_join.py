@@ -105,11 +105,16 @@ def link_kind(binding_key: Any, routing_key: Any) -> str | None:
     return None
 
 
+# A publisher edge to an exchange is ``PUBLISHES`` from the Spring event parser and ``PRODUCES``
+# from the messaging parser (``convertAndSend``, ``basic_publish``); both mean "publishes here".
+PUBLISH_KINDS = ("PUBLISHES", "PRODUCES")
+
+
 def has_amqp_edges(store: GraphStore) -> bool:
     """Whether the graph has any edge that ends at an AMQP exchange or queue."""
     row = store._conn.execute(
         "SELECT 1 FROM edges WHERE target_qualified >= ? AND target_qualified < ? "
-        "AND kind IN ('PUBLISHES', 'CONSUMES', 'HANDLES') LIMIT 1",
+        "AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES') LIMIT 1",
         (EXCHANGE_PREFIX, EXCHANGE_PREFIX[:-1] + ";"),
     ).fetchone()
     return row is not None
@@ -130,7 +135,7 @@ def read_channel_edges(
     seen: set[tuple[Any, ...]] = set()
     for source, kind, file_path, line, extra in store._conn.execute(
         "SELECT source_qualified, kind, file_path, line, extra FROM edges "
-        "WHERE target_qualified = ? AND kind IN ('PUBLISHES', 'CONSUMES', 'HANDLES') "
+        "WHERE target_qualified = ? AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES') "
         "ORDER BY file_path, line, id",
         (target,),
     ):
@@ -140,7 +145,7 @@ def read_channel_edges(
             info = {}
         if not isinstance(info, dict):
             info = {}
-        role = "publisher" if kind == "PUBLISHES" else "listener"
+        role = "publisher" if kind in PUBLISH_KINDS else "listener"
         row: dict[str, Any] = {
             "role": role, "source": source, "file_path": file_path, "line": line,
         }

@@ -111,7 +111,9 @@ def test_link_kind_says_how_the_keys_met() -> None:
     assert link_kind("orders.*", None) == MATCH_UNKNOWN
 
 
-def _build_repo(root: Path, exchange_edges: bool, extra_source: str = "") -> Path:
+def _build_repo(
+    root: Path, exchange_edges: bool, extra_source: str = "", publisher_kind: str = "PUBLISHES",
+) -> Path:
     """A repo with one module whose functions carry hand-made AMQP edges (or none)."""
     root.mkdir(parents=True, exist_ok=True)
     (root / ".git").mkdir(exist_ok=True)
@@ -122,7 +124,7 @@ def _build_repo(root: Path, exchange_edges: bool, extra_source: str = "") -> Pat
         path = module.as_posix()
         for line, (name, key) in enumerate(PUBLISHERS.items(), start=1):
             edges.append(EdgeInfo(
-                kind="PUBLISHES", source=f"{path}::{name}", target=EXCHANGE,
+                kind=publisher_kind, source=f"{path}::{name}", target=EXCHANGE,
                 file_path=path, line=line, extra={"routing_key": key},
             ))
         for line, (name, key) in enumerate(LISTENERS.items(), start=10):
@@ -371,3 +373,53 @@ class TestCrossRepoAmqp:
         cross_repo_requests_func(origin="amqp", service="orders.exchange")
         with GraphStore(db, read_only=True) as store:
             assert store._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == before
+
+
+class TestProducesPublishers:
+    """The messaging parser writes a publisher as ``PRODUCES``; it must read as a publisher."""
+
+    @pytest.fixture
+    def produces_repo(self, tmp_path: Path) -> Path:
+        return _build_repo(tmp_path / "repo", exchange_edges=True, publisher_kind="PRODUCES")
+
+    def test_publishers_of_lists_produces_edges_with_their_keys(self, produces_repo):
+        reply = query_graph("publishers_of", EXCHANGE, repo_root=str(produces_repo))
+        assert reply["result_count"] == len(PUBLISHERS)
+        rows = {row["name"]: row.get("routing_key") for row in reply["results"]}
+        assert rows == PUBLISHERS
+
+    def test_a_binding_key_keeps_the_matching_produces_publishers(self, produces_repo):
+        reply = query_graph(
+            "publishers_of", EXCHANGE, repo_root=str(produces_repo), routing_key="orders.*",
+        )
+        assert reply["result_count"] >= 1
+        assert all(row["matched_via"] for row in reply["results"])
+
+    def test_an_exchange_with_only_listeners_says_what_does_end_there(self, tmp_path: Path):
+        repo = _build_repo(tmp_path / "repo", exchange_edges=True)
+        with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
+            store._conn.execute("DELETE FROM edges WHERE kind IN ('PUBLISHES', 'PRODUCES')")
+            store._conn.commit()
+        reply = query_graph("publishers_of", EXCHANGE, repo_root=str(repo))
+        assert reply["result_count"] == 0
+        assert "other edges do" in reply["confidence"]
+        assert "not indexed" not in reply["confidence"]
+
+    def test_external_targets_prints_publisher_and_listener_keys(self, produces_repo):
+        reply = query_graph("external_targets", "external:rabbitmq", repo_root=str(produces_repo))
+        row = next(r for r in reply["results"] if r["target"] == EXCHANGE)
+        assert sorted(row["routing_keys"]) == sorted(set(PUBLISHERS.values()))
+        assert "orders.*" in row["binding_keys"]
+
+    def test_an_external_target_with_no_edges_says_so(self, produces_repo):
+        reply = query_graph(
+            "publishers_of", "external:rabbitmq:nowhere", repo_root=str(produces_repo),
+        )
+        assert reply["result_count"] == 0
+        assert reply["confidence"].startswith("no edges for this target")
+
+    def test_the_cross_repo_join_lists_produces_publishers_with_keys(self, produces_repo):
+        with GraphStore(produces_repo / ".code-review-graph" / "graph.db") as store:
+            from code_review_graph.amqp_join import read_channel_edges
+            rows = [r for r in read_channel_edges(store, EXCHANGE) if r["role"] == "publisher"]
+        assert {r["routing_key"] for r in rows} == set(PUBLISHERS.values())
