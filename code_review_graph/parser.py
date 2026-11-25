@@ -80,7 +80,11 @@ from .infra_references import (
     reduce_replacement_var,
 )
 from .java_scheduling import schedule_timing
-from .messaging_edges import emit_messaging_edges, trigger_edge
+from .messaging_edges import (
+    build_java_const_index,
+    emit_messaging_edges,
+    trigger_edge,
+)
 from .npm_alias_resolver import NpmAliasResolver
 from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
 
@@ -4011,6 +4015,8 @@ class CodeParser:
         self._repo_root = Path(repo_root).resolve() if repo_root is not None else None
         self._dbt_model_paths_cache: dict[Path, tuple[Path, ...]] = {}
         self._parsers: dict[str, object] = {}
+        # Repository-wide Java string constants for messaging names; built on first use.
+        self._java_const_index_cache = None
         self._module_file_cache: dict[str, Optional[str]] = {}
         # Ignore patterns per repository boundary, so a resolver never names
         # a path the build will not index; see :meth:`_path_is_indexed`.
@@ -4086,6 +4092,14 @@ class CodeParser:
                 self._import_types[custom.name] = list(custom.import_node_types)
                 self._call_types[custom.name] = list(custom.call_node_types)
 
+    def _java_const_index(self):
+        """``static final String`` constants of the repository, for cross-class names."""
+        if self._java_const_index_cache is None:
+            self._java_const_index_cache = build_java_const_index(
+                self._repo_root, self._get_parser,
+            )
+        return self._java_const_index_cache
+
     def _get_parser(self, language: str):  # type: ignore[arg-type]
         if language not in self._parsers:
             # Custom languages map their name onto a packaged grammar.
@@ -4102,6 +4116,7 @@ class CodeParser:
     ) -> None:
         """Clear per-instance and module-level caches and optionally release free heap pages."""
         self._dbt_model_paths_cache.clear()
+        self._java_const_index_cache = None
         self._module_file_cache.clear()
         self._ignore_patterns_cache.clear()
         self._indexed_path_cache.clear()
@@ -19119,6 +19134,7 @@ class CodeParser:
                 language,
                 edges,
                 method_extra,
+                self._java_const_index() if language == "java" else None,
             )
 
         # Persist annotations/decorators so consumers can filter on them
