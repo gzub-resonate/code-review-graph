@@ -4,6 +4,19 @@
 
 ### Added
 
+- The change tools share one rule for a call that names no change: `detect_changes_tool`,
+  `get_review_context_tool`, `get_impact_radius_tool`, `get_affected_flows_tool` and
+  `pr_blast_radius_tool` review the last commit (`HEAD~1..HEAD`; the whole commit, from the empty
+  tree, in a one-commit repository) and label it. The reply carries a `scope` object (`kind`
+  `last_commit`, `base`, `head`, `files_considered`, `reason`, `hint`) and a `note` with one shared
+  hint: pass `pr`, `head`, `base` (for example `base="HEAD~20"`) or `changed_files` to widen it. A
+  named change reports `scope.kind: "explicit"` and behaves as before. Where a call used to
+  fail or silently differ (`detect_changes_tool` on a `serve --multi-repo` server refused it,
+  `pr_blast_radius_tool` required a `pr` or `head`, `get_affected_flows_tool` did not say what it
+  looked at), it now returns the labelled result. A repository with no commit or no git history
+  still answers with an error, which carries the same hint. In a one-commit repository
+  `pr_blast_radius_tool` has no parent to compare with and says so (`scope.analysed: false`).
+
 - `query_graph_tool` pattern `endpoints`: lists `Endpoint` nodes as one compact line each
   (method, path, owner, file:line, direction) with `direction_counts`, filtered by an optional
   `<METHOD> <route>` substring and `direction` (`inbound`, `outbound`, `simulator`), and paged with

@@ -50,6 +50,7 @@ from ._common import (
     _unmatched_file_warning,
     _validate_positive_int,
 )
+from .change_scope import discover_changes_with_scope, record_explicit_scope, scoped
 
 logger = logging.getLogger(__name__)
 
@@ -456,6 +457,7 @@ def _render_regions(
 # ---------------------------------------------------------------------------
 
 
+@scoped
 def get_review_context(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
@@ -523,9 +525,12 @@ def get_review_context(
         # changed. Discovery resolves it as part of the chain, on the short
         # discovery budget, so it is never resolved twice.
         if changed_files is None:
-            changed_files, base = discover_review_changes(root, base)
+            changed_files, base = discover_changes_with_scope(
+                root, base, discover=discover_review_changes,
+            )
         else:
             base = resolve_review_base(root, base)
+            record_explicit_scope("changed_files", len(changed_files), base=base)
 
         if not changed_files:
             return {
@@ -929,6 +934,7 @@ def _generate_review_guidance(
 # ---------------------------------------------------------------------------
 
 
+@scoped
 def get_affected_flows_func(
     changed_files: list[str] | None = None,
     base: str = "HEAD~1",
@@ -969,7 +975,11 @@ def get_affected_flows_func(
     store, root = _get_store(repo_root)
     try:
         if changed_files is None:
-            changed_files, base = discover_review_changes(root, base)
+            changed_files, base = discover_changes_with_scope(
+                root, base, discover=discover_review_changes,
+            )
+        else:
+            record_explicit_scope("changed_files", len(changed_files))
 
         if not changed_files:
             return {
@@ -1160,6 +1170,7 @@ def _fold_in_new_code(
     result["summary"] = str(result.get("summary") or "") + line
 
 
+@scoped
 def detect_changes_func(
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
@@ -1252,6 +1263,10 @@ def detect_changes_func(
             base = loaded["base_ref"]
             pr_changes = loaded["changes"]
             changed_files = [c.path for c in pr_changes]
+            record_explicit_scope(
+                "pull_request" if pr is not None else "head", len(changed_files),
+                base=loaded["base_ref"], head=loaded["head_sha"],
+            )
             notes.extend(loaded["notes"])
             found = loaded["found"]
             pr_nodes = []
@@ -1292,9 +1307,12 @@ def detect_changes_func(
             # {"status": "error"} instead, so a client can tell "nothing to
             # review" from "could not look". A base Git does not know is
             # reported the same way.
-            changed_files, base = discover_review_changes(root, base, notes=notes)
+            changed_files, base = discover_changes_with_scope(
+                root, base, notes=notes, discover=discover_review_changes,
+            )
         else:
             base = resolve_review_base(root, base)
+            record_explicit_scope("changed_files", len(changed_files), base=base)
 
         if not changed_files:
             empty = "No changed files detected."

@@ -520,27 +520,30 @@ async def test_the_handshake_tells_the_client_to_name_a_repo(http_server) -> Non
     )
 
 
-class TestDetectChangesNeedsANamedChange:
-    """A shared server has no working tree, so a call naming no change is refused."""
+class TestDetectChangesWithoutANamedChange:
+    """A shared server has no working tree; a call naming no change reviews the last commit."""
 
-    def test_a_plain_call_is_refused_with_what_to_pass(self, multi_repo_mode, tmp_path):
-        repo = _project(tmp_path, "a")
+    def test_a_plain_call_is_not_refused_and_labels_its_scope(self, multi_repo_mode, tmp_path):
+        import subprocess
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+
+        repo = tmp_path / "shared"
+        repo.mkdir()
+        for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
+                     ["config", "user.name", "T"]):
+            subprocess.run(["git", *args], cwd=repo, check=True)
+        (repo / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "one"], cwd=repo, check=True)
+        repo = repo.resolve()
+        with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
+            full_build(repo, store)
         multi_repo_mode.register(str(repo))
-        with pytest.raises(ToolError, match=r"pr=<number>.*changed_files"):
-            asyncio.run(crg_main.detect_changes_tool(repo_root=str(repo)))
 
-    def test_the_minimal_level_is_refused_too(self, multi_repo_mode, tmp_path):
-        repo = _project(tmp_path, "a")
-        multi_repo_mode.register(str(repo))
-        with pytest.raises(ToolError, match="default branch"):
-            asyncio.run(crg_main.detect_changes_tool(repo_root=str(repo), detail_level="minimal"))
+        result = asyncio.run(crg_main.detect_changes_tool(repo_root=str(repo)))
 
-    @pytest.mark.parametrize("named", [{"pr": 7}, {"head": "feature"}, {"changed_files": []}])
-    def test_a_named_change_gets_past_the_guard(self, named):
-        crg_main._require_a_named_change(
-            named.get("changed_files"), named.get("pr"), named.get("head"),
-        )
-
-    def test_the_local_server_still_diffs_its_working_tree(self, monkeypatch):
-        monkeypatch.setattr(crg_main, "_multi_repo", False)
-        crg_main._require_a_named_change(None, None, None)
+        assert result["status"] == "ok", result
+        assert result["scope"]["kind"] == "last_commit"
+        assert "changed_files" in result["note"]

@@ -64,6 +64,7 @@ from ._common import (
     _unmatched_file_warning,
     _validate_positive_int,
 )
+from .change_scope import discover_changes_with_scope, record_explicit_scope, scoped
 from .query_extras import (
     AUTO_RESOLVE_PATTERNS,
     ENDPOINT_DIRECTIONS,
@@ -881,6 +882,7 @@ def _query_route(
     return response
 
 
+@scoped
 def get_impact_radius(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
@@ -945,7 +947,11 @@ def get_impact_radius(
     store, root = _get_store(repo_root)
     try:
         if changed_files is None:
-            changed_files, base = discover_review_changes(root, base)
+            changed_files, base = discover_changes_with_scope(
+                root, base, discover=discover_review_changes,
+            )
+        else:
+            record_explicit_scope("changed_files", len(changed_files))
 
         if cursor and not changed_files:
             raise CursorError(
