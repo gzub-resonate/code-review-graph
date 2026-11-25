@@ -998,12 +998,16 @@ async def list_flows_tool(
     detail_level: str = "standard",
     repo_root: Optional[str] = None,
     cursor: Optional[str] = None,
+    entry_kind: Optional[str] = None,
+    group_duplicates: bool = True,
 ) -> dict:
     """List execution flows in the codebase, sorted by criticality.
 
     Each flow represents a call chain starting from an entry point
     (HTTP handler, CLI command, test function, etc.). Use this to
-    understand the main execution paths through the codebase.
+    understand the main execution paths through the codebase. A Java flow
+    is named Class.method and has an entry_kind: http, scheduler,
+    queue_listener, event, main or other.
 
     Args:
         sort_by: Sort column: criticality, depth, node_count, file_count, or name.
@@ -1014,13 +1018,19 @@ async def list_flows_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
+        entry_kind: Filter by how the flow starts: http, scheduler,
+            queue_listener, event, main or other.
+        group_duplicates: Merge flows with the same call tree below the entry
+            (a public and an admin controller calling one service method) into
+            one flow that lists every entry point. Default: True.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "list_flows_tool",
         lambda: list_flows(
             repo_root=root, sort_by=sort_by, limit=limit, kind=kind,
-            detail_level=detail_level, cursor=cursor,
+            detail_level=detail_level, cursor=cursor, entry_kind=entry_kind,
+            group_duplicates=group_duplicates,
         ),
         root,
     )

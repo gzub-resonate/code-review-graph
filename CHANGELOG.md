@@ -4,6 +4,29 @@
 
 ### Added
 
+- Java flows, schedulers and queue consumers (rebuild the graph to get these; the build now
+  writes more edges and node metadata). `list_flows_tool` names a Java flow `Class.method`
+  instead of the bare method name and tags each flow with an `entry_kind` (`http`, `scheduler`,
+  `queue_listener`, `event`, `main`, `other`), plus `route`, `schedule` and `queues` where they
+  apply. Flows whose call tree below the entry is the same (a public and an admin controller
+  delegating to one service method) are grouped into one row that lists every entry point;
+  `group_duplicates=false` returns one row per entry and `entry_kind` filters the list.
+  `get_flow_tool` shows `same_call_tree_as`. Flow ids are unchanged.
+- `@Scheduled` timing is stored as written: the scheduler node, its `TRIGGERS` edge and the
+  scheduled method carry `fixedDelay`, `fixedRate`, `initialDelay`, `cron`, `zone`, `timeUnit`
+  and their `*String` variants; a property placeholder keeps its text, key and inline default and
+  is never resolved from configuration.
+- Queue consumers are triggers. `@SqsListener`, `@JmsListener`, `@RabbitListener`, `@KafkaListener`
+  and `@StreamListener` methods, and methods that receive from a queue through an SDK call, get a
+  `HANDLES` edge (`extra.trigger = "queue"`, `extra.via = "listener"` or `"poll"`) to the same
+  target as their `CONSUMES` edge, so `query_graph_tool` `listeners_of` answers for a queue,
+  topic or channel target (`external:aws-sqs:<queue>`, `kafka:<topic>`, ...). A flow that starts at
+  a listener, or at a scheduled or runner method that polls a queue, is tagged `queue_listener`.
+- A call on a Java interface now also gets a `CALLS` edge to the implementing method when the
+  repository has exactly one implementing class (`extra.via = "interface"`). With several
+  implementations only the interface edge remains; injected fields keep their `@Qualifier`,
+  `@Primary` and bean-name resolution.
+
 - The change tools share one rule for a call that names no change: `detect_changes_tool`,
   `get_review_context_tool`, `get_impact_radius_tool`, `get_affected_flows_tool` and
   `pr_blast_radius_tool` review the last commit (`HEAD~1..HEAD`; the whole commit, from the empty
