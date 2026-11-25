@@ -197,7 +197,8 @@ def get_hub_nodes_func(
                 f"{total} hub node(s) ranked by "
                 + (
                     "resolved_degree (bare-name and name-matched edges left out; "
-                    "resolved_share is the traced fraction of each hub's edges)"
+                    "resolved_share is the traced fraction of each hub's edges, so total_degree "
+                    "is not strictly descending)"
                     if rank_by == "resolved"
                     else "ranking_degree (name-matched edges damped, "
                     "so total_degree is not strictly descending)"
