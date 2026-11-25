@@ -214,3 +214,25 @@ def test_credential_shaped_operands_are_redacted_not_trimmed() -> None:
     text = " ".join(t for t in got.values() if t)
     for leaked in ("AKIA", "ghp_", "123456789012", "Bearer", "user:pw", "sk-abc"):
         assert leaked not in text
+
+
+def test_a_credential_cannot_hide_behind_characters_that_are_removed_afterwards() -> None:
+    """The check runs on the text that is printed, not on a raw value with invisible characters."""
+    got = _conditions([
+        {"Variable": "$.a", "StringEquals": "AKIA\x00ABCDEFGHIJKLMNOP", "Next": "Scale"},
+        {"Variable": "$.b", "StringEquals": "ghp_​" + "a1" * 18, "Next": "Scale"},
+        {"Variable": "$.c", "StringEquals": "ｇｈｐ_" + "a1" * 18, "Next": "Scale"},
+        {"Variable": "$.d", "StringEquals": "1234⁠567890‍12", "Next": "Scale"},
+        {"Variable": "$.e", "StringEquals": "scale​_down", "Next": "Scale"},
+    ])
+    for index in range(4):
+        assert got[index].endswith('"<redacted>"'), got[index]
+    # An ordinary value loses only the invisible character.
+    assert got[4] == '$.e StringEquals "scale_down"'
+    joined = " ".join(t for t in got.values() if t)
+    assert "AKIA" not in joined and "ghp_" not in joined and "123456" not in joined
+
+
+def test_the_variable_is_cleaned_before_it_is_shown() -> None:
+    got = _conditions([{"Variable": "$.mo\x00de​", "StringEquals": "x", "Next": "Scale"}])
+    assert got[0] == '$.mode StringEquals "x"'

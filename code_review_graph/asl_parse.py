@@ -180,6 +180,22 @@ _ASL_CONDITION_NOT_A_TEST = frozenset({"Variable", "Next", "Comment"})
 _ASL_COMPARISON_RE = re.compile(r"(?:String|Numeric|Boolean|Timestamp)[A-Za-z]*|Is[A-Z][A-Za-z]*")
 
 
+_ASL_INVISIBLE = re.compile(
+    "[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]"
+)
+
+
+def _asl_clean(text: str) -> str:
+    """NFKC-normalise and drop control and zero-width characters.
+
+    Every check below runs on this text, and this text is what is shown, so a character
+    that would split a token for the check cannot vanish afterwards and leave it readable.
+    """
+    import unicodedata
+
+    return _ASL_INVISIBLE.sub("", unicodedata.normalize("NFKC", text))
+
+
 _ASL_SECRET_SHAPE = re.compile(r"-----BEGIN|://[^/\s]*:[^/\s]*@|\bBearer\s+\S{12,}", re.I)
 _ASL_WORD_SPLIT = re.compile(r"[\s'\"(){}\[\]%=,;<>|&]+")
 
@@ -208,9 +224,9 @@ def _asl_condition_value(key: str, value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)[:_MAX_ASL_CONDITION_VALUE_CHARS]
     if isinstance(value, str):
-        if not key.endswith("Path") and _asl_literal_is_sensitive(value):
+        text = _asl_clean(value)
+        if not key.endswith("Path") and _asl_literal_is_sensitive(text):
             return '"<redacted>"'
-        text = re.sub(r"[\x00-\x1f\x7f]", "", value)
         if len(text) > _MAX_ASL_CONDITION_VALUE_CHARS:
             text = text[: _MAX_ASL_CONDITION_VALUE_CHARS - 1] + "~"
         return text if key.endswith("Path") else f'"{text}"'
@@ -250,8 +266,10 @@ def _asl_condition(rule: Any, depth: int = 0) -> Optional[str]:
     for key, value in rule.items():
         if key in _ASL_CONDITION_NOT_A_TEST or not _ASL_COMPARISON_RE.fullmatch(key):
             continue
-        subject = variable if isinstance(variable, str) else "?"
-        subject = re.sub(r"[\x00-\x1f\x7f]", "", subject)[:_MAX_ASL_CONDITION_VALUE_CHARS]
+        subject = _asl_clean(variable) if isinstance(variable, str) else "?"
+        if _asl_literal_is_sensitive(subject):
+            subject = "<redacted>"
+        subject = subject[:_MAX_ASL_CONDITION_VALUE_CHARS]
         return f"{subject} {key} {_asl_condition_value(key, value)}"
     return None
 
