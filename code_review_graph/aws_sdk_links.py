@@ -25,11 +25,16 @@ from pathlib import Path
 from typing import Any
 
 from .aws_sdk_calls import RESOLUTION, UNRESOLVED_NAME
+from .aws_terraform_wiring import REF_TYPES, WIRING_OPS
 from .config_keys import normalize_spring_config_key
 from .graph import GraphStore
 
 STATUSES = ("matched", "not_found", "ambiguous", "unresolved", "declared")
-_TERRAFORM_OPS = frozenset({"declare", "notification", "policy"})
+_TERRAFORM_OPS = frozenset({"declare", "notification", "policy"}) | WIRING_OPS
+#: Extra fields a Terraform edge carries through to its row.
+_ROW_EXTRA = (
+    "schedule", "event_sources", "wiring", "route", "protocol", "dead_letter_target",
+)
 
 
 def _config_prefixes(store: GraphStore) -> dict[str, set[str]]:
@@ -91,7 +96,12 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
             "sdk": info.get("sdk", ""), "unresolved": bool(info.get("unresolved")),
             "placeholder": info.get("placeholder"),
             "extra": {
-                k: info[k] for k in ("notify_targets", "key_prefix") if k in info
+                k: info[k]
+                for k in (
+                    "notify_targets", "key_prefix", "terraform_label", "terraform_type",
+                    "source_ref", *_ROW_EXTRA,
+                )
+                if k in info
             },
         })
         if info.get("unresolved") and not out[-1]["placeholder"] and info.get("config_getter"):
@@ -99,7 +109,49 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
             if key:
                 out[-1]["placeholder"] = key
                 out[-1]["extra"]["config_defined"] = defined
+    _resolve_terraform_refs(out)
     return out
+
+
+def _resolve_terraform_refs(edges: list[dict[str, Any]]) -> None:
+    """Name the Terraform references that point at a resource declared in another file.
+
+    A module is a directory, so ``aws_sqs_queue.jobs`` written in ``main.tf`` is the queue that
+    ``queues.tf`` of the same directory declares. A reference with no such declaration is left
+    unresolved (the edge) or dropped (a target), never guessed.
+    """
+    declared: dict[tuple[str, str, str], str] = {}
+    for edge in edges:
+        extra = edge["extra"]
+        if (
+            edge["sdk"] == "terraform" and edge["operation"] == "declare"
+            and not edge["unresolved"] and edge["name"] != UNRESOLVED_NAME
+            and extra.get("terraform_type") and extra.get("terraform_label")
+        ):
+            folder = edge["file_path"].rsplit("/", 1)[0]
+            declared[(folder, extra["terraform_type"], extra["terraform_label"])] = edge["name"]
+    for edge in edges:
+        if edge["sdk"] != "terraform":
+            continue
+        extra = edge["extra"]
+        folder = edge["file_path"].rsplit("/", 1)[0]
+        ref = extra.get("source_ref")
+        if edge["unresolved"] and isinstance(ref, str) and "." in ref:
+            rtype, _, label = ref.partition(".")
+            name = declared.get((folder, rtype, label))
+            if name:
+                edge["name"], edge["unresolved"] = name, False
+        targets = extra.get("notify_targets")
+        if isinstance(targets, list):
+            kept = []
+            for target in targets:
+                if isinstance(target, str) and target.startswith("ref:"):
+                    rtype, _, label = target[4:].partition(".")
+                    name = declared.get((folder, rtype, label))
+                    target = f"{REF_TYPES[rtype][0]}/{name}" if name and rtype in REF_TYPES else ""
+                if target:
+                    kept.append(target)
+            extra["notify_targets"] = kept
 
 
 def resolve_links(
@@ -124,6 +176,20 @@ def resolve_links(
             for target in edge["extra"].get("notify_targets", []):
                 if target not in notify.setdefault(key, []):
                     notify[key].append(target)
+    triggers: dict[str, list[str]] = {}
+    for index, edges in edges_by_repo.items():
+        for edge in edges:
+            if edge["sdk"] != "terraform" or edge["unresolved"]:
+                continue
+            origin = f"{edge['service']}/{edge['name']}"
+            for target in edge["extra"].get("notify_targets", []):
+                note = f"{origin} ({edge['operation']})"
+                if note not in triggers.setdefault(target, []):
+                    triggers[target].append(note)
+            if edge["operation"] == "route" and edge["extra"].get("route"):
+                note = f"api_gateway {edge['extra']['route']}"
+                if note not in triggers.setdefault(origin, []):
+                    triggers[origin].append(note)
     owners: dict[tuple[str, str, str], list[int]] = {}
     rows: list[dict[str, Any]] = []
     for index, edges in edges_by_repo.items():
@@ -166,6 +232,13 @@ def resolve_links(
                 row["key_prefix"] = edge["extra"]["key_prefix"]
             if "config_defined" in edge["extra"]:
                 row["config_defined"] = edge["extra"]["config_defined"]
+            for field in _ROW_EXTRA:
+                if edge["extra"].get(field):
+                    row[field] = edge["extra"][field]
+            if edge["sdk"] == "terraform" and edge["operation"] == "declare":
+                fired_by = triggers.get(row["target"])
+                if fired_by:
+                    row["triggered_by"] = fired_by[:20]
             if found:
                 names = [
                     all_repos[i].get("alias") or Path(all_repos[i]["path"]).name for i in found

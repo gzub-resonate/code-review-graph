@@ -86,6 +86,11 @@ _TARGETS = {
 }
 _RESOURCE_NAME = re.compile(r"^resource\.(?P<type>[A-Za-z0-9_]+)\.(?P<label>[^.]+)$")
 _LAMBDA_PREFIX = "external:aws-lambda:"
+#: A Terraform declaration or trigger edge (``aws_terraform_wiring``) points at the resource its own
+#: block declares; it is not a state machine's call, so these passes leave it alone.
+_NOT_TERRAFORM_EDGE = (
+    "(NOT json_valid(extra) OR COALESCE(json_extract(extra, '$.sdk'), '') != 'terraform')"
+)
 #: File extensions a ``module.function`` handler's module may have, in order.
 _HANDLER_EXTENSIONS = (".py", ".js", ".mjs", ".cjs", ".ts")
 _INFERRED: dict[str, Any] = {"confidence": 0.6, "confidence_tier": "INFERRED"}
@@ -261,7 +266,8 @@ def _resolve_name_convention(store: GraphStore, stats: dict[str, int]) -> None:
     rows = conn.execute(
         "SELECT source_qualified, target_qualified, file_path, line, extra FROM edges "
         "WHERE kind = 'REFERENCES' AND (target_qualified LIKE 'external:aws-lambda:%' "
-        "OR target_qualified LIKE 'external:aws-ecs:%') ORDER BY id"
+        "OR target_qualified LIKE 'external:aws-ecs:%') AND " + _NOT_TERRAFORM_EDGE
+        + " ORDER BY id"
     ).fetchall()
     for row in rows:
         target = row["target_qualified"]
@@ -299,8 +305,8 @@ def _resolve_lambda_handlers(store: GraphStore, stats: dict[str, int]) -> None:
         return
     rows = store._conn.execute(  # intentional: bounded post-build maintenance pass
         "SELECT source_qualified, target_qualified, file_path, line FROM edges "
-        "WHERE kind = 'REFERENCES' AND target_qualified LIKE 'external:aws-lambda:%' "
-        "ORDER BY id"
+        "WHERE kind = 'REFERENCES' AND target_qualified LIKE 'external:aws-lambda:%' AND "
+        + _NOT_TERRAFORM_EDGE + " ORDER BY id"
     ).fetchall()
     done: set[tuple[str, str]] = set()
     for row in rows:
