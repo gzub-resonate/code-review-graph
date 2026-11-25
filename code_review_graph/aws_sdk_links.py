@@ -39,6 +39,7 @@ _TERRAFORM_OPS = frozenset({"declare", "notification", "policy"}) | WIRING_OPS
 #: Extra fields a Terraform edge carries through to its row.
 _ROW_EXTRA = (
     "schedule", "event_sources", "wiring", "route", "protocol", "dead_letter_target",
+    "arn_getter", "via",
 )
 
 
@@ -154,7 +155,32 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
                 out[-1]["placeholder"] = key
                 out[-1]["extra"]["config_defined"] = defined
     _resolve_terraform_refs(out)
+    _resolve_arn_getters(out)
     return out
+
+
+def _resolve_arn_getters(edges: list[dict[str, Any]]) -> None:
+    """Name a Step Functions call whose ARN comes from a getter that names one state machine.
+
+    ``StartExecution({stateMachineArn: await verticalRefreshArn()})`` has no name in its own
+    file; ``const verticalRefreshArn = () => sfn.stateMachineArn('vertical-refresh')`` does.
+    The call is named only when every getter of that name in the repo gives the same machine,
+    and it says so (``resolved_via``); two different answers leave it unresolved.
+    """
+    named: dict[str, set[str]] = {}
+    for edge in edges:
+        if edge["sdk"] != "arn-helper" or edge["unresolved"] or edge["name"] == UNRESOLVED_NAME:
+            continue
+        function = edge["source"].rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+        named.setdefault(function, set()).add(edge["name"])
+    for edge in edges:
+        getter = edge["extra"].get("arn_getter")
+        if not (edge["unresolved"] and isinstance(getter, str)):
+            continue
+        names = named.get(getter, set())
+        if len(names) == 1:
+            edge["name"], edge["unresolved"] = next(iter(names)), False
+            edge["extra"]["resolved_via"] = f"arn_getter:{getter}"
 
 
 _DECLARE_SQL = (

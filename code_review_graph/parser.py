@@ -85,6 +85,7 @@ from .messaging_edges import (
     emit_messaging_edges,
     trigger_edge,
 )
+from .module_constants import python_url_constants
 from .npm_alias_resolver import NpmAliasResolver
 from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
 
@@ -2048,7 +2049,12 @@ _KAFKA_PRODUCER_TYPES = frozenset({
 # is its explicit Java container form.
 _SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled", "Schedules"})
 
-_SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
+# ``@TransactionalEventListener`` is an ``@EventListener`` that waits for a transaction phase;
+# Spring Modulith's ``@ApplicationModuleListener`` is the same listener, asynchronous.
+# All three name the event the same way: ``classes``/``value``, else the first parameter.
+_SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({
+    "EventListener", "TransactionalEventListener", "ApplicationModuleListener",
+})
 _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
 _JAVA_WILDCARD_KEY = "__crg_java_wildcard__"
@@ -4302,6 +4308,12 @@ class CodeParser:
         # AWS SDK calls, s3:// locations and aws s3 commands (see aws_sdk_calls.py); not in tests.
         if not self._is_test_path(fallback_path):
             edges.extend(aws_sdk_edges(path, source, nodes, edges, self._get_parser))
+            # URL allow-lists held in Python constants (see module_constants.py).
+            constant_nodes, constant_edges = python_url_constants(
+                path, source, nodes, edges, self._get_parser,
+            )
+            nodes.extend(constant_nodes)
+            edges.extend(constant_edges)
         return nodes, edges
 
     def _extract_bytes(
@@ -18105,7 +18117,8 @@ class CodeParser:
                     "event_type": identity,
                     "resolution": "spring_event_listener",
                 }
-                for key in ("condition", "id", "defaultExecution"):
+                extra["listener_annotation"] = self._java_annotation_name(annotation)
+                for key in ("condition", "id", "defaultExecution", "phase", "fallbackExecution"):
                     if key in attributes:
                         extra[key] = attributes[key]
                 edges.append(EdgeInfo(

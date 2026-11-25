@@ -186,6 +186,16 @@ variable, and each `{{ ... }}` gives an `Output` node named `output:` plus what 
 hold no line number, so a name used twice is one node, and `extra.lines` lists every line.
 `CONTAINS` connects the file to each one. Search finds `Output` nodes only with `kind="Output"`.
 
+### Variable (Python URL constants)
+A top-level `UPPER_SNAKE` constant in a Python file whose value is an `http(s)` URL, or a set,
+list, tuple, `frozenset(...)` or dict of them, such as `ALLOWED_REFRESH_URLS`. The `Variable` node
+has `extra.constant`, `extra.url_values` (at most 20, each at most 300 characters),
+`extra.value_count` and `extra.truncated`. A name that looks like a secret (`SECRET`, `PASSWORD`,
+`TOKEN`, `API_KEY`, `CREDENTIAL`, `PRIVATE`), a URL with credentials or a query string, and any
+other value are left out. `CONTAINS` connects the file to the constant, and a `REFERENCES` edge
+(`extra.resolution = "module_constant"`) connects each function that names it, unless the function
+takes or assigns the same name itself. Test files are skipped.
+
 ### JsonPath
 A key or array shape parsed from a `.json` file (not a `*.asl.json` state machine, see Step Functions state machines below), in the same value-free shape as `YamlPath`: array items share one `[*]` path, an object with more than 200 keys is a table whose keys share one `.*` path, and values never enter the graph. Comments and trailing commas are accepted. Responses expose the same fields as `YamlPath`, without `document_index` or the YAML alias fields, under a nested `json` object.
 
@@ -360,7 +370,7 @@ keeps its dotted name, because a package has no single file.
 | REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment. An Ember `store.findRecord('post')`, `belongsTo('post')` or `hasMany('post')` references the model: `extra.ember_ref` is `model`, with `ember_store_method` or `ember_relationship`. A Step Functions Task state points at `external:aws-<service>:<name>` for what it calls |
 | DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives, Dockerfile stage to the earlier stage it starts from or copies from |
 | INJECTS | Spring bean -> injected field or constructor parameter type (`extra.qualifier` holds a literal `@Qualifier` value; class nodes carry `spring_bean_name` and `spring_qualifiers`); Ember class or module -> injected service or controller | Spring enrichment; Ember `extra`: `ember_inject` (`service`, `controller`), `ember_name`, `ember_explicit`, `field_name`, `ember_spelling` (`decorator`, `property`), then `ember_resolution` (`bound`, `unresolved`) and `ember_reason` (`no_module`, `ambiguous`). An unbound target stays `ember:<kind>:<name>` |
-| TRANSITIONS_TO | Step Functions state -> the state that runs next, or a Parallel or Map state -> the first state of a branch or processor | `extra.via` is `next`, `default`, `choice`, `catch`, `branch` or `map`; `extra.index` is the position in `Choices`, `Catch` or `Branches`; a `catch` edge also has `extra.error_equals`, the first five `ErrorEquals` names that are `States.*` or plain identifiers of at most 64 characters (never `Cause` text); the `default` edge has `extra.default: true`. Choice conditions, variables and values are never stored. `query_graph_tool` `next_states_of` / `previous_states_of` repeat `via`, `index`, `error_equals` and `default` on each edge row. A Parallel or Map state's own `Next` and `Catch` carry the flow after its branches finish |
+| TRANSITIONS_TO | Step Functions state -> the state that runs next, or a Parallel or Map state -> the first state of a branch or processor | `extra.via` is `next`, `default`, `choice`, `catch`, `branch` or `map`; `extra.index` is the position in `Choices`, `Catch` or `Branches`; a `catch` edge also has `extra.error_equals`, the first five `ErrorEquals` names that are `States.*` or plain identifiers of at most 64 characters (never `Cause` text); the `default` edge has `extra.default: true`. Choice conditions, variables and values are never stored. `query_graph_tool` `next_states_of` / `previous_states_of` repeat `via`, `index`, `error_equals` and `default` on each edge row, and add a Choice rule's test (`condition`, or `conditions` when several rules lead to one state) read from the file when the query runs, never from the graph. The file must lie inside the repository and hash to what was indexed; otherwise the row has `condition_unavailable` and no test. A Parallel or Map state's own `Next` and `Catch` carry the flow after its branches finish |
 | CONSUMES | `@KafkaListener` / `@KafkaHandler` method -> `kafka:<topic>` | Spring Kafka enrichment |
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |

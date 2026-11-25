@@ -159,6 +159,60 @@ def _is_external_target(pattern: str, target: str) -> bool:
     return pattern in _EXTERNAL_TARGET_PATTERNS and target.startswith(("external:", "kafka:"))
 
 
+#: Where a Spring application event's edges end: ``event::<package>.<Class>``.
+_EVENT_PREFIX = "event::"
+_JAVA_TYPE_KINDS = frozenset({"Class", "Interface", "Enum", "Record", "Type"})
+
+
+def _spring_event_end(node: Any) -> str | None:
+    """The ``event::`` end that a Java type's publish and listen edges point at.
+
+    ``publishEvent(new X())`` and ``@EventListener`` write ``event::<package>.X``, never
+    the class node's own qualified name, so a query on the class has to look there too.
+    The package is what the parser recorded for the class (``java_package``); a nested
+    class adds its owner, the way ``new Outer.Inner()`` is written.
+    """
+    if node is None or getattr(node, "language", None) != "java":
+        return None
+    if getattr(node, "kind", None) not in _JAVA_TYPE_KINDS:
+        return None
+    package = (getattr(node, "extra", None) or {}).get("java_package")
+    if not isinstance(package, str) or not package:
+        return None
+    owner = getattr(node, "parent_name", None)
+    simple = f"{owner}.{node.name}" if owner else node.name
+    return f"{_EVENT_PREFIX}{package}.{simple}"
+
+
+def _read_asl_conditions(
+    store: Any, root: Path, file_path: str,
+) -> dict[tuple[int, int], str | None] | None:
+    """The Choice-rule tests of one indexed ASL file, or ``None`` when they cannot be trusted.
+
+    The file must lie inside the repository and hash to what the graph indexed; otherwise a
+    rule's line and index could name a different rule than the edge was built from.
+    """
+    import hashlib
+
+    from ..asl_parse import _MAX_ASL_BYTES, read_choice_conditions
+    from ..parser import CodeParser
+
+    try:
+        path = Path(file_path).resolve()
+        path.relative_to(root.resolve())
+        if path.stat().st_size > _MAX_ASL_BYTES:
+            return None
+        data = path.read_bytes()
+        row = store._conn.execute(
+            "SELECT file_hash FROM nodes WHERE kind = 'File' AND file_path = ?", (file_path,),
+        ).fetchone()
+        if not row or not row[0] or hashlib.sha256(data).hexdigest() != row[0]:
+            return None
+        return read_choice_conditions(data, CodeParser()._get_parser("json"))
+    except (OSError, ValueError):
+        return None
+
+
 def _amqp_edge_fields(edge: Any) -> dict[str, Any]:
     """The AMQP keys of a publisher or listener edge, sanitised for output.
 
@@ -1601,7 +1655,12 @@ def query_graph(
                     candidates = exact_candidates or store.search_nodes(
                         target, limit=_MAX_BARE_TARGET_CANDIDATES,
                     )
-                if pattern == "inheritors_of" and "::" not in target:
+                if (
+                    pattern in ("inheritors_of", "publishers_of", "listeners_of")
+                    and "::" not in target
+                ):
+                    # A class and its constructor share one name; for these patterns the
+                    # type is what was asked about, so the constructor is not a rival.
                     exact_type_candidates = [
                         candidate
                         for candidate in candidates
@@ -1701,13 +1760,15 @@ def query_graph(
             and not external_target
             and "::" not in target
         ):
-            # A bare exchange name (``api.e.topic.vertical``): exchanges are edge ends, never
-            # nodes, so after the symbol search found nothing read it as the exchange.
-            channel = EXCHANGE_PREFIX + target
-            if store._conn.execute(
-                "SELECT 1 FROM edges WHERE target_qualified = ? LIMIT 1", (channel,),
-            ).fetchone():
-                target, external_target = channel, True
+            # A bare exchange name (``api.e.topic.vertical``) or an event type written in
+            # full (``com.acme.OrderPlaced``): both are edge ends, never nodes, so after
+            # the symbol search found nothing read the name as the end of an edge.
+            for channel in (EXCHANGE_PREFIX + target, _EVENT_PREFIX + target):
+                if store._conn.execute(
+                    "SELECT 1 FROM edges WHERE target_qualified = ? LIMIT 1", (channel,),
+                ).fetchone():
+                    target, external_target = channel, True
+                    break
 
         if not node and pattern not in ("consumers_of", "file_summary") and not external_target:
             # This branch, not the empty-result path below, is where an
@@ -2105,6 +2166,35 @@ def query_graph(
                 store.get_edges_by_source(qn) if forward else store.get_edges_by_target(qn)
             )
             seen_states: set[str] = set()
+            # A Choice rule's test is not in the graph (definitions are indexed value-free);
+            # it is read from the file, and only while the file is the one that was indexed.
+            conditions_by_file: dict[str, dict[tuple[int, int], str | None] | None] = {}
+
+            def rule_condition(edge: Any) -> tuple[str | None, str | None]:
+                """``(test, reason)`` for a ``choice`` edge: one of the two is ``None``."""
+                index = edge.extra.get("index")
+                if edge.extra.get("via") != "choice" or not isinstance(index, int):
+                    return None, None
+                if edge.file_path not in conditions_by_file:
+                    conditions_by_file[edge.file_path] = _read_asl_conditions(
+                        store, root, edge.file_path,
+                    )
+                table = conditions_by_file[edge.file_path]
+                if table is None:
+                    return None, "the file changed since it was indexed, or cannot be read"
+                text = table.get((edge.line, index))
+                return (text, None) if text else (None, "the rule's test is not readable")
+
+            conditions_by_state: dict[str, list[str]] = {}
+            for edge in edges:
+                if edge.kind != "TRANSITIONS_TO":
+                    continue
+                text, _reason = rule_condition(edge)
+                if text:
+                    state_key = edge.target_qualified if forward else edge.source_qualified
+                    kept = conditions_by_state.setdefault(state_key, [])
+                    if text not in kept and len(kept) < 5:
+                        kept.append(text)
             for edge in edges:
                 if edge.kind != "TRANSITIONS_TO":
                     continue
@@ -2124,6 +2214,14 @@ def query_graph(
                     for key in ("via", "index", "error_equals", "default"):
                         if key in edge.extra:
                             edges_out[-1][key] = edge.extra[key]
+                    own, reason = rule_condition(edge)
+                    if own:
+                        edges_out[-1]["condition"] = own
+                    elif reason:
+                        edges_out[-1]["condition_unavailable"] = reason
+                    rules = conditions_by_state.get(other_qn, [])
+                    if rules and (len(rules) > 1 or not own):
+                        edges_out[-1]["conditions"] = rules
 
         elif pattern == "triggers_of":
             for edge in store.get_edges_by_source(qn):
@@ -2148,27 +2246,35 @@ def query_graph(
         elif pattern in ("publishers_of", "listeners_of"):
             edge_kinds = PUBLISH_KINDS if pattern == "publishers_of" else ("HANDLES",)
             amqp_channel = qn.startswith(EXCHANGE_PREFIX)
-            for edge in store.get_edges_by_target(qn):
-                if edge.kind not in edge_kinds:
-                    continue
-                amqp_fields: dict[str, Any] = {}
-                if amqp_channel:
-                    amqp_fields = _amqp_edge_fields(edge)
-                    if routing_key is not None:
-                        # The listener's binding key is the pattern; for publishers_of the
-                        # key asked for is the binding key and the publisher's is the subject.
-                        if pattern == "listeners_of":
-                            how = link_kind(edge.extra.get("binding_key"), routing_key)
-                        else:
-                            how = link_kind(routing_key, edge.extra.get("routing_key"))
-                        if how is None:
-                            continue
-                        amqp_fields["matched_via"] = how
-                source = store.get_node(edge.source_qualified)
-                if source:
-                    add_result({**node_to_dict(source), **amqp_fields}, edge)
-                else:
-                    edges_out.append({**edge_to_dict(edge), **amqp_fields})
+            # A Java event class is reached through the node, but its edges end at
+            # ``event::<package>.<Class>``, so both ends are read.
+            ends = [qn]
+            event_end = _spring_event_end(node)
+            if event_end and event_end != qn:
+                ends.append(event_end)
+            for end in ends:
+                for edge in store.get_edges_by_target(end):
+                    if edge.kind not in edge_kinds:
+                        continue
+                    amqp_fields: dict[str, Any] = {}
+                    if amqp_channel:
+                        amqp_fields = _amqp_edge_fields(edge)
+                        if routing_key is not None:
+                            # The listener's binding key is the pattern; for publishers_of
+                            # the key asked for is the binding key and the publisher's is
+                            # the subject.
+                            if pattern == "listeners_of":
+                                how = link_kind(edge.extra.get("binding_key"), routing_key)
+                            else:
+                                how = link_kind(routing_key, edge.extra.get("routing_key"))
+                            if how is None:
+                                continue
+                            amqp_fields["matched_via"] = how
+                    source = store.get_node(edge.source_qualified)
+                    if source:
+                        add_result({**node_to_dict(source), **amqp_fields}, edge)
+                    else:
+                        edges_out.append({**edge_to_dict(edge), **amqp_fields})
 
         elif pattern == "advises":
             for edge in store.get_edges_by_source(qn):

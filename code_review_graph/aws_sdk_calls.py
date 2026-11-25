@@ -187,7 +187,7 @@ _SDK_OPERATION = {
 }
 #: ``sdk`` values whose ``operation`` is not an SDK operation (a CLI sub-command, a URI scan,
 #: Terraform).
-_NON_SDK = frozenset({"terraform", "aws-cli", "uri-literal"})
+_NON_SDK = frozenset({"terraform", "aws-cli", "uri-literal", "arn-helper"})
 ACCESS_MODES = ("read", "write", "delete", "list", "admin", "invoke")
 
 
@@ -1093,6 +1093,50 @@ class _Js:
             if found is None or not found[1].endswith("Command"):
                 continue
             self._command(node, found[0], found[1][: -len("Command")])
+        self._arn_helpers()
+
+    def _getter_call(self, node: Any) -> Optional[str]:
+        """``f`` for an argument written ``f()`` or ``await f()``: a getter that takes nothing."""
+        while node is not None and node.named_child_count and node.type in (
+            "await_expression", "parenthesized_expression", "as_expression",
+            "non_null_expression",
+        ):
+            node = node.named_children[0]
+        if node is None or node.type != "call_expression":
+            return None
+        fn, args = node.child_by_field_name("function"), node.child_by_field_name("arguments")
+        if fn is None or fn.type != "identifier" or (args is not None and args.named_child_count):
+            return None
+        return _text(fn, self.src)[:128]
+
+    def _arn_helpers(self) -> None:
+        """``sfn.stateMachineArn('name')``: a helper that turns a state machine's name into its ARN.
+
+        The call names the machine where the name is written out, so it is recorded as a
+        reference to it. A function that returns this ARN (``const arn = () =>
+        sfn.stateMachineArn('x')``) then carries the name to its callers, which the link step
+        joins to the ``StartExecution`` calls whose ARN is ``await arn()``.
+        """
+        for node in _walk(self.root):
+            if node.type != "call_expression":
+                continue
+            fn = node.child_by_field_name("function")
+            if fn is None or fn.type != "member_expression":
+                continue
+            prop = fn.child_by_field_name("property")
+            if prop is None or _text(prop, self.src) != "stateMachineArn":
+                continue
+            args = node.child_by_field_name("arguments")
+            first = args.named_children[0] if args is not None and args.named_child_count else None
+            if first is None:
+                continue
+            val = self.val(first)
+            if val.template is None or _DYN in val.template:
+                continue
+            self.out.add(
+                "states", "state_machine_arn", val, _line(node), "arn-helper",
+                access="unknown", extra={"via": "state_machine_arn_helper"},
+            )
 
     def _command(self, node: Any, service: str, base: str) -> None:
         operation = _snake(base)
@@ -1143,7 +1187,15 @@ class _Js:
                 value = pairs[name]
                 val = Val(self.consts.get(_text(value, self.src))) \
                     if value.type == "shorthand_property_identifier" else self.val(value)
-                self.out.add(service, operation, val, line, "aws-sdk-js-v3")
+                getter = (
+                    self._getter_call(value)
+                    if service == "states" and val.template is None and val.placeholder is None
+                    else None
+                )
+                self.out.add(
+                    service, operation, val, line, "aws-sdk-js-v3",
+                    extra={"arn_getter": getter} if getter else None,
+                )
                 return
         if spread:
             self.out.add(service, operation, Val(), line, "aws-sdk-js-v3")
