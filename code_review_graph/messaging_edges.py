@@ -1109,7 +1109,12 @@ def emit_messaging_edges(
         if listener_service:
             method_extra["message_listener"] = listener_service
         total = listeners + calls
-        triggers = [trigger_edge(edge) for edge in out if edge.kind == "CONSUMES"]
+        # A delete or purge call acknowledges a message; only a receive makes a trigger.
+        triggers = [
+            trigger_edge(edge)
+            for edge in out
+            if edge.kind == "CONSUMES" and edge.extra.get("access") != "delete"
+        ]
         if triggers:
             method_extra["queue_trigger"] = True
         out.extend(triggers)
