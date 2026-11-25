@@ -7,6 +7,9 @@ one node:
 
 * a consumer (``@SqsListener``, ``@RabbitListener``/``@RabbitHandler``, ``@JmsListener``,
   boto3 ``receive_message``, pika ``basic_consume``) gets a ``CONSUMES`` edge,
+* a consumer also gets a ``HANDLES`` edge to the same target (``extra.trigger = "queue"``;
+  ``extra.via`` says whether a listener annotation or an SDK receive call makes it the
+  trigger), so ``listeners_of`` and execution flows start from it,
 * a producer (``sendMessage``, ``publish``, ``convertAndSend``, ``basic_publish``, ...) gets
   a ``PRODUCES`` edge,
 * an SQS ``deleteMessage``/``deleteMessageBatch`` is the consuming side and gets a ``CONSUMES``
@@ -425,8 +428,12 @@ _PREFIX = {
     "sns": "external:aws-sns:",
     "rabbitmq": "external:rabbitmq:",
     "jms": "external:jms:",
+    "stream": "external:stream:",
 }
-_FIELD = {"sqs": "queue", "sns": "topic", "rabbitmq": "queue", "jms": "destination"}
+_FIELD = {
+    "sqs": "queue", "sns": "topic", "rabbitmq": "queue", "jms": "destination",
+    "stream": "channel",
+}
 
 
 def _edge(
@@ -589,6 +596,15 @@ def _java_listener_edges(method_node, consts, source, file_path, out) -> tuple[i
             emit("rabbitmq", node, line_node, "rabbit_listener", _plain_name)
         if not nodes:
             emit_unnamed("rabbitmq", line_node, "rabbit_listener")
+
+    ann = by_name.get("StreamListener")
+    if ann is not None:
+        # Spring Cloud Stream's legacy binding: the channel is the annotation's value or target.
+        nodes = _ann_value_nodes(ann, ("value", "target"))
+        for node in nodes:
+            emit("stream", node, ann, "stream_listener", _plain_name)
+        if not nodes:
+            emit_unnamed("stream", ann, "stream_listener")
 
     send_to = by_name.get("SendTo")
     if send_to is not None and listener_service is not None:
@@ -1039,6 +1055,36 @@ def _python_edges(function_node, source, file_path, out) -> int:
     return count
 
 
+# -- Queue triggers -----------------------------------------------------------------------------
+
+#: ``extra.resolution`` of a consumer edge that a container invokes (a listener annotation);
+#: any other consumer edge is a method that polls the queue through an SDK receive call.
+LISTENER_RESOLUTIONS = frozenset({
+    "sqs_listener", "jms_listener", "rabbit_listener", "stream_listener", "kafka_listener",
+})
+
+
+def trigger_edge(consumer):
+    """The ``HANDLES`` edge that makes a queue consumer the trigger of its method.
+
+    It points at the same target as the ``CONSUMES`` edge, so ``listeners_of`` on a queue
+    node answers with the methods that read it. ``extra.trigger`` is ``"queue"`` and
+    ``extra.via`` is ``"listener"`` (the container calls the method) or ``"poll"`` (the method
+    receives from the queue itself).
+    """
+    from .parser import EdgeInfo  # parser imports this module
+
+    via = "listener" if consumer.extra.get("resolution") in LISTENER_RESOLUTIONS else "poll"
+    return EdgeInfo(
+        kind="HANDLES",
+        source=consumer.source,
+        target=consumer.target,
+        file_path=consumer.file_path,
+        line=consumer.line,
+        extra={**consumer.extra, "trigger": "queue", "via": via},
+    )
+
+
 # -- Entry point --------------------------------------------------------------------------------
 
 
@@ -1063,6 +1109,15 @@ def emit_messaging_edges(
         if listener_service:
             method_extra["message_listener"] = listener_service
         total = listeners + calls
+        # A delete or purge call acknowledges a message; only a receive makes a trigger.
+        triggers = [
+            trigger_edge(edge)
+            for edge in out
+            if edge.kind == "CONSUMES" and edge.extra.get("access") != "delete"
+        ]
+        if triggers:
+            method_extra["queue_trigger"] = True
+        out.extend(triggers)
     elif language == "python":
         if node.type != "function_definition":
             return 0

@@ -62,7 +62,9 @@ def test_scheduled_metadata_preserves_repeatable_values(tmp_path: Path) -> None:
         if node.kind == "Scheduler"
     }
 
-    assert by_kind["cron"] == {
+    cron = dict(by_kind["cron"])
+    assert cron.pop("timing") == {"attributes": {"cron": "0 0 * * * *", "zone": "UTC"}}
+    assert cron == {
         "annotation": "Scheduled",
         "schedule_kind": "cron",
         "cron": "0 0 * * * *",

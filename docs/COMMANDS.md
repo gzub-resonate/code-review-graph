@@ -789,11 +789,27 @@ sort_by: str = "criticality"  # criticality, depth, node_count, file_count, name
 limit: int = 50               # Flows per page (max 200)
 kind: str | None              # Entry point kind (e.g. "Test", "Function")
 repo_root: str | None
-detail_level: str = "standard"   # "minimal": name, qualified_name, file, criticality, node_count
+detail_level: str = "standard"   # "minimal": name, qualified_name, file, criticality, node_count,
+                                 # entry_kind, group_size
 cursor: str | None            # next_cursor of the previous reply (see Result Bounds)
+entry_kind: str | None        # http, scheduler, queue_listener, event, main or other
+group_duplicates: bool = True # merge flows with the same call tree below the entry
 ```
 Each flow row carries `qualified_name` and `file` of its entry point (relative to
 the repository root), so two flows with the same name can be told apart.
+
+A Java flow is named `Class.method` (`OrderController.list`), not by the bare method name.
+Flow ids are unchanged; `get_flow_tool` still finds a flow by its bare method name. Each flow
+has an `entry_kind`: `http` (a route handler; `route` lists `GET /path`), `scheduler`
+(`@Scheduled`; `schedule` lists the timing attributes as written, and for a property
+placeholder the key and default, never the configured value), `queue_listener` (a listener
+annotation, or a worker that polls a queue through an SDK receive call; `queues` lists the
+targets, each with `via`: `listener` or `poll`), `event` (`@EventListener`), `main` or `other`.
+Flows whose call tree below the entry is the same set of nodes (a public and an admin
+controller calling one service method) are one row: the most critical stands for the group and
+`entry_points` lists every entry (`flow_id`, `name`, `entry_kind`, `route`), `group_size` counts
+them, and `total` counts groups. Pass `group_duplicates=false` for one row per entry.
+`get_flow_tool` lists the other flows with the same call tree under `same_call_tree_as`.
 
 #### `get_flow_tool`
 ```

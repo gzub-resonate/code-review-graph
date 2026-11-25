@@ -356,6 +356,16 @@ def _run_spring_event_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_java_interface_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the single-implementation interface call resolver without failing a build."""
+    try:
+        from .java_interface_resolver import resolve_java_interface_calls
+        return resolve_java_interface_calls(store)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Java interface resolver failed: %s", exc)
+        return None
+
+
 def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Temporal workflow/activity call resolver, swallowing any failure so
     build never fails because of it. Returns stats or None on error.
@@ -3265,6 +3275,7 @@ def full_build(
     spring_stats = _run_spring_resolver(store)
     aop_stats = _run_aop_resolver(store)
     spring_event_stats = _run_spring_event_resolver(store)
+    _run_java_interface_resolver(store)
     jooq_stats = _run_jooq_resolver(store, repo_root)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
@@ -3802,6 +3813,8 @@ def incremental_update(
     spring_event_stats = (
         _run_spring_event_resolver(store) if spring_changed else None
     )
+    if spring_changed:
+        _run_java_interface_resolver(store)
     jooq_stats = _run_jooq_resolver(store, repo_root) if spring_changed else None
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     hcl_changed = has_graph_changes and any(

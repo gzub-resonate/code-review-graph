@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..flows import get_flow_by_id, get_flows
+from ..flows import ENTRY_KINDS, get_flow_by_id, get_flows, group_duplicate_flows
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
 from ..paging import graph_stamp, make_scope, paginate, shown_range
@@ -33,12 +33,17 @@ def list_flows(
     kind: str | None = None,
     detail_level: str = "standard",
     cursor: str | None = None,
+    entry_kind: str | None = None,
+    group_duplicates: bool = True,
 ) -> dict[str, Any]:
     """List execution flows in the codebase, sorted by criticality.
 
     [EXPLORE] Retrieves stored execution flows from the knowledge graph.
     Each flow represents a call chain starting from an entry point
-    (e.g. HTTP handler, CLI command, test function).
+    (e.g. HTTP handler, CLI command, test function). A Java flow is named
+    ``Class.method``; every flow has an ``entry_kind`` (``http``, ``scheduler``,
+    ``queue_listener``, ``event``, ``main`` or ``other``) and, where they apply, ``route``,
+    ``schedule`` (the ``@Scheduled`` timing as written) and ``queues``.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
@@ -53,12 +58,23 @@ def list_flows(
         cursor: ``next_cursor`` from the previous reply, to read the next page
                 of the same list. Omit it for the first page. A cursor is opaque
                 and only valid for the same arguments on the same graph.
+        entry_kind: Optional filter by how the flow starts: ``http``, ``scheduler``,
+                ``queue_listener``, ``event``, ``main`` or ``other``.
+        group_duplicates: When true (default), flows whose call tree below the entry is
+                the same set of nodes (a public and an admin controller calling one
+                service method) are one flow: the most critical stands for the group and
+                lists every entry point under ``entry_points``. ``total`` counts groups.
 
     Returns:
         Flows with criticality scores, plus ``total`` and ``truncated``. When more
         flows remain, ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     _validate_positive_int(limit, "limit")
+    if entry_kind is not None and entry_kind not in ENTRY_KINDS:
+        return {
+            "status": "error",
+            "error": f"entry_kind must be one of {', '.join(ENTRY_KINDS)}",
+        }
 
     store, root = _get_store(repo_root)
     try:
@@ -66,7 +82,13 @@ def list_flows(
         # "count all, return a prefix" contract query.py uses for max_results.
         # The flows table has one row per entry point, so a full read is cheap
         # relative to serializing them all back to the client.
-        flows = get_flows(store, sort_by=sort_by, limit=_FETCH_ALL)
+        flows = get_flows(
+            store, sort_by=sort_by, limit=_FETCH_ALL, with_entry_metadata=True,
+        )
+        if entry_kind:
+            flows = [f for f in flows if f.get("entry_kind") == entry_kind]
+        if group_duplicates:
+            flows = group_duplicate_flows(flows)
 
         if kind:
             filtered = []
@@ -80,7 +102,10 @@ def list_flows(
 
         page = paginate(
             flows, limit, _MAX_FLOWS, cursor,
-            scope=make_scope("list_flows_tool", sort_by=sort_by, kind=kind),
+            scope=make_scope(
+                "list_flows_tool", sort_by=sort_by, kind=kind, entry_kind=entry_kind,
+                group_duplicates=group_duplicates,
+            ),
             stamp=graph_stamp(store),
         )
         flows, total = page.items, page.total
@@ -100,7 +125,10 @@ def list_flows(
             flows = [
                 {
                     k: f[k]
-                    for k in ("name", "qualified_name", "file", "criticality", "node_count")
+                    for k in (
+                        "name", "qualified_name", "file", "criticality", "node_count",
+                        "entry_kind", "group_size",
+                    )
                     if k in f
                 }
                 for f in flows

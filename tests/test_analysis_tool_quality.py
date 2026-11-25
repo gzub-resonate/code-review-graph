@@ -127,13 +127,15 @@ def built(tmp_path):
 
 
 def test_minimal_flow_rows_tell_same_named_entries_apart(built):
-    result = list_flows(repo_root=str(built), detail_level="minimal")
+    result = list_flows(repo_root=str(built), detail_level="minimal", group_duplicates=False)
 
     runs = [f for f in result["flows"] if f["name"] == "main"]
     assert len(runs) == 2
     assert {f["file"] for f in runs} == {"app.py", "other/app.py"}
     assert all(f["qualified_name"] == f"{f['file']}::main" for f in runs)
-    assert set(runs[0]) == {"name", "qualified_name", "file", "criticality", "node_count"}
+    assert set(runs[0]) == {
+        "name", "qualified_name", "file", "criticality", "node_count", "entry_kind",
+    }
 
 
 def test_minimal_bridge_rows_carry_qualified_name_and_relative_file(built):
