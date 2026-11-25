@@ -538,6 +538,29 @@ def _amqp_unindexed_note(store: GraphStore, pattern: str, target: str) -> str | 
     )
 
 
+def _edge_only_target_note(store: GraphStore, pattern: str, target: str) -> str | None:
+    """Say an ``external:`` target is in the graph as an edge end even though it has no node.
+
+    Queues, topics and exchanges are written as the end of edges and never as nodes, so
+    "no node matches" would wrongly call a target the graph knows "not indexed". When other
+    edges end there, say which kinds, so the 0 is read as "none of the kind asked for".
+    """
+    if not target.startswith("external:"):
+        return None
+    rows = store._conn.execute(
+        "SELECT kind, COUNT(*) FROM edges WHERE target_qualified = ? GROUP BY kind ORDER BY kind",
+        (target,),
+    ).fetchall()
+    if not rows:
+        return None
+    kinds = ", ".join(f"{kind} {count}" for kind, count in rows)
+    return _interpolated_target(
+        f"no {pattern} edge ends at '",
+        target,
+        f"', but other edges do ({kinds}): the target is in the graph",
+    )
+
+
 def empty_query_confidence(
     store: GraphStore,
     root: Path,
@@ -557,6 +580,9 @@ def empty_query_confidence(
         if amqp_note:
             return _bounded(amqp_note)
         if node is None:
+            edge_only_note = _edge_only_target_note(store, pattern, target)
+            if edge_only_note:
+                return _bounded(edge_only_note)
             if store.get_stats().total_nodes == 0:
                 return _bounded(
                     "graph is empty: nothing is indexed, so this 0 says "

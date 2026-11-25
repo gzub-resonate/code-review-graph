@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, cast
 
-from ..amqp_join import EXCHANGE_PREFIX, link_kind
+from ..amqp_join import EXCHANGE_PREFIX, PUBLISH_KINDS, link_kind
 from ..analysis import is_generated_file
 from ..aws_sdk_links import merge_resolved_names
 from ..config_keys import normalize_spring_config_key
@@ -2109,10 +2109,10 @@ def query_graph(
                     edges_out.append(edge_to_dict(edge))
 
         elif pattern in ("publishers_of", "listeners_of"):
-            edge_kind = "PUBLISHES" if pattern == "publishers_of" else "HANDLES"
+            edge_kinds = PUBLISH_KINDS if pattern == "publishers_of" else ("HANDLES",)
             amqp_channel = qn.startswith(EXCHANGE_PREFIX)
             for edge in store.get_edges_by_target(qn):
-                if edge.kind != edge_kind:
+                if edge.kind not in edge_kinds:
                     continue
                 amqp_fields: dict[str, Any] = {}
                 if amqp_channel:
