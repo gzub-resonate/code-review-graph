@@ -24,6 +24,7 @@ from collections import deque
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union
 
+from .analysis import is_generated_file
 from .constants import (
     CLAIMED_ENDPOINT_KEY,
     INHERITED_ENDPOINT_KEY,
@@ -2413,6 +2414,7 @@ def find_dead_code(
     kind: Optional[str] = None,
     file_pattern: Optional[str] = None,
     root: Optional[Union[str, Path]] = None,
+    include_generated: bool = False,
 ) -> list[dict[str, Any]]:
     """Find functions/classes with no callers, no test refs, no importers, and no references.
 
@@ -2433,6 +2435,9 @@ def find_dead_code(
         kind: Optional filter (e.g. ``"Function"`` or ``"Class"``).
         file_pattern: Optional file-path substring filter.
         root: Optional repo root path for computing ``relative_path``.
+        include_generated: Also report symbols in generated code (jOOQ, protobuf,
+            ``generated/`` directories). Left out by default: nobody edits those files,
+            so an unused generated accessor is not a deletion candidate.
 
     Returns:
         List of dead-code dicts with name, qualified_name, kind, file_path,
@@ -2633,6 +2638,9 @@ def find_dead_code(
 
         # Skip test nodes and anything defined in test files.
         if node.is_test or _in_test_file(node.file_path):
+            continue
+
+        if not include_generated and is_generated_file(node.file_path, test_root):
             continue
 
         # Skip ambient type declarations (.d.ts) — they describe external APIs.

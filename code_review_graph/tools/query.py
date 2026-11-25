@@ -2513,6 +2513,7 @@ _LARGE_KNOWN_KINDS = frozenset({
 #: data, not by logic a reviewer would split. Left out unless ``include_tests`` is true.
 _NON_PRODUCTION_PATH_RE = re.compile(
     r"(^|/)(__mocks__|mocks?|msw|fixtures?|__generated__|generated)/"
+    r"|(^|/)(\.?git-?hooks|\.husky)/"
     r"|\.(stories|generated|min)\.|_pb2(_grpc)?\.py$|baseline[^/]*\.sql$",
     re.IGNORECASE,
 )

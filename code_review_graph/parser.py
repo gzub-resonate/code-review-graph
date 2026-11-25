@@ -1893,6 +1893,10 @@ _TEST_DIR_PATTERNS = [
     # "specs/" just as often hold design documents or generated API specs,
     # which are production artefacts.  Require a Ruby source file under it.
     re.compile(_SEP + r"specs?[\\/].*\.(?:rb|rake)$"),
+    # Gradle and Maven extra test source sets: ``src/qaTest/``, ``src/integrationTest/``.
+    # The camelCase ``...Test`` suffix on a ``src/`` child is the convention, so a
+    # directory such as ``src/contest/`` is not claimed.
+    re.compile(_SEP + r"src[\\/][a-z][a-z0-9]*Tests?[\\/]"),
 ]
 
 # The singular ``test/`` directory, kept out of the list above so the
