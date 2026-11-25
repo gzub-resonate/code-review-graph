@@ -63,6 +63,15 @@ from ._common import (
     _unmatched_file_warning,
     _validate_positive_int,
 )
+from .query_extras import (
+    AUTO_RESOLVE_PATTERNS,
+    ENDPOINT_DIRECTIONS,
+    endpoint_label,
+    java_class_importers,
+    match_route_endpoints,
+    query_endpoints,
+    resolve_best,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1199,6 +1208,27 @@ def get_impact_radius(
 # ---------------------------------------------------------------------------
 
 
+def _attach_resolution_notes(
+    response: dict[str, Any],
+    ambiguity: dict[str, Any],
+    route_endpoints: list[GraphNode],
+    java_importers: dict[str, Any],
+) -> None:
+    """Add how the target was read: a best pick, a route match, Java class-level rows."""
+    if ambiguity:
+        response.update(ambiguity)
+        response["summary"] += (
+            f" -- '{ambiguity['resolved_to']}' chosen of {ambiguity['alternatives_total'] + 1} "
+            "matches (see alternatives; strict=true returns the candidates instead)"
+        )
+    if route_endpoints:
+        response["matched_endpoints"] = [endpoint_label(n) for n in route_endpoints[:10]]
+    if java_importers:
+        response["importers_level"] = java_importers["level"]
+        response["java_classes"] = java_importers["classes"]
+        response["note"] = java_importers["note"]
+
+
 def query_graph(
     pattern: str,
     target: str,
@@ -1209,6 +1239,8 @@ def query_graph(
     to: str | None = None,
     cursor: str | None = None,
     file_hint: str | None = None,
+    direction: str | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1218,7 +1250,8 @@ def query_graph(
                  next_states_of, previous_states_of, triggers_of, triggered_by,
                  publishers_of, listeners_of, handlers_of, endpoints_for, requests_of,
                  requesters_of, consumers_of, advises, advised_by, file_summary, path_to,
-                 external_targets (the target is an optional 'external:<family>' prefix).
+                 external_targets (the target is an optional 'external:<family>' prefix),
+                 endpoints (the target is an optional substring of "<METHOD> <route>").
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -1238,6 +1271,11 @@ def query_graph(
         file_hint: A substring of a file path (case-insensitive). When a bare name matches
             several symbols and the hint leaves exactly one, that one is used; a hint that
             leaves none or several keeps the "ambiguous" answer.
+        direction: For endpoints, ``inbound``, ``outbound`` or ``simulator`` (omit for all).
+            The direction is derived at query time; the reply's ``direction_signal`` says how.
+        strict: For handlers_of and references_to, keep the "ambiguous" answer (candidates, no
+            rows) when a name matches several nodes. By default the best match answers, with
+            ``ambiguous: true``, ``resolved_to`` and one-line ``alternatives``.
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
@@ -1248,6 +1286,9 @@ def query_graph(
         per node, plus a ``resolution_split`` saying how much of the answer is
         certain.
 
+        handlers_of also takes a route (``POST /v1/items``, ``/v1/items/{id}``); importers_of
+        on a Java file lists class-level importers (``import_level``).
+
         ``tests_for`` also returns ``tests_direct`` and ``tests_inferred``: how many of the
         ``result_count`` tests are traced links and how many carry ``inferred_by`` (guessed
         from a callee's test, an ambiguous call or a naming convention).
@@ -1257,6 +1298,10 @@ def query_graph(
     if resolution not in QUERY_RESOLUTIONS:
         raise ValueError(
             f"resolution must be one of {list(QUERY_RESOLUTIONS)}, got {resolution!r}"
+        )
+    if direction is not None and direction not in (*ENDPOINT_DIRECTIONS, "all"):
+        raise ValueError(
+            f"direction must be one of {[*ENDPOINT_DIRECTIONS, 'all']}, got {direction!r}"
         )
 
     store, root = _get_store(repo_root)
@@ -1285,10 +1330,17 @@ def query_graph(
             if cursor:
                 raise ValueError("external_targets has no pages; narrow it with a prefix")
             return _query_external_targets(store, target, minimal, response_limit)
+        if pattern == "endpoints":
+            return query_endpoints(
+                store, root, target, direction, minimal, response_limit, cursor,
+                _QUERY_PATTERNS["endpoints"],
+            )
         # The target as asked, before it is resolved: it is what the rows answer.
         scope_args: dict[str, Any] = {
             "pattern": pattern, "target": target, "resolution": resolution,
         }
+        if strict:
+            scope_args["strict"] = True
         if file_hint:
             scope_args["file_hint"] = file_hint
         page_scope = make_scope("query_graph_tool", **scope_args)
@@ -1361,6 +1413,9 @@ def query_graph(
         # file_summary targets are paths, so skip broad node search.
         node = None
         same_name_tests = 0
+        route_endpoints: list[GraphNode] = []
+        ambiguity: dict[str, Any] = {}
+        java_importers: dict[str, Any] = {}
         raw_config_target = pattern == "consumers_of" and "::" not in target
         external_target = _is_external_target(pattern, target)
         if pattern != "file_summary" and not raw_config_target and not external_target:
@@ -1371,6 +1426,16 @@ def query_graph(
                 target_path, separator, symbol = target.partition("::")
                 abs_target = f"{normalize_file_path(root / target_path)}{separator}{symbol}"
                 node = store.get_node(abs_target)
+            if not node and pattern == "handlers_of":
+                matched = match_route_endpoints(store, target)
+                if matched is not None:
+                    if not matched:
+                        return {
+                            "status": "not_found",
+                            "summary": f"No endpoint matches route '{_sanitize_name(target)}'.",
+                        }
+                    route_endpoints = matched
+                    node = matched[0]
             if not node:
                 exact_candidates: list[GraphNode] = []
                 qualified_tail_candidates = []
@@ -1446,8 +1511,18 @@ def query_graph(
                         candidates = candidates[:_MAX_BARE_TARGET_CANDIDATES]
                     else:
                         candidate_count = store.count_search_nodes(target)
-                    ranked = _rank_disambiguation_candidates(candidates, target, root)
-                    if minimal:
+                    if not strict and pattern in AUTO_RESOLVE_PATTERNS:
+                        best = resolve_best(
+                            store, candidates, target, pattern, root,
+                            candidate_count, file_hint,
+                        )
+                        if best is not None:
+                            node, ambiguity = best
+                            target = node.qualified_name
+                    ranked = (
+                        [] if node else _rank_disambiguation_candidates(candidates, target, root)
+                    )
+                    if node is None and minimal:
                         # Names only, once: the agent needs one of these to
                         # re-run the query, not a full row for each.
                         shortlist = [
@@ -1474,23 +1549,24 @@ def query_graph(
                                 )
                             ),
                         }
-                    return {
-                        "status": "ambiguous",
-                        "summary": (
-                            f"'{target}' matches {candidate_count} node(s). "
-                            "Re-run with a qualified_name from disambiguation."
-                        ),
-                        # Preserve the established key while adding the clearer
-                        # agent-facing name introduced by #458.
-                        "candidates": ranked,
-                        "disambiguation": ranked,
-                        "candidate_count": candidate_count,
-                        "candidates_truncated": candidate_count > len(candidates),
-                        "hint": (
-                            "Use a qualified_name from disambiguation as the "
-                            "target parameter."
-                        ),
-                    }
+                    if node is None:
+                        return {
+                            "status": "ambiguous",
+                            "summary": (
+                                f"'{target}' matches {candidate_count} node(s). "
+                                "Re-run with a qualified_name from disambiguation."
+                            ),
+                            # Preserve the established key while adding the clearer
+                            # agent-facing name introduced by #458.
+                            "candidates": ranked,
+                            "disambiguation": ranked,
+                            "candidate_count": candidate_count,
+                            "candidates_truncated": candidate_count > len(candidates),
+                            "hint": (
+                                "Use a qualified_name from disambiguation as the "
+                                "target parameter."
+                            ),
+                        }
 
         if not node and pattern not in ("consumers_of", "file_summary") and not external_target:
             # This branch, not the empty-result path below, is where an
@@ -1681,15 +1757,16 @@ def query_graph(
                 else node.file_path
             )
             seen_importers: set[str] = set()
+            java_file = not external_target and abs_target.endswith(".java")
             for e in store.iter_edges_by_target(abs_target):
                 if e.kind == "IMPORTS_FROM":
                     if e.source_qualified in seen_importers:
                         continue
                     seen_importers.add(e.source_qualified)
-                    add_result({
-                        "importer": e.source_qualified,
-                        "file": e.file_path,
-                    }, e)
+                    file_row = {"importer": e.source_qualified, "file": e.file_path}
+                    if java_file:
+                        file_row["import_level"] = "class"
+                    add_result(file_row, e)
             # A Go import names a package and a Ruby ``require_all`` names a
             # tree, so those edges target a DIRECTORY. One edge per import
             # rather than one per file in the package is what keeps the graph
@@ -1711,6 +1788,31 @@ def query_graph(
                         "file": e.file_path,
                         "via_package": directory,
                     }, e)
+            # Java imports are by class, not by file. The build binds an import to
+            # the file when it can; what it could not bind (another source root, a
+            # nested or static member import) and `pkg.*` wildcards keep the dotted
+            # name. Read those by the classes the file declares, and say they are
+            # class-level. A row found by the file path is class-level too: the
+            # import named a class of this file.
+            if java_file:
+                java_rows, java_classes = java_class_importers(store, abs_target)
+                if java_classes:
+                    java_importers = {
+                        "level": "class", "classes": java_classes[:10],
+                        "note": "Java imports are by class; rows are the importers of the "
+                                "classes this file declares (import_level: class, or "
+                                "package_wildcard for 'pkg.*').",
+                    }
+                for java_edge, level, imported in java_rows:
+                    if java_edge.source_qualified in seen_importers:
+                        continue
+                    seen_importers.add(java_edge.source_qualified)
+                    add_result({
+                        "importer": java_edge.source_qualified,
+                        "file": java_edge.file_path,
+                        "import_level": level,
+                        "imported": _sanitize_name(imported),
+                    }, java_edge)
             # C# fallback: `using X.Y;` directives produce IMPORTS_FROM edges
             # whose target is the raw namespace string, not a file path, so
             # the path lookup above misses them. Resolve the target file's
@@ -1929,14 +2031,24 @@ def query_graph(
                     edges_out.append(edge_to_dict(edge))
 
         elif pattern == "handlers_of":
-            for edge in store.get_edges_by_target(qn):
-                if edge.kind != "HANDLES":
-                    continue
-                handler = store.get_node(edge.source_qualified)
-                if handler:
-                    add_result(node_to_dict(handler), edge)
-                else:
-                    edges_out.append(edge_to_dict(edge))
+            seen_handlers: set[str] = set()
+            for endpoint_node in route_endpoints or [None]:
+                served = endpoint_node.qualified_name if endpoint_node else qn
+                for edge in store.get_edges_by_target(served):
+                    if edge.kind != "HANDLES":
+                        continue
+                    handler = store.get_node(edge.source_qualified)
+                    if handler:
+                        key = f"{edge.source_qualified}|{served}"
+                        if key in seen_handlers:
+                            continue
+                        seen_handlers.add(key)
+                        row_out = node_to_dict(handler)
+                        if endpoint_node is not None:
+                            row_out["endpoint"] = endpoint_label(endpoint_node)
+                        add_result(row_out, edge)
+                    else:
+                        edges_out.append(edge_to_dict(edge))
             if total_results == 0 and node is not None and node.kind != "Endpoint":
                 # The target is a handler, not an endpoint: answer with the
                 # endpoints it serves, as a reader who named it expects.
@@ -2082,7 +2194,9 @@ def query_graph(
             if pattern == "imports_of":
                 result_fields += ("import_target", "import_target_kind")
             elif pattern == "importers_of":
-                result_fields += ("importer", "file")
+                result_fields += ("importer", "file", "import_level")
+            if pattern == "handlers_of":
+                result_fields += ("endpoint",)
             minimal_results = [
                 {
                     k: r[k]
@@ -2113,6 +2227,9 @@ def query_graph(
                 minimal_response["resolution_split"] = resolution_split
             if confidence:
                 minimal_response["confidence"] = confidence
+            _attach_resolution_notes(
+                minimal_response, ambiguity, route_endpoints, java_importers,
+            )
             return minimal_response
 
         response: dict[str, Any] = {
@@ -2135,6 +2252,7 @@ def query_graph(
             response["resolution_split"] = resolution_split
         if confidence:
             response["confidence"] = confidence
+        _attach_resolution_notes(response, ambiguity, route_endpoints, java_importers)
         return response
     finally:
         store.close()

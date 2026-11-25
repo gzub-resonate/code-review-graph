@@ -346,6 +346,10 @@ def _class_members(nodes: list[GraphNode], raw_edges: list[GraphEdge]) -> tuple[
     return methods, bases
 
 
+#: Orderings ``find_hub_nodes`` offers; the first is the default.
+HUB_RANK_BY = ("resolved", "total")
+
+
 def find_hub_nodes(
     store: GraphStore,
     top_n: int = 10,
@@ -358,6 +362,7 @@ def find_hub_nodes(
     include_generated: bool = True,
     stats: dict[str, int] | None = None,
     exclude_data_types: bool = False,
+    rank_by: str = "resolved",
 ) -> list[dict]:
     """Find the most connected nodes (highest in+out degree), excluding File nodes.
 
@@ -381,6 +386,14 @@ def find_hub_nodes(
     harder than one defined twice. Ranking uses ``ranking_degree`` (weighted);
     ``total_degree`` stays the raw count.
 
+    Every row carries ``resolved_degree`` (traced edges that are not name matches),
+    ``unresolved_degree`` (bare-name edges plus name-matched calls to a shared name) and
+    ``resolved_share`` (``resolved / (resolved + unresolved)``). *rank_by* ``"resolved"``
+    (default) orders by ``resolved_degree``, so a generic name such as ``insert`` or
+    ``execute`` that only looks hot through name collisions drops; ``"total"`` keeps the
+    older order by the damped ``ranking_degree``. Ties fall back to the other measure and
+    then to the qualified name.
+
     Generated code (see ``is_generated_file``) is left out unless *include_generated* is true;
     a *stats* dict receives ``generated_excluded``, the number of nodes that cost.
 
@@ -394,6 +407,8 @@ def find_hub_nodes(
     resolution_split
     (``direct``: edges counted, ``bare_name``: edges left out)
     """
+    if rank_by not in HUB_RANK_BY:
+        raise ValueError(f"rank_by must be one of {list(HUB_RANK_BY)}, got {rank_by!r}")
     # Get all non-File nodes
     if nodes is None:
         nodes = store.get_all_nodes(exclude_files=True)
@@ -404,6 +419,7 @@ def find_hub_nodes(
     in_degree: dict[str, int] = Counter()
     out_degree: dict[str, int] = Counter()
     weighted: dict[str, float] = Counter()
+    name_matched: dict[str, int] = Counter()
     shared = _shared_definition_names(nodes)
     builds_on: set[str] = set()
     for e in edges:
@@ -412,6 +428,8 @@ def find_hub_nodes(
         w = 1.0
         if _is_name_matched_edge(e, node_map, shared):
             w = _name_matched_weight(shared[node_map[e.target_qualified].name])
+            name_matched[e.source_qualified] += 1
+            name_matched[e.target_qualified] += 1
         weighted[e.source_qualified] += w
         weighted[e.target_qualified] += w
         if e.kind in _OUTGOING_USE_KINDS:
@@ -450,6 +468,9 @@ def find_hub_nodes(
         if exclude_data_types and data_type:
             data_types_excluded += 1
             continue
+        nm = name_matched.get(qn, 0)
+        unresolved = bare.get(qn, 0) + nm
+        resolved = total - nm
         scored.append({
             "name": _sanitize_name(n.name),
             "qualified_name": n.qualified_name,
@@ -459,6 +480,11 @@ def find_hub_nodes(
             "out_degree": outd,
             "total_degree": total,
             "ranking_degree": round(weighted.get(qn, 0.0), 2),
+            "resolved_degree": resolved,
+            "unresolved_degree": unresolved,
+            "resolved_share": (
+                round(resolved / (resolved + unresolved), 2) if resolved + unresolved else 0.0
+            ),
             "community_id": community_map.get(qn),
             "data_type": data_type,
             "resolution_split": {"direct": total, "bare_name": bare.get(qn, 0)},
@@ -466,7 +492,12 @@ def find_hub_nodes(
 
     # Equal degrees are ordered by qualified name, so a ranking read in pages never
     # repeats or skips a node.
-    scored.sort(key=lambda x: (-x["ranking_degree"], x["qualified_name"]))
+    if rank_by == "resolved":
+        scored.sort(key=lambda x: (
+            -x["resolved_degree"], -x["ranking_degree"], x["qualified_name"],
+        ))
+    else:
+        scored.sort(key=lambda x: (-x["ranking_degree"], x["qualified_name"]))
     if stats is not None:
         stats["generated_excluded"] = generated_excluded
         stats["data_types_excluded"] = data_types_excluded

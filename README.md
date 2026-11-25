@@ -627,7 +627,7 @@ The assistant uses these once the graph is built. The 25 tools that only read ca
 | `get_community_tool` | One community |
 | `get_architecture_overview_tool` | Architecture overview from community structure |
 | `detect_changes_tool` | Risk-scored change impact analysis |
-| `get_hub_nodes_tool` | Most-connected nodes |
+| `get_hub_nodes_tool` | Most-connected nodes, ranked by resolved edges (`rank_by`), with `resolved_share` |
 | `get_bridge_nodes_tool` | Chokepoints by betweenness centrality |
 | `get_knowledge_gaps_tool` | Structural weaknesses, untested hotspots and import cycles |
 | `get_surprising_connections_tool` | Unexpected cross-community coupling |

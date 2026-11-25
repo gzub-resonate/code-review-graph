@@ -27,6 +27,22 @@
   implementations only the interface edge remains; injected fields keep their `@Qualifier`,
   `@Primary` and bean-name resolution.
 
+
+- `query_graph_tool` pattern `endpoints`: lists `Endpoint` nodes as one compact line each
+  (method, path, owner, file:line, direction) with `direction_counts`, filtered by an optional
+  `<METHOD> <route>` substring and `direction` (`inbound`, `outbound`, `simulator`), and paged with
+  `cursor`. The direction is derived at query time (client role or `REQUESTS` edge, simulator-like
+  path segment or class name; `CRG_SIMULATOR_PATHS` overrides the path test) and the reply says how.
+- `handlers_of` takes a route (`POST /v1/items`, `/v1/items/{id}`). For `handlers_of` and
+  `references_to`, a name that several nodes share answers with the best match (exact name,
+  `file_hint`, non-test, kind, in-degree) plus `ambiguous`, `resolved_to` and `alternatives` with a
+  reason each; `strict=true` keeps the previous `ambiguous` candidate list.
+- `get_hub_nodes_tool` rows carry `resolved_degree`, `unresolved_degree` and `resolved_share`, and
+  the new `rank_by` parameter (`resolved`, the default, or `total`) picks the order. Hubs are now
+  ranked by resolved edges by default, so names that only look hot through collisions drop.
+- `importers_of` on a Java file lists the class-level importers of the classes it declares,
+  including imports that kept the dotted class name and `pkg.*` wildcards, labelled with
+  `import_level` and `importers_level`.
 - `python -m code_review_graph.index_fingerprint` prints an index fingerprint: a short hash of
   the code a graph build runs (the import closure of the build, update, post-processing, embed
   and schema-migration entry points, each module as a normalised syntax tree so comment, docstring

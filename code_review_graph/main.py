@@ -644,6 +644,8 @@ async def query_graph_tool(
     cursor: Optional[str] = None,
     limit: Optional[int] = None,
     file_hint: Optional[str] = None,
+    direction: Optional[str] = None,
+    strict: bool = False,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -652,7 +654,8 @@ async def query_graph_tool(
     - references_to: Find nodes that reference the target
     - callees_of: Find functions called by the target
     - imports_of: Find what the target imports
-    - importers_of: Find files that import the target
+    - importers_of: Find files that import the target. For a Java file, rows are the class-level
+      importers of the classes it declares (``import_level``: class or package_wildcard)
     - children_of: Find nodes contained in a file or class
     - tests_for: Find tests for the target
     - inheritors_of: Find classes inheriting from the target
@@ -664,13 +667,18 @@ async def query_graph_tool(
     - listeners_of: Find methods that listen for an event
     - advises: Find methods an AOP advice targets via its pointcut
     - advised_by: Find AOP advice methods that intercept the target
-    - handlers_of: Find methods that handle an endpoint
+    - handlers_of: Find methods that handle an endpoint; the target may be a route such as
+      "POST /v1/items" or "/v1/items/{id}"
     - endpoints_for: Find endpoints handled by a method
     - requests_of: Find outbound HTTP endpoints a client method requests
     - requesters_of: Find client methods that request an outbound endpoint
     - consumers_of: Find classes that consume a Spring configuration property
     - file_summary: Get all nodes in a file
     - path_to: Find how the target reaches ``to``, one row per hop
+    - endpoints: List Endpoint nodes, one compact line each (method, path, owner, file:line,
+      direction) plus ``direction_counts``. ``target`` is an optional substring of
+      "<METHOD> <route>" (empty lists all); ``direction`` keeps inbound, outbound or simulator.
+      Direction is derived at query time and ``direction_signal`` says how.
 
     callers_of, callees_of and references_to return one row per call site, each
     carrying the ``call_site`` (file and line) the call is written at, plus a
@@ -701,6 +709,11 @@ async def query_graph_tool(
             several symbols and the hint leaves exactly one, that one is used; otherwise the
             answer is "ambiguous" as usual. ``tests_for`` replies carry ``tests_direct`` and
             ``tests_inferred`` counts.
+        direction: For endpoints only: "inbound", "outbound" or "simulator". Default: all.
+        strict: For handlers_of and references_to. By default a name that matches several nodes
+            answers with the best match (exact name, file_hint file, kind, in-degree) plus
+            ``ambiguous: true``, ``resolved_to`` and ``alternatives`` with a reason each. Set
+            true to get the "ambiguous" candidates list and no rows instead.
 
     Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
@@ -712,6 +725,7 @@ async def query_graph_tool(
             detail_level=detail_level,
             max_results=limit if limit is not None else max_results,
             resolution=resolution, to=to, cursor=cursor, file_hint=file_hint,
+            direction=direction, strict=strict,
         ),
         root,
     )
@@ -1511,6 +1525,7 @@ async def get_hub_nodes_tool(
     include_config: bool = False,
     include_generated: bool = False,
     exclude_data_types: bool = False,
+    rank_by: str = "resolved",
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1543,8 +1558,13 @@ async def get_hub_nodes_tool(
             methods. Default: false. Left out before ranking, totals and paging;
             ``data_types_excluded`` says how many that removed and each row's ``data_type``
             says why it is data-like. A cursor made with one value is refused for the other.
+        rank_by: "resolved" (default) orders by ``resolved_degree``, the edges bound to an
+            indexed node, so a generic name (insert, put, execute) that only looks hot through
+            name collisions drops. "total" orders by ``ranking_degree`` (name-matched edges
+            damped). A cursor made with one value is refused for the other.
 
-    Rows are ordered by ``ranking_degree`` (name-matched edges damped), so the raw
+    Each row carries ``resolved_degree``, ``unresolved_degree`` and ``resolved_share``. Rows are
+    ordered by ``resolved_degree`` (``ranking_degree`` with rank_by="total"), so the raw
     ``total_degree`` shown beside it is not strictly descending.
     """
     root = _resolve_repo_root(repo_root)
@@ -1555,7 +1575,7 @@ async def get_hub_nodes_tool(
             include_tests=include_tests,
             exclude_leaf_primitives=exclude_leaf_primitives,
             include_config=include_config, include_generated=include_generated,
-            exclude_data_types=exclude_data_types,
+            exclude_data_types=exclude_data_types, rank_by=rank_by,
         ),
         root,
     )

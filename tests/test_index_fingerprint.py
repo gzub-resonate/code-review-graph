@@ -28,8 +28,8 @@ QUERY_ONLY = {
     "aws_sdk_links", "stepfunction_links", "terraform_links", "workflow_links",
     # MCP tool front-ends
     "tools.analysis_tools", "tools.community_tools", "tools.context", "tools.flows_tools",
-    "tools.pr_tools", "tools.query", "tools.refactor_tools", "tools.registry_tools",
-    "tools.review",
+    "tools.pr_tools", "tools.query", "tools.query_extras", "tools.refactor_tools",
+    "tools.registry_tools", "tools.review",
     # CLI, server, installers and environment plumbing
     "__main__", "cli", "main", "stdio", "daemon_cli", "doctor", "dsh", "enrich",
     "hook_update", "install_gitignore", "install_manifest", "jsonc", "multi_worktree",
