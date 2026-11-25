@@ -8,6 +8,7 @@
 - [GITHUB_ACTION.md](GITHUB_ACTION.md): risk-scored PR review comments in GitHub Actions
 - [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md): add a language through `.code-review-graph/languages.toml`
 - [REPO_ALIASES.md](REPO_ALIASES.md): give a registered repository a second name through `repo-aliases.toml`
+- [SERVICE_ALIASES.md](SERVICE_ALIASES.md): map Feign service names to repositories (alias file, inference) and join code repositories to their infrastructure
 - [EMBER.md](EMBER.md): what the graph knows about Ember.js apps, how names are bound, and what it cannot see
 - [INFRASTRUCTURE_REFERENCES.md](INFRASTRUCTURE_REFERENCES.md): GitHub Actions, Dockerfile and Terragrunt references as external edges
 - [architecture.md](architecture.md): system design and data flow

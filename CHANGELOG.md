@@ -4,6 +4,19 @@
 
 ### Added
 
+- Cross-repo service-name aliases and infrastructure joins, all at query time (no graph rebuild).
+  A Feign service name that is not a registered repo name now resolves through an optional JSON or
+  YAML alias file (`CRG_SERVICE_ALIASES_FILE`, `{"alias": "repo", "prefix:billing-api-": "repo"}`)
+  or through names the repositories declare: Spring `spring.application.name`, ECS service and
+  task-definition names, ECR repository names (compared after folding case, `-`/`_` and one
+  environment suffix). `cross_repo_requests_tool` rows report `matched_via`; a name that reaches
+  several repos is `ambiguous` with `candidate_repos`, never guessed. `origin` `terraform`,
+  `stepfunction` and `awssdk` return an `infrastructure` summary per repo (ECR, ECS, stack and
+  module directories, declared queues, buckets, topics and tables, each with repo, file, line and
+  `matched_via`); `awssdk` rows matched to a Terraform declaration carry `declared_by`, the join now
+  finds declarations in registered repos that were not selected, and `query_graph_tool`
+  `external_targets` shows `matched` with `declared_by`. See `docs/SERVICE_ALIASES.md`.
+
 - The change tools share one rule for a call that names no change: `detect_changes_tool`,
   `get_review_context_tool`, `get_impact_radius_tool`, `get_affected_flows_tool` and
   `pr_blast_radius_tool` review the last commit (`HEAD~1..HEAD`; the whole commit, from the empty

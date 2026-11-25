@@ -13,6 +13,8 @@ from typing import Any, Optional
 
 from .. import aws_sdk_links as al
 from .. import feign_links as fl
+from .. import infra_join as ij
+from .. import service_aliases as sa
 from .. import stepfunction_links as sl
 from .. import terraform_links as tl
 from .. import workflow_links as wl
@@ -689,7 +691,7 @@ def _terraform_links(
     return _infra_links(
         "terraform", "remote Terraform module source(s)", tl.STATUSES, tl.read_module_edges,
         tl.module_folder_exists, tl.resolve_links, "module_repo", "module_path",
-        repos, module_repo, module_path, status, max_results,
+        repos, module_repo, module_path, status, max_results, infrastructure=True,
     )
 
 
@@ -720,7 +722,7 @@ def _stepfunction_links(
     result = _infra_links(
         "stepfunction", "Step Functions target(s)", sl.STATUSES, sl.read_target_edges,
         definitions.defines, sl.resolve_links, "target_name", "target",
-        repos, target_name, target, status, max_results,
+        repos, target_name, target, status, max_results, infrastructure=True,
     )
     for row in result["results"]:
         for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
@@ -743,7 +745,8 @@ def _awssdk_links(
     result = _infra_links(
         "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges,
         definitions.defines, al.resolve_links, "target_name", "target",
-        repos, target_name, target, status, max_results,
+        repos, target_name, target, status, max_results, infrastructure=True,
+        read_context=al.read_declare_edges,
     )
     for row in result["results"]:
         # Every string here was read from a repository's files: none is passed on as written.
@@ -754,7 +757,8 @@ def _awssdk_links(
                 row[key] = [_sanitize_name(str(item)) for item in value]
             elif isinstance(value, dict):
                 row[key] = {
-                    _sanitize_name(str(k)): _sanitize_name(str(v)) for k, v in value.items()
+                    _sanitize_name(str(k)): v if isinstance(v, int) else _sanitize_name(str(v))
+                    for k, v in value.items()
                 }
     return result
 
@@ -773,10 +777,14 @@ def _infra_links(
     target_path: str | None,
     status: str | None,
     max_results: int,
+    infrastructure: bool = False,
+    read_context: Any = None,
 ) -> dict[str, Any]:
-    """Shared body of the ``terraform``, ``workflow`` and ``stepfunction`` origins.
+    """Shared body of the ``terraform``, ``workflow``, ``stepfunction`` and ``awssdk`` origins.
 
     One read-only join each. *exists_in_repo* is ``(store, repo path, what) -> bool``.
+    *read_context*, when given, reads from the registered repos that were not selected what
+    only helps to find an owner (``resolve`` then gets it as its fourth argument).
     """
     from ..registry import Registry
 
@@ -826,8 +834,29 @@ def _infra_links(
         except sqlite3.Error:
             return False
 
+    context: dict[int, list[dict[str, Any]]] = {}
+    if read_context is not None:
+        chosen = {id(e) for e in selected}
+        for entry in all_repos:
+            if id(entry) in chosen or (budget and _now() - started > budget):
+                continue
+            store = tl.open_store(entry)
+            if store is None:
+                continue
+            try:
+                found = read_context(store)
+            except (sqlite3.Error, GraphStoreError) as exc:
+                logger.warning("Cannot read %s context of %s: %s", origin, entry["path"], exc)
+                continue
+            finally:
+                store.close()
+            if found:
+                context[by_id[id(entry)]] = found
     try:
-        rows = resolve(edges_by_repo, all_repos, folder_exists)
+        rows = (
+            resolve(edges_by_repo, all_repos, folder_exists, context) if read_context is not None
+            else resolve(edges_by_repo, all_repos, folder_exists)
+        )
     finally:
         for opened in stores.values():
             if opened is not None:
@@ -866,7 +895,31 @@ def _infra_links(
         result["skipped_repos"] = skipped
     if unknown_shown:
         result["unknown"] = unknown_shown
+    if infrastructure:
+        _attach_infrastructure(result, all_repos, selected, budget)
     return result
+
+
+def _attach_infrastructure(
+    result: dict[str, Any], all_repos: list[dict[str, Any]], selected: list[dict[str, Any]],
+    budget: float,
+) -> None:
+    """Add the per-repo ``infrastructure`` summary (see ``infra_join``) to a reply."""
+    rules = sa.load_alias_rules()
+    resolver = RepoNameResolver(all_repos)
+    by_id = {id(e): i for i, e in enumerate(all_repos)}
+    block = ij.build_infrastructure(
+        all_repos, [by_id[id(e)] for e in selected], sa.FactsCache(all_repos), rules,
+        resolver.lookup, budget,
+    )
+    result["infrastructure"] = block
+    if block["repos_total"]:
+        result["summary"] += (
+            f"; infrastructure matched for {block['repos_total']} repo(s) "
+            "(see infrastructure)"
+        )
+    if block["truncated"]:
+        result["truncated"] = True
 
 
 def cross_repo_requests_func(
@@ -930,6 +983,14 @@ def cross_repo_requests_func(
             repo that defines it; ``service`` then filters by target name, ``route`` by
             kind (``lambda``) or ``kind/name``, and ``status`` is one of ``matched``,
             ``not_found`` or ``ambiguous``.
+
+    A Feign service name that is not a registered repo name resolves through the optional
+    alias file ``CRG_SERVICE_ALIASES_FILE`` (``{"alias": "repo", "prefix:p-": "repo"}``) or
+    the names the repos declare (``spring.application.name``, ECS service, ECR repository);
+    rows carry ``matched_via``, and a name reaching several repos is ``ambiguous`` with
+    ``candidate_repos``. The ``terraform``, ``stepfunction`` and ``awssdk`` origins also return
+    an ``infrastructure`` object relating each selected repo to the ECR, ECS, stack and declared
+    resources that belong to it (see ``docs/SERVICE_ALIASES.md``).
 
     The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 300,
     0 = unlimited). Once spent, no further client repo is started; those left are
@@ -1016,6 +1077,16 @@ def cross_repo_requests_func(
         names += list(load_repo_aliases())
         for name in names:
             folded[fl.normalize_service_name(name)].add(name)
+
+        alias_rules = sa.load_alias_rules()
+        facts = sa.FactsCache(all_repos)
+        identity_holder: list[sa.IdentityIndex] = []
+
+        def identity() -> sa.IdentityIndex:
+            # Read lazily: only a service name nothing else resolved needs every repo's facts.
+            if not identity_holder:
+                identity_holder.append(sa.IdentityIndex(all_repos, facts))
+            return identity_holder[0]
 
         selected_ids = {id(e) for e in selected}
         # Each repo's graph is read at most once, whether it turns up as a
@@ -1131,8 +1202,12 @@ def cross_repo_requests_func(
                     )
                 elif reason is None:
                     assert call.service is not None
-                    resolution = fl.resolve_service(call.service, resolver.lookup, folded)
-                    if not resolution.indexes:
+                    resolution = sa.resolve_service(
+                        call.service, resolver.lookup, folded, alias_rules, identity,
+                    )
+                    if resolution.candidates:
+                        result = fl.LinkResult(fl.AMBIGUOUS, resolution.reason)
+                    elif not resolution.indexes:
                         result = fl.LinkResult(fl.NO_TARGET_REPO, resolution.reason)
                     else:
                         pool: list[fl.ServerEndpoint] = []
@@ -1179,6 +1254,14 @@ def cross_repo_requests_func(
                     row["reason"] = result.reason
                 if resolution is not None and resolution.how:
                     row["target_resolution"] = resolution.how
+                if resolution is not None and resolution.matched_via:
+                    row["matched_via"] = resolution.matched_via
+                if resolution is not None and resolution.candidates:
+                    row["candidate_repos"] = [
+                        _sanitize_name(_repo_label(all_repos[i]))
+                        for i in resolution.candidates[:_MAX_CANDIDATES_PER_ROW]
+                    ]
+                    row["candidate_repos_total"] = len(resolution.candidates)
                 if result.candidates:
                     row["candidates"] = [
                         _candidate_row(c) for c in result.candidates[:_MAX_CANDIDATES_PER_ROW]
