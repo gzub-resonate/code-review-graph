@@ -126,7 +126,8 @@ code-review-graph query callers_of <target>    # Takes every query_graph_tool pa
                                                 #   children_of, tests_for, inheritors_of, next_states_of,
                                                 #   previous_states_of, triggers_of, triggered_by, publishers_of,
                                                 #   listeners_of, advises, advised_by, handlers_of, endpoints_for,
-                                                #   requests_of, requesters_of, consumers_of, file_summary, path_to
+                                                #   requests_of, requesters_of, consumers_of, file_summary, path_to,
+                                                #   external_targets, endpoints
 code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
 code-review-graph impact [--files F ...] [--depth N] [--max-results N] [--base REF] [--detail-level compact] [--max-files N]
 code-review-graph search <query> [--kind Function] [--limit N]
@@ -541,8 +542,9 @@ pattern: str    # callers_of, references_to, callees_of, imports_of, importers_o
                 # children_of, tests_for, inheritors_of, next_states_of, previous_states_of,
                 # triggers_of, triggered_by, publishers_of, listeners_of, advises, advised_by,
                 # handlers_of, endpoints_for, requests_of, requesters_of, consumers_of,
-                # file_summary, path_to
-target: str     # Node name, qualified name, or file path
+                # file_summary, path_to, external_targets, endpoints
+target: str     # Node name, qualified name, or file path (handlers_of: also a route;
+                # endpoints: an optional substring of "<METHOD> <route>")
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
@@ -550,7 +552,42 @@ limit: int | None                # Alias of max_results; wins when both are give
 resolution: str = "all"          # "all", "direct", or "unresolved"
 to: str | None                   # path_to only: the node or file to reach
 cursor: str | None               # next_cursor of the previous reply (see Paging)
+direction: str | None            # endpoints only: "inbound", "outbound" or "simulator"
+strict: bool = False             # handlers_of / references_to: keep the "ambiguous" answer
 ```
+**`endpoints`** lists `Endpoint` nodes as one line each,
+`METHOD route owner file:line dir` (space separated, `dir` is `in`, `out` or `sim`), sorted
+by route, with `direction_counts` over everything the `target` substring matches, whatever its
+direction, and `files_under`, the directory the page's files share (the rows give paths below it).
+It pages with `max_results` and `cursor` like the other patterns; 100 rows are about 7 KB. The
+direction is not stored in the graph. It is derived at query time and the reply's
+`direction_signal` repeats how: `outbound` is an endpoint whose `role` is `client` (a Feign or
+JavaScript client declaration) or the target of a `REQUESTS` edge; `simulator` is a server
+route with a `__` or `sim`-prefixed path segment, or `simulator` in its class name or path;
+every other server route is `inbound`. `CRG_SIMULATOR_PATHS` (comma separated, case-insensitive
+substrings of the route) replaces the path-segment test. `RestClient`, `WebClient` and
+`@HttpExchange` call sites are not stored as endpoints, so they never appear.
+
+**Names that match several nodes.** For `handlers_of` and `references_to`, a name that is the
+exact name of several nodes no longer stops at `ambiguous`. The best match answers (exact
+qualified name, then the `file_hint` file, then non-test code, then kind: `Class` over `Function` for
+`references_to`, a node that serves an endpoint for `handlers_of`, then the higher in-degree) with its
+rows, and the reply adds `ambiguous: true`, `resolved_to` and up to ten `alternatives`, each with
+`qualified_name`, `kind`, `file` and a one-line `reason` it ranks lower. A name that matches only
+fuzzily is never promoted, and `strict=true` returns the `ambiguous` candidate list as before. A
+name that exactly one node has resolves directly, as it always did. `handlers_of` also takes a
+route: `POST /v1/items`, `/v1/items/{id}`, `GET /items/{itemId}`. Path variables (`{id}`, `:id`,
+`<id>`) are equal, case and a trailing slash do not matter, a route that ends with the given path
+on a segment boundary matches when the full one does not, and the reply lists
+`matched_endpoints`.
+
+**Java importers.** Java imports are by class, so `importers_of` on a Java file path reads the
+classes the file declares: importers the build bound to the file, imports that kept the
+dotted class name (another source root, a nested or static member import), and `pkg.*` wildcards.
+Rows carry `import_level` (`class`, or `package_wildcard`), and the reply adds
+`importers_level: "class"`, `java_classes` and a `note`. Same-package users write no import and
+are not importers.
+
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the
 call is written outside the row's own `file_path`), and rows whose target was
@@ -810,6 +847,7 @@ repo_root: str | None
 detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
 cursor: str | None               # next_cursor of the previous reply (see Result Bounds)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
+rank_by: str = "resolved"        # "resolved" orders by resolved_degree, "total" by ranking_degree
 exclude_leaf_primitives: bool = False  # skip nodes that build on no other node
 include_config: bool = False     # JSON/YAML/output/property nodes are left out before ranking
 ```
@@ -820,6 +858,14 @@ bare name no node answers to (`get`, `parse`, `main`) is left out, as the
 `unresolved` calls of `query_graph_tool` are, so a symbol does not rank for the
 calls it makes to names it could not pin. Each row's `resolution_split` gives
 `direct` (the edges counted) and `bare_name` (the edges left out).
+
+Each row also carries `resolved_degree` (counted edges that are not name matches),
+`unresolved_degree` (bare-name edges plus calls a resolver bound by name alone to a name many
+symbols define) and `resolved_share`, `resolved / (resolved + unresolved)`. By default
+(`rank_by="resolved"`) hubs are ordered by `resolved_degree`, so a generic name such as `insert`,
+`put` or `execute` that only looks hot through name collisions drops below a symbol with fewer,
+traced edges. `rank_by="total"` keeps the older order by `ranking_degree` (name-matched edges
+damped). A cursor made with one value is refused for the other.
 
 `exclude_leaf_primitives` skips nodes with no outgoing `CALLS` or `REFERENCES` to
 an indexed non-test node. A design-system component that hundreds of files use

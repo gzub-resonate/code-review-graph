@@ -548,7 +548,10 @@ QUERY_PATTERNS = {
     "references_to": "Find all nodes that reference a given symbol",
     "callees_of": "Find all functions called by a given function",
     "imports_of": "Find all imports of a given file or module",
-    "importers_of": "Find all files that import a given file or module",
+    "importers_of": (
+        "Find all files that import a given file or module; for a Java file, the importers of "
+        "the classes it declares (import_level class or package_wildcard)"
+    ),
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
@@ -560,13 +563,21 @@ QUERY_PATTERNS = {
     "listeners_of": "Find methods that listen for an event",
     "advises": "Find methods an AOP advice targets via its pointcut",
     "advised_by": "Find AOP advice methods that intercept a given method",
-    "handlers_of": "Find methods that handle an endpoint",
+    "handlers_of": (
+        "Find methods that handle an endpoint, given as a route ('POST /v1/items', "
+        "'/v1/items/{id}') or a name; several name matches answer with the best one, the rest "
+        "in alternatives (strict=true lists candidates instead)"
+    ),
     "endpoints_for": "Find endpoints handled by a method",
     "requests_of": "Find outbound HTTP endpoints a client method requests",
     "requesters_of": "Find client methods that request an outbound endpoint",
     "consumers_of": "Find classes that consume a Spring configuration property",
     "file_summary": "Get a summary of all nodes in a file",
     "path_to": "Find how a given symbol or file reaches another",
+    "endpoints": (
+        "List Endpoint nodes, one compact line each, with counts by direction "
+        "(inbound, outbound, simulator); target filters '<METHOD> <route>'"
+    ),
     "external_targets": (
         "List the external targets (queues, topics, buckets, tables) the code reaches, "
         "optionally those under a prefix such as external:rabbitmq"
