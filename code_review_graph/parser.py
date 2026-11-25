@@ -1515,7 +1515,10 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # impl_item is a scope for methods, not a second type definition. It is
     # dispatched separately so repeated impl blocks cannot overwrite structs.
     "rust": ["struct_item", "enum_item", "trait_item"],
-    "java": ["class_declaration", "interface_declaration", "enum_declaration"],
+    "java": [
+        "class_declaration", "interface_declaration", "enum_declaration",
+        "record_declaration",
+    ],
     "c": ["struct_specifier", "type_definition"],
     "cpp": ["class_specifier", "struct_specifier"],
     "csharp": [
@@ -1618,7 +1621,9 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     ],
     "go": ["function_declaration", "method_declaration"],
     "rust": ["function_item", "function_signature_item"],
-    "java": ["method_declaration", "constructor_declaration"],
+    "java": [
+        "method_declaration", "constructor_declaration", "compact_constructor_declaration",
+    ],
     "c": ["function_definition"],
     "cpp": ["function_definition", "declaration", "field_declaration"],
     "csharp": ["method_declaration", "constructor_declaration"],
@@ -2042,6 +2047,11 @@ _SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
 _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
 _JAVA_WILDCARD_KEY = "__crg_java_wildcard__"
+#: Packages named by ``import pkg.*;`` (comma-joined), so a class spelled
+#: without an import can still be looked up beside the package's files.
+_JAVA_WILDCARD_PACKAGES_KEY = "__crg_java_wildcard_packages__"
+#: ``Outer.Inner`` written as a type: capitalised segments only, no package.
+_JAVA_NESTED_TYPE = re.compile(r"[A-Z][\w$]*(?:\.[A-Z][\w$]*)+")
 _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
 # Spring Cloud OpenFeign declares an HTTP client as an annotated interface.
 # Its request mappings describe calls the service makes, not routes it serves.
@@ -2912,7 +2922,7 @@ def _class_type_form(node, language: str) -> Optional[str]:
     """
     if node.type in ("enum_declaration", "enum_item", "enum_definition"):
         return "enum"
-    if language == "csharp" and node.type == "record_declaration":
+    if node.type == "record_declaration" and language in ("csharp", "java"):
         return "record"
     if language == "kotlin":
         if any(c.type == "enum" for c in node.children):
@@ -4572,6 +4582,9 @@ class CodeParser:
         )
 
         if language == "java":
+            self._apply_java_static_imports(
+                tree.root_node, file_path_str, nodes, edges,
+            )
             edges = self._qualify_java_same_package_constructors(
                 edges, file_path_str, import_map,
             )
@@ -9200,7 +9213,12 @@ class CodeParser:
                             or language == "csharp"
                             or (
                                 language == "java"
-                                and self._java_same_package_file(receiver, file_path)
+                                and (
+                                    self._java_same_package_file(receiver, file_path)
+                                    or self._java_wildcard_class_file(
+                                        receiver, file_path, import_map,
+                                    )
+                                )
                             )
                         ):
                             type_name = receiver
@@ -9548,6 +9566,17 @@ class CodeParser:
             and qualified.group(0).rsplit(".", 1)[-1] == result[name]
         ):
             result[name] = qualified.group(0)
+            return
+        nested = _JAVA_NESTED_TYPE.match(
+            type_node.text.decode("utf-8", errors="replace").strip(),
+        )
+        if (
+            name in result
+            and nested is not None
+            and nested.group(0).rsplit(".", 1)[-1] == result[name]
+        ):
+            # ``Outer.Inner`` keeps its chain: the members live under it.
+            result[name] = nested.group(0)
 
     @classmethod
     def _base_type_name(cls, annotation: str) -> Optional[str]:
@@ -9613,6 +9642,11 @@ class CodeParser:
             class_name = type_name.rsplit(".", 1)[-1]
             return f"{self._qualify(class_name, package_file, None)}.{method}"
 
+        if language == "java" and _JAVA_NESTED_TYPE.fullmatch(type_name):
+            head, _, chain = type_name.partition(".")
+            outer = self._java_class_symbol(head, file_path, import_map, defined_names)
+            return f"{outer}.{chain}.{method}" if outer else None
+
         base_type = self._base_type_name(type_name)
         if not base_type:
             return None
@@ -9631,7 +9665,106 @@ class CodeParser:
             same_package = self._java_same_package_file(base_type, file_path)
             if same_package:
                 return f"{same_package}::{base_type}.{method}"
+            wildcard = self._java_wildcard_class_file(base_type, file_path, import_map)
+            if wildcard:
+                return f"{wildcard}::{base_type}.{method}"
         return None
+
+    def _apply_java_static_imports(
+        self,
+        root,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Link ``import static pkg.Cls.NAME;`` / ``pkg.Cls.*`` to the class it names.
+
+        The file uses the class even though it never spells ``Cls``: a REFERENCES
+        edge goes to the class, and a bare call ``NAME(...)`` that no method of
+        this file declares goes to ``Cls.NAME`` (a Java method declared in the
+        class hides a static import of the same name). A constant needs no edge
+        of its own. Imports that resolve to no file in the repository (JDK,
+        libraries) are left as they are.
+        """
+        members: dict[str, str] = {}
+        seen_classes: set[str] = set()
+        for child in root.children:
+            if child.type != "import_declaration":
+                continue
+            text = child.text.decode("utf-8", errors="replace").strip()
+            if not text.startswith("import static "):
+                continue
+            imported = text[len("import static "):].rstrip(";").strip()
+            class_module, _, member = imported.rpartition(".")
+            if not class_module or not member:
+                continue
+            class_name = class_module.rsplit(".", 1)[-1]
+            if not self._resolve_module_to_file(class_module, file_path, "java"):
+                continue
+            symbol = self._resolve_imported_symbol(
+                class_name, class_module, file_path, "java",
+            )
+            if not symbol:
+                continue
+            if symbol not in seen_classes:
+                seen_classes.add(symbol)
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=file_path,
+                    target=symbol,
+                    file_path=file_path,
+                    line=child.start_point[0] + 1,
+                    extra={"use_form": "static_import"},
+                ))
+            if member != "*":
+                members.setdefault(member, symbol)
+        if not members:
+            return
+        declared = {n.name for n in nodes if n.kind in ("Function", "Test")}
+        for edge in edges:
+            if (
+                edge.kind == "CALLS"
+                and edge.target in members
+                and edge.target not in declared
+                and "receiver" not in edge.extra
+            ):
+                edge.extra = {**edge.extra, "static_import": True}
+                edge.target = f"{members[edge.target]}.{edge.target}"
+
+    def _java_class_symbol(
+        self,
+        name: str,
+        file_path: str,
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> Optional[str]:
+        """Qualified name (``file::Class``) of a Java class written by *name*, or None."""
+        if name in import_map:
+            return self._resolve_imported_symbol(name, import_map[name], file_path, "java")
+        if name in defined_names:
+            return f"{file_path}::{name}"
+        located = (
+            self._java_same_package_file(name, file_path)
+            or self._java_wildcard_class_file(name, file_path, import_map)
+        )
+        return f"{located}::{name}" if located else None
+
+    def _java_wildcard_class_file(
+        self, class_name: str, file_path: str, import_map: dict[str, str],
+    ) -> Optional[str]:
+        """File of *class_name* when exactly one ``import pkg.*`` package holds it."""
+        packages = import_map.get(_JAVA_WILDCARD_PACKAGES_KEY)
+        if not packages or not class_name.isidentifier():
+            return None
+        found = {
+            located
+            for package in packages.split(",")
+            for located in [self._resolve_module_to_file(
+                f"{package}.{class_name}", file_path, "java",
+            )]
+            if located
+        }
+        return next(iter(found)) if len(found) == 1 else None
 
     @staticmethod
     def _apply_typed_call_targets(
@@ -18497,6 +18630,18 @@ class CodeParser:
                     for modifier in child.children if modifier.type == "modifiers"
                     for grandchild in modifier.children
                 ) else "concrete"
+            if child.type == "record_declaration":
+                # The component names are the implicit accessor methods.
+                header = child.child_by_field_name("parameters")
+                components = [
+                    name_node.text.decode("utf-8", errors="replace")
+                    for param in (header.named_children if header is not None else ())
+                    if param.type in ("formal_parameter", "spread_parameter")
+                    for name_node in [param.child_by_field_name("name")]
+                    if name_node is not None
+                ]
+                if components:
+                    extra["record_components"] = components
             class_annotations = self._get_java_annotations(child)
             spring_stereotypes = [
                 a for a in class_annotations if a in _SPRING_STEREOTYPE_ANNOTATIONS
@@ -18972,7 +19117,9 @@ class CodeParser:
         modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
         if deco_list:
             method_extra["decorators"] = list(deco_list)
-        if language == "java" and child.type == "constructor_declaration":
+        if language == "java" and child.type in (
+            "constructor_declaration", "compact_constructor_declaration",
+        ):
             # Lets consumers tell a constructor from a method; Spring AOP,
             # for one, cannot intercept constructors.
             method_extra["java_constructor"] = True
@@ -23214,6 +23361,11 @@ class CodeParser:
                 return
             if imported.endswith(".*"):
                 import_map[_JAVA_WILDCARD_KEY] = "1"
+                package = imported[:-2].strip()
+                known = import_map.get(_JAVA_WILDCARD_PACKAGES_KEY)
+                import_map[_JAVA_WILDCARD_PACKAGES_KEY] = (
+                    f"{known},{package}" if known else package
+                )
                 return
             original, separator, alias = imported.partition(" as ")
             local_name = alias.strip() if separator else original.rsplit(".", 1)[-1]
@@ -25011,7 +25163,7 @@ class CodeParser:
         # ``identifier`` (e.g. ``Task``). Prefer the name field; unusual shapes
         # still fall through.
         if language in ("java", "csharp") and kind == "function" and node.type in (
-            "method_declaration", "constructor_declaration",
+            "method_declaration", "constructor_declaration", "compact_constructor_declaration",
         ):
             name_node = node.child_by_field_name("name")
             if name_node is not None:
