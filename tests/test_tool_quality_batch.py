@@ -274,7 +274,7 @@ def test_hubs_carry_ranking_degree_in_every_detail_level(repo):
     for level in ("standard", "minimal"):
         result = get_hub_nodes_func(repo_root=str(repo.root), detail_level=level)
         assert all("ranking_degree" in h and "total_degree" in h for h in result["hub_nodes"])
-        assert "ranking_degree" in result["summary"]
+        assert "resolved_degree" in result["summary"]
         assert "not strictly descending" in result["summary"]
 
 

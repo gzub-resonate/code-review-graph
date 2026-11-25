@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..analysis import (
+    HUB_RANK_BY,
     find_bridge_nodes,
     find_hub_nodes,
     find_knowledge_gaps,
@@ -30,7 +31,10 @@ _MAX_BRIDGE_NODES = 100
 _MAX_SURPRISING = 100
 _MAX_GAPS_PER_CATEGORY = 50
 
-_MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree", "ranking_degree", "data_type")
+_MINIMAL_HUB_FIELDS = (
+    "name", "kind", "total_degree", "ranking_degree", "resolved_degree", "resolved_share",
+    "data_type",
+)
 # Two rows can share a bare name, so a minimal row also says where it is.
 _MINIMAL_BRIDGE_FIELDS = ("name", "qualified_name", "file", "kind", "betweenness")
 _MINIMAL_SURPRISE_FIELDS = (
@@ -92,6 +96,7 @@ def get_hub_nodes_func(
     include_config: bool = False,
     include_generated: bool = False,
     exclude_data_types: bool = False,
+    rank_by: str = "resolved",
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
 
@@ -131,15 +136,25 @@ def get_hub_nodes_func(
             ``data_type`` (the label, or null) either way. A cursor is only valid for the
             value it was made with. Needs a graph built after this filter existed for
             enums, Kotlin data classes and TS interfaces.
+        rank_by: "resolved" (default) orders hubs by ``resolved_degree``: edges bound to an
+            indexed node, leaving out bare-name matches and calls a resolver bound by name
+            alone to a name many symbols share, so a generic ``insert`` or ``execute`` that only
+            looks hot through name collisions drops. "total" keeps the older order by
+            ``ranking_degree`` (name-matched edges damped). A cursor is only valid for the
+            value it was made with.
 
     Returns:
-        Ranked hubs. Rows are ordered by ``ranking_degree`` (name-matched edges are damped),
-        so ``total_degree`` (the raw count) is not strictly descending. ``total`` reports
+        Ranked hubs. Each row carries ``resolved_degree``, ``unresolved_degree`` and
+        ``resolved_share`` (resolved over resolved plus unresolved). Rows are ordered by
+        ``resolved_degree`` (or ``ranking_degree`` with ``rank_by="total"``), so
+        ``total_degree`` (the raw count) is not strictly descending. ``total`` reports
         the untruncated candidate count and ``truncated`` marks that ``top_n`` or the
         ceiling cut the list; then
         ``next_cursor`` is the ``cursor`` that returns the next page.
     """
     _validate_positive_int(top_n, "top_n")
+    if rank_by not in HUB_RANK_BY:
+        raise ValueError(f"rank_by must be one of {list(HUB_RANK_BY)}, got {rank_by!r}")
 
     store, _root = _get_store(repo_root or None)
     try:
@@ -148,7 +163,7 @@ def get_hub_nodes_func(
             store, top_n=_FETCH_ALL, include_tests=include_tests,
             exclude_leaf_primitives=exclude_leaf_primitives,
             include_config=include_config, include_generated=include_generated, stats=stats,
-            exclude_data_types=exclude_data_types,
+            exclude_data_types=exclude_data_types, rank_by=rank_by,
         )
         # A repository of data files has no hub but its config nodes. Hiding them
         # would leave an empty ranking, so they are ranked instead and the reply says so.
@@ -158,7 +173,7 @@ def get_hub_nodes_func(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
                 exclude_leaf_primitives=exclude_leaf_primitives, include_config=True,
                 include_generated=include_generated, stats=stats,
-                exclude_data_types=exclude_data_types,
+                exclude_data_types=exclude_data_types, rank_by=rank_by,
             )
             if with_config:
                 ranked, config_only = with_config, True
@@ -169,7 +184,7 @@ def get_hub_nodes_func(
                 exclude_leaf_primitives=exclude_leaf_primitives,
                 include_config=include_config or config_only,
                 include_generated=include_generated,
-                exclude_data_types=exclude_data_types,
+                exclude_data_types=exclude_data_types, rank_by=rank_by,
             ),
             stamp=graph_stamp(store),
         )
@@ -179,8 +194,14 @@ def get_hub_nodes_func(
         result: dict[str, Any] = {
             "status": "ok",
             "summary": (
-                f"{total} hub node(s) ranked by ranking_degree (name-matched edges damped, "
-                "so total_degree is not strictly descending)"
+                f"{total} hub node(s) ranked by "
+                + (
+                    "resolved_degree (bare-name and name-matched edges left out; "
+                    "resolved_share is the traced fraction of each hub's edges)"
+                    if rank_by == "resolved"
+                    else "ranking_degree (name-matched edges damped, "
+                    "so total_degree is not strictly descending)"
+                )
                 + shown_range(page)
                 + _generated_note(include_generated, stats)
                 + _data_types_note(exclude_data_types, stats)
