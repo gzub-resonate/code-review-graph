@@ -176,3 +176,17 @@ def test_ordinary_allow_list_urls_survive_the_secret_checks() -> None:
         "})\n"
     )
     assert len(_constants(source)["ALLOWED_REFRESH_URLS"]) == 2
+
+
+def test_a_webhook_host_cannot_hide_behind_a_port_case_dot_or_encoding() -> None:
+    source = """\
+HIDDEN_A = ['https://hooks.slack.com:443/services/T0000/B0000/XXXXXXXXXXXXXXXXXXXXXXXX']
+HIDDEN_B = ['https://hooks.slack.com./services/T0000/B0000/XXXXXXXXXXXXXXXXXXXXXXXX']
+HIDDEN_C = ['https://HOOKS.SLACK.COM/services/T0000/B0000/XXXXXXXXXXXXXXXXXXXXXXXX']
+HIDDEN_D = ['https://api.example.net/%68ooks/catch']
+HIDDEN_E = ['https://api.example.net/hooks;v=1/catch']
+HIDDEN_F = ['https://discord.com:8443/api/webhooks/1/abc']
+HIDDEN_G = ['https://api.example.net/files/9f8e7d6c5b4a39281706f5e4d3c2b1a0%3Bx']
+ALLOWED_URLS = ['https://ok.example.net:8443/v1/refresh']
+"""
+    assert _constants(source) == {"ALLOWED_URLS": ["https://ok.example.net:8443/v1/refresh"]}

@@ -48,14 +48,26 @@ def _url_is_sensitive(url: str) -> bool:
     Such a URL is dropped whole, not trimmed. An allow-list's URLs are plain host and path
     (``/v2/admin/verticals/refresh``); a long mixed letter-digit segment, a UUID, an account
     id or a ``hooks``/``webhook`` host or segment is what a credential in a URL looks like.
+    The URL is normalised and parsed first, so a port, an upper-case or trailing-dot host, a
+    percent-encoded segment or a ``;parameter`` cannot hide what the checks look for; a URL
+    that cannot be parsed is dropped.
     """
+    import unicodedata
+    from urllib.parse import unquote, urlsplit
+
     from .aws_config_names import _looks_like_token
 
-    rest = url.partition("://")[2]
-    host, _, path = rest.partition("/")
-    if _WEBHOOK_HOST.search(host.lower()):
+    try:
+        parts = urlsplit(unicodedata.normalize("NFKC", url))
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
         return True
-    for segment in (s for s in path.split("/") if s):
+    if not host or _WEBHOOK_HOST.search(host):
+        return True
+    for raw in parts.path.split("/"):
+        segment = unquote(raw).split(";", 1)[0]
+        if not segment:
+            continue
         if _WEBHOOK_SEGMENT.fullmatch(segment) or _UUID.fullmatch(segment):
             return True
         if _looks_like_token(segment) or (
@@ -64,6 +76,8 @@ def _url_is_sensitive(url: str) -> bool:
         ):
             return True
     return False
+
+
 _COLLECTION_TYPES = frozenset({"set", "list", "tuple", "dictionary", "parenthesized_expression"})
 _COLLECTION_CALLS = frozenset({"frozenset", "set", "tuple", "list", "dict"})
 
