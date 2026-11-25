@@ -1280,6 +1280,24 @@ def incremental_trace_flows(
 ENTRY_KINDS = ("http", "scheduler", "queue_listener", "event", "main", "other")
 
 _MAX_ROUTES = 3
+_MAX_SCHEDULES = 10
+_MAX_QUEUES = 10
+_MAX_FIELD = 200
+
+
+def _clean(value: object) -> object:
+    """A repo-derived value made safe for a reply: every string goes through ``_sanitize_name``
+    (control characters stripped, length cut) and is folded to one line; dict keys, list items
+    and nested values are cleaned the same way. Numbers and booleans pass unchanged."""
+    if isinstance(value, str):
+        return " ".join(_sanitize_name(value, _MAX_FIELD).split())
+    if isinstance(value, dict):
+        return {_clean(str(k)): _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _clean(str(value))
 
 
 def _json_dict(raw: object) -> dict:
@@ -1302,8 +1320,8 @@ def _queue_triggers(store: GraphStore) -> dict[int, list[dict]]:
     for row in rows:
         extra = _json_dict(row["extra"])
         entry = {
-            "target": _sanitize_name(row["target_qualified"]),
-            "via": extra.get("via") or "listener",
+            "target": _clean(row["target_qualified"]),
+            "via": _clean(str(extra.get("via") or "listener")),
         }
         if entry not in triggers.setdefault(row["node_id"], []):
             triggers[row["node_id"]].append(entry)
@@ -1376,15 +1394,15 @@ def add_entry_metadata(store: GraphStore, flows: list[dict]) -> None:
             kind = "other"
         flow["entry_kind"] = kind
         if routes:
-            flow["route"] = ", ".join(routes[:_MAX_ROUTES])
+            flow["route"] = _clean(", ".join(routes[:_MAX_ROUTES]))
         if isinstance(schedules, list) and schedules:
-            flow["schedule"] = schedules
+            flow["schedule"] = _clean(schedules[:_MAX_SCHEDULES])
         if queues:
             unique: list[dict] = []
             for queue in queues:
                 if queue not in unique:
                     unique.append(queue)
-            flow["queues"] = unique
+            flow["queues"] = unique[:_MAX_QUEUES]
 
 
 def _tree_key(flow: dict) -> frozenset[int]:
@@ -1421,10 +1439,10 @@ def group_duplicate_flows(flows: list[dict]) -> list[dict]:
         ordered = [rep] + [m for m in members if m is not rep]
         entry_points = []
         for member in ordered:
-            item = {"flow_id": member["id"], "name": member["name"]}
+            item = {"flow_id": member["id"], "name": _clean(member["name"])}
             for field in ("entry_kind", "route"):
                 if member.get(field):
-                    item[field] = member[field]
+                    item[field] = _clean(member[field])
             entry_points.append(item)
         merged.append({**rep, "entry_points": entry_points, "group_size": len(members)})
     return merged

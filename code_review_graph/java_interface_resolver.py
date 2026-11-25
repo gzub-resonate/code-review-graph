@@ -95,7 +95,8 @@ def resolve_java_interface_calls(store: GraphStore) -> dict[str, int]:
     for row in conn.execute(
         "SELECT e.source_qualified, e.target_qualified, e.extra FROM edges e "
         "JOIN nodes n ON n.qualified_name = e.source_qualified "
-        "WHERE e.kind = 'INHERITS' AND n.kind = 'Class' AND n.language = 'java'"
+        "WHERE e.kind = 'INHERITS' AND n.kind = 'Class' "
+        "AND n.language IN ('java', 'kotlin', 'scala')"
     ).fetchall():
         impl = row["source_qualified"]
         if classes.get(impl, {}).get("test"):
@@ -120,7 +121,8 @@ def resolve_java_interface_calls(store: GraphStore) -> dict[str, int]:
     for iface, impls in implementors.items():
         if len(impls) == 1:
             impl = next(iter(impls))
-            if classes[impl]["kind"] == "concrete":
+            # A Kotlin or Scala implementor is not in ``classes``: it is a second one.
+            if classes.get(impl, {}).get("kind") == "concrete":
                 sole[iface] = impl
 
     targets = sorted(qn for qn, (iface, _) in iface_methods.items() if iface in sole)
