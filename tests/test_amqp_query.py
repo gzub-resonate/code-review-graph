@@ -404,3 +404,22 @@ class TestProducesPublishers:
         assert reply["result_count"] == 0
         assert "other edges do" in reply["confidence"]
         assert "not indexed" not in reply["confidence"]
+
+    def test_external_targets_prints_publisher_and_listener_keys(self, produces_repo):
+        reply = query_graph("external_targets", "external:rabbitmq", repo_root=str(produces_repo))
+        row = next(r for r in reply["results"] if r["target"] == EXCHANGE)
+        assert sorted(row["routing_keys"]) == sorted(set(PUBLISHERS.values()))
+        assert "orders.*" in row["binding_keys"]
+
+    def test_an_external_target_with_no_edges_says_so(self, produces_repo):
+        reply = query_graph(
+            "publishers_of", "external:rabbitmq:nowhere", repo_root=str(produces_repo),
+        )
+        assert reply["result_count"] == 0
+        assert reply["confidence"].startswith("no edges for this target")
+
+    def test_the_cross_repo_join_lists_produces_publishers_with_keys(self, produces_repo):
+        with GraphStore(produces_repo / ".code-review-graph" / "graph.db") as store:
+            from code_review_graph.amqp_join import read_channel_edges
+            rows = [r for r in read_channel_edges(store, EXCHANGE) if r["role"] == "publisher"]
+        assert {r["routing_key"] for r in rows} == set(PUBLISHERS.values())

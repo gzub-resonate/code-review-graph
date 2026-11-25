@@ -592,6 +592,11 @@ def empty_query_confidence(
             if stale:
                 return _bounded(stale if _is_untracked_note(stale)
                                 else unresolved_stale_note(target))
+            if target.startswith("external:"):
+                return _bounded(_interpolated_target(
+                    "no edges for this target: nothing in the graph ends at '", target,
+                    "'; it is an edge end, not a node, so this 0 means no edge reaches it",
+                ))
             return _bounded(not_indexed_note(target))
 
         stale, current = _staleness(store, root, getattr(node, "file_path", None))
