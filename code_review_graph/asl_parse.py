@@ -220,12 +220,20 @@ def _asl_literal_is_sensitive(text: str) -> bool:
     an account id, a ``ghp_``/``xox``/``eyJ``/``sk-`` prefix, a long mixed letter-digit run,
     plus a PEM header, credentials in a URL and a bearer token. A rule's test is shown to
     whoever queries, so such a value is replaced, never trimmed.
+
+    The shapes are matched on two views of the text: as it is, and with every non-ASCII
+    character removed. Credentials are ASCII, so the second view is the allowlist: whatever a
+    non-ASCII character is (a blank-drawing letter no list of ours names, a character a later
+    Unicode version adds), it cannot split a token for the check.
     """
     from .aws_config_names import _looks_like_token
 
-    if _ASL_SECRET_SHAPE.search(text):
-        return True
-    return any(_looks_like_token(piece) for piece in _ASL_WORD_SPLIT.split(text) if piece)
+    for view in (text, "".join(ch for ch in text if ch.isascii())):
+        if _ASL_SECRET_SHAPE.search(view):
+            return True
+        if any(_looks_like_token(piece) for piece in _ASL_WORD_SPLIT.split(view) if piece):
+            return True
+    return False
 
 
 def _asl_condition_value(key: str, value: Any) -> str:
