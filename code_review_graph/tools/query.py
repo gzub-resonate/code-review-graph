@@ -713,7 +713,7 @@ def _unresolved_route_endpoint(
 
 
 def _query_external_targets(
-    store: GraphStore, prefix: str, minimal: bool, limit: int,
+    store: GraphStore, prefix: str, minimal: bool, limit: int, root: Path | None = None,
 ) -> dict[str, Any]:
     """List the ``external:`` targets edges point at, with who reaches each and how.
 
@@ -721,6 +721,9 @@ def _query_external_targets(
     ``external:db-table``); empty or ``external:`` lists every family. Rows come largest
     first: the target, its family, the edge kinds that reach it with counts, how many
     distinct sources reach it, up to three of them, and whether any edge is unresolved.
+    An AWS target (or a name resolved from configuration) that a Terraform ``declare`` edge
+    names gets ``matched`` and ``declared_by`` (``repo``, ``file``, ``line``): the declaration
+    in this graph, else the first one in another registered repository.
     """
     prefix = (prefix or "").strip()
     if prefix and not prefix.startswith("external:"):
@@ -734,15 +737,20 @@ def _query_external_targets(
         "SELECT target_qualified, kind, source_qualified, "
         "COALESCE(json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
         "'$.unresolved'), 0), "
-        "CASE WHEN json_valid(extra) THEN json_extract(extra, '$.resolved_names') END "
+        "CASE WHEN json_valid(extra) THEN json_extract(extra, '$.resolved_names') END, "
+        "file_path, line, "
+        "CASE WHEN json_valid(extra) AND json_extract(extra, '$.sdk') = 'terraform' "
+        "AND json_extract(extra, '$.operation') = 'declare' THEN 1 ELSE 0 END "
         "FROM edges WHERE substr(target_qualified, 1, ?) = ?",
         (len(like_prefix), like_prefix),
     ).fetchall()
     grouped: dict[str, dict[str, Any]] = {}
-    for target, kind, source, unresolved, resolved_names in rows:
+    for target, kind, source, unresolved, resolved_names, file_path, line, declares in rows:
         entry = grouped.setdefault(
             target, {"kinds": {}, "sources": {}, "unresolved": False, "names": {}},
         )
+        if declares and "declared_by" not in entry:
+            entry["declared_by"] = _declared_in_graph(file_path, line, root)
         if resolved_names:
             merge_resolved_names(entry["names"], resolved_names)
         entry["kinds"][kind] = entry["kinds"].get(kind, 0) + 1
@@ -766,7 +774,10 @@ def _query_external_targets(
             "source_count": len(entry["sources"]), "sources": sources,
             "unresolved": entry["unresolved"],
             **({"names": entry["names"]} if entry["names"] else {}),
+            **({"matched": True, "declared_by": entry["declared_by"]}
+               if "declared_by" in entry else {}),
         })
+    _add_declared_by(results, root)
     total = len(ordered)
     scope = prefix or "external:"
     return {
@@ -779,6 +790,57 @@ def _query_external_targets(
         **({"_hint": "pass a family prefix such as external:rabbitmq to narrow"}
            if not prefix and not minimal else {}),
     }
+
+
+def _declared_in_graph(file_path: str, line: Any, root: Path | None) -> dict[str, Any]:
+    """Where this graph's own Terraform ``declare`` edge sits (file relative to the root)."""
+    file = file_path
+    if root is not None:
+        try:
+            file = str(Path(file_path).relative_to(root))
+        except ValueError:
+            pass
+    return {
+        "repo": " ".join(_sanitize_name(root.name).split()) if root is not None else None,
+        "file": " ".join(_sanitize_name(file).split()), "line": line,
+    }
+
+
+def _add_declared_by(results: list[dict[str, Any]], root: Path | None) -> None:
+    """Mark AWS targets another registered repo declares, and every target a declaration names.
+
+    Looks only at the rows shown, in the other registered repos' graphs, read-only. A failure
+    to read the registry leaves the rows as they are.
+    """
+    from .. import infra_join
+
+    wanted: dict[str, list[str]] = {}
+    for row in results:
+        target = row["target"]
+        if row["family"].startswith("aws-") and "declared_by" not in row:
+            names = [target] + [
+                f"{target.rsplit(':', 1)[0]}:{name}"
+                for found in row.get("names", {}).values() for name in found
+            ]
+            wanted[target] = names
+    if not wanted:
+        return
+    try:
+        from ..registry import Registry
+
+        repos = Registry().list_repos()
+    except (OSError, ValueError, KeyError):
+        return
+    if not repos:
+        return
+    flat = sorted({n for names in wanted.values() for n in names if not n.endswith(":?")})
+    found = infra_join.declared_by_for(repos, flat, skip=root)
+    for row in results:
+        for name in wanted.get(row["target"], ()):
+            if name in found:
+                row["declared_by"] = found[name]
+                row["matched"] = True
+                break
 
 
 def _query_route(
@@ -1340,7 +1402,7 @@ def query_graph(
         if pattern == "external_targets":
             if cursor:
                 raise ValueError("external_targets has no pages; narrow it with a prefix")
-            return _query_external_targets(store, target, minimal, response_limit)
+            return _query_external_targets(store, target, minimal, response_limit, root)
         if pattern == "endpoints":
             return query_endpoints(
                 store, root, target, direction, minimal, response_limit, cursor,

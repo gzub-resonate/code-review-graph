@@ -157,6 +157,48 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
     return out
 
 
+_DECLARE_SQL = (
+    "SELECT target_qualified, file_path, line, extra FROM edges "
+    "WHERE kind = 'REFERENCES' AND json_valid(extra) "
+    "AND json_extract(extra, '$.resolution') = ? "
+    "AND json_extract(extra, '$.sdk') = 'terraform' "
+    "AND json_extract(extra, '$.operation') = 'declare' "
+    "AND COALESCE(json_extract(extra, '$.unresolved'), 0) = 0 "
+    "ORDER BY file_path, line, id"
+)
+
+
+def read_declare_edges(store: GraphStore) -> list[dict[str, Any]]:
+    """Only the Terraform ``declare`` edges of a graph, in the shape :func:`read_edges` gives.
+
+    A cheap read for a repo whose own AWS calls are not listed but whose declarations are
+    still needed to find an owner (``config_defined`` and the other fields are not filled).
+    """
+    out: list[dict[str, Any]] = []
+    for target, file_path, line, raw in store._conn.execute(
+        _DECLARE_SQL, (RESOLUTION,),
+    ).fetchall():
+        try:
+            info = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(info, dict) or not target.startswith("external:aws-"):
+            continue
+        service, _, name = target[len("external:aws-"):].partition(":")
+        if not service or not name:
+            continue
+        out.append({
+            "file_path": file_path, "line": line, "source": "", "service": service,
+            "kind": info.get("target_kind", ""), "name": name, "operation": "declare",
+            "access": info.get("access", "declare"), "sdk": "terraform", "unresolved": False,
+            "placeholder": None,
+            "extra": {
+                k: info[k] for k in ("terraform_label", "terraform_type") if k in info
+            },
+        })
+    return out
+
+
 def _resolve_terraform_refs(edges: list[dict[str, Any]]) -> None:
     """Name the Terraform references that point at a resource declared in another file.
 
@@ -198,17 +240,53 @@ def _resolve_terraform_refs(edges: list[dict[str, Any]]) -> None:
             extra["notify_targets"] = kept
 
 
+def _declared_by(
+    edge: dict[str, Any], matched_profiles: list[str], names_by_profile: Any, index: int,
+    declared_at: dict[tuple[str, str, int], tuple[str, Any]], repo: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Where the matched Terraform declaration is: its repo, file (relative) and line.
+
+    ``None`` when the owner was found by another rule (a Terragrunt unit, a resource label)
+    that has no declaration line to point at.
+    """
+    name = edge["name"]
+    if matched_profiles and isinstance(names_by_profile, dict):
+        for profile in matched_profiles:
+            candidate = names_by_profile.get(profile)
+            if isinstance(candidate, str) and (edge["service"], candidate, index) in declared_at:
+                name = candidate
+                break
+    where = declared_at.get((edge["service"], name, index))
+    if where is None:
+        return None
+    root = Path(repo["path"])
+    try:
+        file = str(Path(where[0]).relative_to(root))
+    except ValueError:
+        file = where[0]
+    return {
+        "repo": repo.get("alias") or root.name, "file": file, "line": where[1],
+        "name": name,
+    }
+
+
 def resolve_links(
     edges_by_repo: dict[int, list[dict[str, Any]]],
     all_repos: list[dict[str, Any]],
     defined_in_repo: Any,
+    context_declarations: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve each call to the registered repo that defines its target.
 
     *defined_in_repo* is ``(repo index, (service, kind, name)) -> bool`` for the services the
-    state machine join knows.
+    state machine join knows. *context_declarations* are the Terraform ``declare`` edges of
+    registered repos whose own calls are not listed (``read_declare_edges``): they can own a
+    target but never get a row, so a code repo is joined to infrastructure it was not
+    selected together with.
     """
     declared: dict[tuple[str, str], set[int]] = {}
+    #: ``(service, name, repo index) -> (file, line)`` of the first ``declare`` edge.
+    declared_at: dict[tuple[str, str, int], tuple[str, Any]] = {}
     notify: dict[tuple[str, str], list[str]] = {}
     for index, edges in edges_by_repo.items():
         for edge in edges:
@@ -217,9 +295,17 @@ def resolve_links(
             key = (edge["service"], edge["name"])
             if edge["operation"] == "declare":
                 declared.setdefault(key, set()).add(index)
+                declared_at.setdefault((*key, index), (edge["file_path"], edge["line"]))
             for target in edge["extra"].get("notify_targets", []):
                 if target not in notify.setdefault(key, []):
                     notify[key].append(target)
+    for index, edges in (context_declarations or {}).items():
+        if index in edges_by_repo:
+            continue
+        for edge in edges:
+            key = (edge["service"], edge["name"])
+            declared.setdefault(key, set()).add(index)
+            declared_at.setdefault((*key, index), (edge["file_path"], edge["line"]))
     triggers: dict[str, list[str]] = {}
     for index, edges in edges_by_repo.items():
         for edge in edges:
@@ -311,6 +397,13 @@ def resolve_links(
                 ]
                 if status == "matched":
                     row["target_repo"] = names[0]
+                    declared_by = _declared_by(
+                        edge, matched_profiles, names_by_profile=edge["extra"].get(
+                            "resolved_names"),
+                        index=found[0], declared_at=declared_at, repo=all_repos[found[0]],
+                    )
+                    if declared_by:
+                        row["declared_by"] = declared_by
                 else:
                     row["candidates"] = names[:10]
             targets = notify.get((edge["service"], edge["name"]))

@@ -1155,7 +1155,7 @@ route: str | None            # Only calls whose route equals this or lies below 
 status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
-origin: str | None           # feign | js | terraform | workflow | stepfunction; default: feign and js
+origin: str | None           # feign | js | terraform | workflow | stepfunction | awssdk; default: feign and js
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
 ```
@@ -1164,6 +1164,13 @@ repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is
 registered repo and folder each one resolves to. `service` filters by module repo name, `route` by module folder
 prefix, and `status` is `matched`, `module_not_found`, `ambiguous` or `repo_not_registered`. Run it with
 `service=<module repo>` to see which stacks use a module.
+
+`origin="terraform"`, `"stepfunction"` and `"awssdk"` also return an `infrastructure` object that relates each
+selected repository to the infrastructure declared for it in any registered repository: ECR repositories, ECS
+services and task-definition families, Terragrunt stack and Terraform module directories whose name equals the
+repository's name or alias, and declared queues, buckets, topics and tables its code names (written out or
+resolved from Spring configuration). Items carry the declaring repo, file, line and `matched_via`. `awssdk` rows
+matched to a Terraform declaration carry `declared_by`. See [SERVICE_ALIASES.md](SERVICE_ALIASES.md).
 
 `origin="workflow"` does the same for GitHub Actions: each `uses: org/repo/path@ref` of a workflow or composite
 action (a reusable workflow at job level, an action at step level) that names another repo is joined to the
@@ -1213,12 +1220,19 @@ How a call is classified:
   receives the request), `url_literal` (the client has a fixed `url`),
   `route_dynamic` or `placeholder_in_route` (part of the route could not be
   resolved). These are never guessed.
-- The service name picks the target repository: a registry alias or folder
-  name first, then a name in `repo-aliases.toml`, then a name that differs only
-  in case, `-` versus `_` or repeated separators. That last step must reach
-  exactly one repository. Otherwise the status is `no_target_repo` with
-  `service_not_registered`, `service_name_ambiguous` or `target_unreadable`.
-  Sibling checkouts that share a folder name are all searched.
+- The service name picks the target repository: the optional service alias file
+  (`CRG_SERVICE_ALIASES_FILE`) first, then a registry alias or folder name, then a
+  name in `repo-aliases.toml`, then a name that differs only in case, `-` versus
+  `_` or repeated separators. That last step must reach exactly one repository.
+  When none of these finds it, the names the repositories declare about themselves
+  (Spring `spring.application.name`, ECS service, ECR repository) are compared
+  after folding case, separators and one environment suffix. Every resolved row
+  has `matched_via` (`explicit_alias`, `spring_application_name`, `ecs_service`,
+  `ecr_repo` or `repo_name`). A name that reaches several repositories is
+  `ambiguous` (`service_name_ambiguous`) with `candidate_repos`, never picked;
+  otherwise the status is `no_target_repo` with `service_not_registered`,
+  `service_name_ambiguous` or `target_unreadable`. Sibling checkouts that share
+  a folder name are all searched. See [SERVICE_ALIASES.md](SERVICE_ALIASES.md).
 - Within the target, an endpoint matches when its HTTP method is the same (an
   endpoint mapped for every method matches any) and its route is the same
   after dropping the query string, collapsing repeated slashes, dropping a

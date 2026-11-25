@@ -638,7 +638,7 @@ The assistant uses these once the graph is built. The 25 tools that only read ca
 | `get_wiki_page_tool` | One wiki page |
 | `list_repos_tool` | Registered repositories |
 | `cross_repo_search_tool` | Search registered repositories; `repos` limits the search to a subset |
-| `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories; `origin="awssdk"` joins AWS SDK calls, including names read per profile from Spring configuration (only resource names are stored; see [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration)) |
+| `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories; Feign service names reach repositories through an optional alias file or the names a repo declares (Spring application name, ECS service, ECR repository; see [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md)); `origin="awssdk"` joins AWS SDK calls, including names read per profile from Spring configuration (only resource names are stored; see [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration)) |
 | `pr_blast_radius_tool` | What a pull request's changed files reach, new files included, read from Git and reached through the base graph |
 
 The change tools (`detect_changes_tool`, `get_review_context_tool`, `get_impact_radius_tool`, `get_affected_flows_tool`, `pr_blast_radius_tool`) review the last commit when a call names no `pr`, `head`, `base` or `changed_files`, and label it in a `scope` object; see the tool reference in docs/COMMANDS.md.
@@ -698,6 +698,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum callees followed per hop when `tests_for` and `detect-changes` look for tests. The first by name are kept, so one graph always gives one answer | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | Hops to walk up incoming `CALLS` when looking for a tested caller of an untested changed symbol. Reported as a note, never as coverage | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |
+| `CRG_SERVICE_ALIASES_FILE` | Path of a JSON or YAML file mapping Feign service names to registered repositories (`{"alias": "repo", "prefix:billing-api-": "billing-api"}`); see [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) | unset |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | Seconds one `cross_repo_search_tool` or `cross_repo_requests_tool` call may run before it stops starting new repos and lists the rest in `skipped_repos`. `0` means no limit | `300` |
 | `CRG_CROSS_REPO_WORKERS` | How many repos one `cross_repo_search_tool` call searches at once. `1` searches them one after another. Values above 32 are cut to 32 | `4` |
 | `CRG_TOOL_TIMEOUT` | Timeout in seconds for read-only MCP tools (`0` disables). Does not bound the tools that write: build, postprocess, embed, wiki and apply-refactor | `0` |

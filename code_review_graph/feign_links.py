@@ -14,11 +14,16 @@ The rules, in the order they apply:
    service name is a placeholder, the request goes to a ``java.net.URI``
    argument or a literal ``url``, or the route has a piece the parser could
    not resolve.  These are never guessed.
-2. The service name picks the target repository: an exact registry alias or
+2. The service name picks the target repository: first the optional service-alias file
+   (``CRG_SERVICE_ALIASES_FILE``), then an exact registry alias or
    folder name first (and the optional alias file, through
    :class:`~code_review_graph.repo_aliases.RepoNameResolver`), then a name
    that differs only in case, ``-`` versus ``_`` and repeated separators.  The
-   second step must reach exactly one registered repository.  No target is
+   second step must reach exactly one registered repository.  When neither finds it, the
+   names the repositories declare about themselves (Spring application name, ECS service,
+   ECR repository) are compared after folding case, separators and one environment suffix.
+   See :mod:`~code_review_graph.service_aliases`; a name that reaches several repositories
+   is ``ambiguous`` (``service_name_ambiguous``), never picked.  No target is
    ``no_target_repo``.
 3. A server endpoint matches when its HTTP method equals the client's (a
    server mapping that accepts every method matches any) and its route is
@@ -192,6 +197,11 @@ class TargetResolution:
     indexes: tuple[int, ...]
     how: Optional[str] = None
     reason: Optional[str] = None
+    #: What tied the service name to the repo (``explicit_alias``, ``spring_application_name``,
+    #: ``ecs_service``, ``ecr_repo`` or ``repo_name``); see ``service_aliases.py``.
+    matched_via: Optional[str] = None
+    #: The repos an ambiguous service name reaches (``indexes`` is empty then).
+    candidates: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
