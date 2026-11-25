@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat as stat_module
 import threading
 from typing import Any, Optional
 
@@ -311,11 +312,14 @@ _CONST_SKIP_DIRS = frozenset({
 })
 _MAX_CONST_FILES = 100_000
 _MAX_CONST_FILE_BYTES = 1_000_000
+#: Nested type declarations followed when collecting constants. A deeper constant is left
+#: unresolved (never guessed); the bound keeps a crafted file from exhausting the stack.
+_MAX_CONST_NESTING = 16
 _STRING_WORD = re.compile(rb"\bString\b")
+_MODIFIER_WORD = re.compile(r"\w+")
 _STATIC_IMPORT = re.compile(r"import\s+static\s+([\w.]+)\.(\*|\w+)\s*;")
 _PLAIN_IMPORT = re.compile(r"import\s+([\w.]+)\s*;")
 _PACKAGE_DECL = re.compile(r"package\s+([\w.]+)\s*;")
-_STATIC_FINAL = re.compile(r"\b(?:static\b.*\bfinal|final\b.*\bstatic)\b", re.S)
 _JAVA_TYPE_NODES = frozenset({
     "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
 })
@@ -372,8 +376,11 @@ def _java_file_constants(root) -> list[tuple[tuple[str, ...], Optional[str]]]:
             return
         modifiers = next((c for c in node.children if c.type == "modifiers"), None)
         mod_text = _text(modifiers) if modifiers is not None else ""
-        if not in_interface and not _STATIC_FINAL.search(mod_text):
-            return
+        if not in_interface:
+            # Word test, not a ``.*`` pattern: a crafted modifier list must not go quadratic.
+            words = set(_MODIFIER_WORD.findall(mod_text))
+            if "static" not in words or "final" not in words:
+                return
         for declarator in node.children:
             if declarator.type != "variable_declarator":
                 continue
@@ -394,6 +401,8 @@ def _java_file_constants(root) -> list[tuple[tuple[str, ...], Optional[str]]]:
             found.append((tuple(dict.fromkeys(keys)), raw))
 
     def walk(node, chain: list[str], in_interface: bool, local: dict[str, set[str]]) -> None:
+        if len(chain) > _MAX_CONST_NESTING:
+            return
         for child in node.children:
             if child.type in _JAVA_TYPE_NODES:
                 name_node = child.child_by_field_name("name")
@@ -409,6 +418,36 @@ def _java_file_constants(root) -> list[tuple[tuple[str, ...], Optional[str]]]:
 
     walk(root, [], False, {})
     return found
+
+
+def _read_const_file(path: str, parser) -> Optional[list[tuple[tuple[str, ...], Optional[str]]]]:
+    """The constants of one Java file, or ``None`` when it is not a plain, small, regular file.
+
+    The file is opened without following a symlink and without blocking (a FIFO would hang an
+    ordinary open), and its type and size are read from the open handle, so a path swapped
+    after the check cannot lead outside the repository. The read itself is bounded too: a
+    device that reports size 0 cannot be read without end.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat_module.S_ISREG(info.st_mode) or info.st_size > _MAX_CONST_FILE_BYTES:
+            return None
+        cache_key = (path, info.st_mtime_ns, info.st_size)
+        with _CONST_FILE_CACHE_LOCK:
+            cached = _CONST_FILE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        data = handle.read(_MAX_CONST_FILE_BYTES + 1)
+    if len(data) > _MAX_CONST_FILE_BYTES:
+        return None
+    cached = []
+    if _STRING_WORD.search(data) and (b"static" in data or b"interface" in data):
+        cached = _java_file_constants(parser.parse(data).root_node)
+    with _CONST_FILE_CACHE_LOCK:
+        _CONST_FILE_CACHE[cache_key] = cached
+    return cached
 
 
 def build_java_const_index(repo_root, get_parser) -> JavaConstIndex:
@@ -428,21 +467,10 @@ def build_java_const_index(repo_root, get_parser) -> JavaConstIndex:
                 return index
             path = os.path.join(directory, name)
             try:
-                stat = os.stat(path)
-                if stat.st_size > _MAX_CONST_FILE_BYTES:
-                    continue
-                cache_key = (path, stat.st_mtime_ns, stat.st_size)
-                with _CONST_FILE_CACHE_LOCK:
-                    cached = _CONST_FILE_CACHE.get(cache_key)
-                if cached is None:
-                    with open(path, "rb") as handle:
-                        data = handle.read()
-                    cached = []
-                    if _STRING_WORD.search(data) and (b"static" in data or b"interface" in data):
-                        cached = _java_file_constants(parser.parse(data).root_node)
-                    with _CONST_FILE_CACHE_LOCK:
-                        _CONST_FILE_CACHE[cache_key] = cached
-            except (OSError, ValueError):
+                cached = _read_const_file(path, parser)
+            except Exception:  # noqa: BLE001 - best effort: one bad file never fails the build
+                continue
+            if cached is None:
                 continue
             for keys, value in cached:
                 index.add(keys, value)

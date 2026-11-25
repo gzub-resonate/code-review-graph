@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- The Java constants index (cross-class `static final String` values for AMQP exchanges and keys)
+  now reads only plain files: a `.java` path that is a symlink, a named pipe or a device is skipped
+  (it used to follow a symlink out of the repository, and a pipe or a size-0 device could block or
+  read without end), the read is bounded by the size cap, and a file that fails to parse is skipped
+  instead of failing the build. Nested classes are followed to 16 levels, so a crafted file can no
+  longer exhaust the stack, and the `static final` modifier test no longer uses a pattern that
+  could go quadratic. A constant nested deeper than 16 levels stays unresolved, never guessed.
+  This changes what the parser stores, so the index fingerprint changes (one rebuild, with the
+  AMQP binding change that is already waiting for one).
 - Fewer false positives in `refactor_tool` dead-code results for Java. At query time, constructors
   (of utility, enum, record and inner classes) are never reported, the class being judged on its
   own evidence; classes annotated `@Component`, `@Service`, `@Repository`, `@Controller`,
