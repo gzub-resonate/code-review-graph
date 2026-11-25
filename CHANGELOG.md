@@ -2,8 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Terraform wiring between AWS resources, read from `.tf` files and listed by
+  `cross_repo_requests_tool` with `origin="awssdk"`: declarations of queues, topics, Lambda
+  functions, DynamoDB tables, EventBridge rules and Scheduler schedules; and what fires what (a
+  Lambda event source mapping, an SNS subscription, an EventBridge or Scheduler target, an API
+  Gateway v2 route). A rule or schedule keeps its `cron(...)` or `rate(...)` expression, a rule the
+  `source` values of its event pattern, a queue the name of its dead-letter queue. The edge sits on
+  the resource that fires and lists what it reaches in `notify_targets`; a declared function row
+  carries `triggered_by`. A reference to a resource in another file of the same directory is named
+  at query time; one that cannot be named from the files (a name taken from a variable) is left
+  unresolved. No value is stored.
+
 ### Fixed
 
+- The Step Functions link passes no longer treat a Terraform declaration edge as a state machine's
+  call, which would have linked a Lambda resource to itself.
 - `cross_repo_requests_tool` no longer reports every `receiver_inferred` JavaScript match as `low`. It
   is `medium`, and `high` for one handler answering an exact method and a literal, untemplated
   route. Handlers of one path in one repository (`several_handlers_in_repo`) are `medium`.

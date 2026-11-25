@@ -34,6 +34,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
+from . import aws_terraform_wiring as _wiring
 from .config_keys import normalize_spring_config_key
 from .infra_references import aws_external_target, reduce_arn
 
@@ -195,6 +196,11 @@ _NAME_RE: dict[str, re.Pattern[str]] = {
     "task-definition": re.compile(r"^[A-Za-z0-9_\-]{1,255}$"),
     "job": re.compile(r"^[A-Za-z0-9_.\-]{1,255}$"),
     "job-definition": re.compile(r"^[A-Za-z0-9_\-]{1,128}$"),
+    "queue": re.compile(r"^[A-Za-z0-9_.\-]{1,80}$"),
+    "topic": re.compile(r"^[A-Za-z0-9_.\-]{1,256}$"),
+    "rule": re.compile(r"^[A-Za-z0-9_.\-]{1,64}$"),
+    "schedule": re.compile(r"^[A-Za-z0-9_.\-]{1,64}$"),
+    "cluster": re.compile(r"^[A-Za-z0-9_\-]{1,255}$"),
 }
 #: ARN resource prefix per kind for services ``reduce_arn`` does not know.
 _OWN_ARN = {
@@ -1311,7 +1317,8 @@ def _resource_blocks(text: str) -> list[tuple[int, int, str, str, str]]:
 
 def _scan_terraform(text: str, out: _Out) -> None:
     text = text[:_MAX_TEXT]
-    if "aws_s3_bucket" not in text and ":s3:::" not in text:
+    wiring = any(m.decode() in text for m in _wiring.MARKERS)
+    if "aws_s3_bucket" not in text and ":s3:::" not in text and not wiring:
         return
     starts = _line_starts(text)
 
@@ -1325,6 +1332,11 @@ def _scan_terraform(text: str, out: _Out) -> None:
             for a in _TF_ATTR.finditer(body):
                 if a.group(1) == "bucket" and a.group(2) and "${" not in a.group(2):
                     labels[label] = a.group(2)
+    if wiring:
+        _wiring.scan_wiring(
+            blocks, labels, line_of, out, Val, lambda kind, name: bool(_NAME_RE[kind].match(name)),
+            _MAX_EDGES_PER_FILE,
+        )
     for start, _end, rtype, label, body in blocks:
         if len(out.edges) >= _MAX_EDGES_PER_FILE:
             return
@@ -1336,7 +1348,8 @@ def _scan_terraform(text: str, out: _Out) -> None:
             name = labels.get(label)
             if name and _NAME_RE["bucket"].match(name):
                 out.add("s3", "declare", Val(name), line, "terraform", kind="bucket",
-                        access="declare", source=source, extra={"terraform_label": label})
+                        access="declare", source=source,
+                        extra={"terraform_label": label, "terraform_type": rtype})
             continue
         bucket: Optional[str] = None
         for a in _TF_ATTR.finditer(body):
@@ -1383,7 +1396,8 @@ def aws_sdk_edges(
     sdk_markers = _MARKERS.get(language or "", ())
     wants_sdk = bool(language) and any(m in source for m in sdk_markers)
     wants_uri = (suffix in _URI_SUFFIXES or is_workflow) and b"s3" in source
-    if not (wants_sdk or wants_uri):
+    wants_tf = suffix == ".tf" and any(m in source for m in _wiring.MARKERS)
+    if not (wants_sdk or wants_uri or wants_tf):
         return []
     file_node = next((n for n in nodes if n.kind == "File"), None)
     if file_node is None:
@@ -1398,10 +1412,11 @@ def aws_sdk_edges(
             root = parser.parse(source).root_node
             runner = {"python": _Python, "java": _Java}.get(language, _Js)
             runner(source, root, out).run()
-    if wants_uri:
+    if wants_uri or wants_tf:
         text = source.decode("utf-8", "replace")
         if suffix == ".tf":
             _scan_terraform(text, out)
+    if wants_uri:
         if suffix in (".sh", ".bash") or is_workflow:
             _scan_shell(text, out)
         if suffix not in (".sh", ".bash") and not is_workflow:
