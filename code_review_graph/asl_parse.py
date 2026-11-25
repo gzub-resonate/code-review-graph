@@ -180,19 +180,32 @@ _ASL_CONDITION_NOT_A_TEST = frozenset({"Variable", "Next", "Comment"})
 _ASL_COMPARISON_RE = re.compile(r"(?:String|Numeric|Boolean|Timestamp)[A-Za-z]*|Is[A-Z][A-Za-z]*")
 
 
+#: Characters that Unicode files under letters or symbols but that draw nothing: the Hangul
+#: fillers, the Braille blank and the Khmer inherent vowels (the Default_Ignorable code points
+#: that the category test below keeps). Listed by code point, since the standard library has no
+#: Default_Ignorable property.
+_ASL_BLANK = frozenset(
+    "ᅟᅠㅤﾠ"  # Hangul choseong, jungseong and (half)width fillers
+    "⠀"  # Braille pattern blank
+    "឴឵"  # Khmer vowel inherent Aq and Aa
+    "᠎"  # Mongolian vowel separator
+)
+
+
 def _asl_clean(text: str) -> str:
     """NFKC-normalise, then keep only characters that are visible.
 
     Letters, digits, punctuation, symbols and the plain space stay; control, format, joiner,
-    combining, surrogate, private-use, unassigned and separator characters are removed. Every
-    check below runs on this text, and this text is what is shown, so nothing can split a token
-    for the check and be invisible when it is shown.
+    combining, surrogate, private-use, unassigned and separator characters are removed, and so
+    are the blank-drawing letters and symbols in :data:`_ASL_BLANK`. Every check below runs on
+    this text, and this text is what is shown, so nothing can split a token for the check and
+    be invisible when it is shown.
     """
     import unicodedata
 
     return "".join(
         ch for ch in unicodedata.normalize("NFKC", text)
-        if ch == " " or unicodedata.category(ch)[0] in "LNPS"
+        if ch not in _ASL_BLANK and (ch == " " or unicodedata.category(ch)[0] in "LNPS")
     )
 
 
