@@ -17,6 +17,31 @@
   still answers with an error, which carries the same hint. In a one-commit repository
   `pr_blast_radius_tool` has no parent to compare with and says so (`scope.analysed: false`).
 
+- `query_graph_tool` pattern `endpoints`: lists `Endpoint` nodes as one compact line each
+  (method, path, owner, file:line, direction) with `direction_counts`, filtered by an optional
+  `<METHOD> <route>` substring and `direction` (`inbound`, `outbound`, `simulator`), and paged with
+  `cursor`. The direction is derived at query time (client role or `REQUESTS` edge, simulator-like
+  path segment or class name; `CRG_SIMULATOR_PATHS` overrides the path test) and the reply says how.
+- `handlers_of` takes a route (`POST /v1/items`, `/v1/items/{id}`). For `handlers_of` and
+  `references_to`, a name that several nodes share answers with the best match (exact name,
+  `file_hint`, non-test, kind, in-degree) plus `ambiguous`, `resolved_to` and `alternatives` with a
+  reason each; `strict=true` keeps the previous `ambiguous` candidate list.
+- `get_hub_nodes_tool` rows carry `resolved_degree`, `unresolved_degree` and `resolved_share`, and
+  the new `rank_by` parameter (`resolved`, the default, or `total`) picks the order. Hubs are now
+  ranked by resolved edges by default, so names that only look hot through collisions drop.
+- `importers_of` on a Java file lists the class-level importers of the classes it declares,
+  including imports that kept the dotted class name and `pkg.*` wildcards, labelled with
+  `import_level` and `importers_level`.
+- `python -m code_review_graph.index_fingerprint` prints an index fingerprint: a short hash of
+  the code a graph build runs (the import closure of the build, update, post-processing, embed
+  and schema-migration entry points, each module as a normalised syntax tree so comment, docstring
+  and formatting edits do not move it), the installed tree-sitter grammar and embedding
+  dependency versions, and the environment variables that pick an embedding model. A deployment
+  can rebuild its graphs when the fingerprint changes instead of on every version or commit
+  change. `compute_fingerprint()` is importable, cached per process and never raises; it returns
+  `unknown` when it cannot compute. A test fails when a new module is neither reached from the
+  build nor listed as query-side only.
+
 - Terraform wiring between AWS resources, read from `.tf` files and listed by
   `cross_repo_requests_tool` with `origin="awssdk"`: declarations of queues, topics, Lambda
   functions, DynamoDB tables, EventBridge rules and Scheduler schedules; and what fires what (a
@@ -30,6 +55,21 @@
 
 ### Fixed
 
+- Fewer false positives in `refactor_tool` dead-code results for Java. At query time, constructors
+  (of utility, enum, record and inner classes) are never reported, the class being judged on its
+  own evidence; classes annotated `@Component`, `@Service`, `@Repository`, `@Controller`,
+  `@RestController`, `@Configuration` or `@ConfigurationProperties` are not reported; public setters
+  of `@ConfigurationProperties` and `@Component` classes and a record's own accessor overrides are
+  not reported; and a class named as the receiver of a call (`Util.make()`) counts as used even
+  when the call matches several overloads, including from another file of the same package. Other
+  members of those classes are still reported.
+- Java parsing (rebuild the graph to get these): records are now `Class` nodes (with
+  `type_form: record` and `record_components`), so their methods and compact constructors belong to
+  the record and a call on a record-typed value resolves to it; `import static pkg.Cls.NAME;` and
+  `import static pkg.Cls.*;` add a `REFERENCES` edge to the class, and a bare call to an imported
+  static method goes to `Cls.method`; a call through a field or parameter typed `Outer.Inner`, or
+  typed with a class that an `import pkg.*;` brings in, resolves to that class. Ambiguous receivers
+  stay unresolved.
 - The Step Functions link passes no longer treat a Terraform declaration edge as a state machine's
   call, which would have linked a Lambda resource to itself.
 - `cross_repo_requests_tool` no longer reports every `receiver_inferred` JavaScript match as `low`. It
