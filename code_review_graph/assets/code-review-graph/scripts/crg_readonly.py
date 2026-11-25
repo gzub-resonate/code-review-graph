@@ -34,6 +34,7 @@ QUERY_PATTERNS = (
     "consumers_of",
     "file_summary",
     "path_to",
+    "external_targets",
 )
 SEARCH_KINDS = ("File", "Class", "Function", "Type", "Test")
 READ_ONLY_COMMANDS = {

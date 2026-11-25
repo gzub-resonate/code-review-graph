@@ -72,6 +72,9 @@ class Val(NamedTuple):
 
     template: Optional[str] = None
     placeholder: Optional[str] = None
+    #: ``(declared type, property)`` for a bean getter such as ``props.getS3Bucket()``. The
+    #: name is not in this file, so the link step looks for the type's configuration prefix.
+    getter: Optional[tuple[str, str]] = None
 
 
 class _Svc(NamedTuple):
@@ -317,6 +320,9 @@ class _Out:
             info["unresolved"] = True
             if placeholder:
                 info["placeholder"] = placeholder[:128]
+            if value.getter:
+                info["config_getter"] = {"type": value.getter[0][:128],
+                                         "property": value.getter[1][:128]}
             info.update(confidence=0.6, confidence_tier="INFERRED")
         else:
             info.update(confidence=1.0, confidence_tier="EXTRACTED")
@@ -662,6 +668,7 @@ _V1_S3_DIRECT = frozenset({
     "getObjectAsString", "getObjectMetadata",
 })
 _V1_S3_TYPES = frozenset({"AmazonS3", "AmazonS3Client"})
+_BEAN_GETTER = re.compile(r"(get|is)([A-Z]\w*)")
 _SPRING_VALUE = re.compile(r"^\$\{([^}:]+)(?::[^}]*)?\}$")
 
 
@@ -673,6 +680,7 @@ class _Java:
         self.consts: dict[str, str] = {}
         self.v1_s3_vars: set[str] = set()
         self.string_vars: set[str] = set()
+        self.var_types: dict[str, Optional[str]] = {}
         pairs: list[tuple[str, str]] = []
         self.props: dict[str, Optional[str]] = {}
         for node in _walk(root):
@@ -713,6 +721,9 @@ class _Java:
         if node.type == "formal_parameter":
             n = node.child_by_field_name("name")
             names = [_text(n, self.src)] if n is not None else []
+        for name in names:
+            plain = type_name.split("<", 1)[0]
+            self.var_types[name] = plain if self.var_types.get(name, plain) == plain else None
         if type_name in _V1_S3_TYPES and type_name in self.classes:
             self.v1_s3_vars.update(names)
         elif type_name == "String":
@@ -774,6 +785,13 @@ class _Java:
             obj = node.child_by_field_name("object")
             args = node.child_by_field_name("arguments")
             first = args.named_children[0] if args is not None and args.named_child_count else None
+            if name is not None and first is None and args is not None \
+                    and obj is not None and obj.type == "identifier":
+                getter = _BEAN_GETTER.fullmatch(_text(name, src))
+                owner = self.var_types.get(_text(obj, src))
+                if getter and owner:
+                    prop = getter.group(2)[0].lower() + getter.group(2)[1:]
+                    return Val(None, None, (owner, prop))
             if name is None or first is None:
                 return Val()
             n, o = _text(name, src), (_text(obj, src) if obj is not None else "")
