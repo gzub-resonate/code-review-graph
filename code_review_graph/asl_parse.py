@@ -180,6 +180,25 @@ _ASL_CONDITION_NOT_A_TEST = frozenset({"Variable", "Next", "Comment"})
 _ASL_COMPARISON_RE = re.compile(r"(?:String|Numeric|Boolean|Timestamp)[A-Za-z]*|Is[A-Z][A-Za-z]*")
 
 
+_ASL_SECRET_SHAPE = re.compile(r"-----BEGIN|://[^/\s]*:[^/\s]*@|\bBearer\s+\S{12,}", re.I)
+_ASL_WORD_SPLIT = re.compile(r"[\s'\"(){}\[\]%=,;<>|&]+")
+
+
+def _asl_literal_is_sensitive(text: str) -> bool:
+    """Whether a Choice operand or JSONata expression holds something shaped like a credential.
+
+    The same token shapes the engine refuses elsewhere (``aws_config_names``): an access key,
+    an account id, a ``ghp_``/``xox``/``eyJ``/``sk-`` prefix, a long mixed letter-digit run,
+    plus a PEM header, credentials in a URL and a bearer token. A rule's test is shown to
+    whoever queries, so such a value is replaced, never trimmed.
+    """
+    from .aws_config_names import _looks_like_token
+
+    if _ASL_SECRET_SHAPE.search(text):
+        return True
+    return any(_looks_like_token(piece) for piece in _ASL_WORD_SPLIT.split(text) if piece)
+
+
 def _asl_condition_value(key: str, value: Any) -> str:
     """One comparison operand: a quoted string, a number, a boolean or a ``...Path``."""
     if isinstance(value, bool):
@@ -189,6 +208,8 @@ def _asl_condition_value(key: str, value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)[:_MAX_ASL_CONDITION_VALUE_CHARS]
     if isinstance(value, str):
+        if not key.endswith("Path") and _asl_literal_is_sensitive(value):
+            return '"<redacted>"'
         text = re.sub(r"[\x00-\x1f\x7f]", "", value)
         if len(text) > _MAX_ASL_CONDITION_VALUE_CHARS:
             text = text[: _MAX_ASL_CONDITION_VALUE_CHARS - 1] + "~"

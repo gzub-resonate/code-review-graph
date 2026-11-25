@@ -140,3 +140,39 @@ def test_references_to_a_constant_finds_the_code_it_governs(tmp_path: Path) -> N
     found = query_graph("file_summary", str(folder / "start.py"), repo_root=str(tmp_path))
     variable = next(r for r in found["results"] if r["name"] == "ALLOWED_REFRESH_URLS")
     assert variable["kind"] == "Variable"
+
+
+def test_webhook_and_token_shaped_urls_are_dropped_whole() -> None:
+    """A URL that may hold a secret is not kept in part: the allow-list URLs around it are."""
+    source = """\
+ALLOWED_A = ['https://hooks.slack.com/services/T0000/B0000/XXXXXXXXXXXXXXXXXXXXXXXX',
+             'https://discord.com/api/webhooks/123456/abcDEF',
+             'https://ok.example.net/v1/x']
+ALLOWED_B = ['https://ok.example.net/v1/refresh',
+             'https://api.example.net/files/9f8e7d6c5b4a39281706f5e4d3c2b1a0',
+             'https://api.example.net/accounts/123e4567-e89b-12d3-a456-426614174000',
+             'https://api.example.net/hooks/catch']
+TEAMS_URLS = ['https://acme.webhook.office.com/webhookb2/abc']
+ZAP_URLS = ['https://hooks.zapier.com/hooks/catch/1/abc']
+BOT_URLS = ['https://api.telegram.org/bot12345:AAEhBP0av18/sendMessage']
+WEBHOOK_URLS = ['https://ok.example.net/a']
+SIGNED_URLS = ['https://ok.example.net/b']
+SAS_URLS = ['https://ok.example.net/c']
+"""
+    assert _constants(source) == {
+        "ALLOWED_A": ["https://ok.example.net/v1/x"],
+        "ALLOWED_B": ["https://ok.example.net/v1/refresh"],
+    }
+    flat = repr(_constants(source))
+    for leaked in ("hooks.slack.com", "discord.com", "9f8e7d6c", "123e4567", "telegram"):
+        assert leaked not in flat
+
+
+def test_ordinary_allow_list_urls_survive_the_secret_checks() -> None:
+    source = (
+        "ALLOWED_REFRESH_URLS = frozenset({\n"
+        "  'https://api.qa.example.net/v2/admin/verticals/refresh',\n"
+        "  'https://api.prodb.example.net/v2/admin/verticals/refresh',\n"
+        "})\n"
+    )
+    assert len(_constants(source)["ALLOWED_REFRESH_URLS"]) == 2
