@@ -180,20 +180,20 @@ _ASL_CONDITION_NOT_A_TEST = frozenset({"Variable", "Next", "Comment"})
 _ASL_COMPARISON_RE = re.compile(r"(?:String|Numeric|Boolean|Timestamp)[A-Za-z]*|Is[A-Z][A-Za-z]*")
 
 
-_ASL_INVISIBLE = re.compile(
-    "[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]"
-)
-
-
 def _asl_clean(text: str) -> str:
-    """NFKC-normalise and drop control and zero-width characters.
+    """NFKC-normalise, then keep only characters that are visible.
 
-    Every check below runs on this text, and this text is what is shown, so a character
-    that would split a token for the check cannot vanish afterwards and leave it readable.
+    Letters, digits, punctuation, symbols and the plain space stay; control, format, joiner,
+    combining, surrogate, private-use, unassigned and separator characters are removed. Every
+    check below runs on this text, and this text is what is shown, so nothing can split a token
+    for the check and be invisible when it is shown.
     """
     import unicodedata
 
-    return _ASL_INVISIBLE.sub("", unicodedata.normalize("NFKC", text))
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKC", text)
+        if ch == " " or unicodedata.category(ch)[0] in "LNPS"
+    )
 
 
 _ASL_SECRET_SHAPE = re.compile(r"-----BEGIN|://[^/\s]*:[^/\s]*@|\bBearer\s+\S{12,}", re.I)

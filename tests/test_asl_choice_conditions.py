@@ -236,3 +236,19 @@ def test_a_credential_cannot_hide_behind_characters_that_are_removed_afterwards(
 def test_the_variable_is_cleaned_before_it_is_shown() -> None:
     got = _conditions([{"Variable": "$.mo\x00de​", "StringEquals": "x", "Next": "Scale"}])
     assert got[0] == '$.mode StringEquals "x"'
+
+
+def test_only_visible_characters_are_checked_and_shown() -> None:
+    """Format and combining characters are removed whatever their code point, by category."""
+    got = _conditions([
+        {"Variable": "$.a", "StringEquals": "ghp_­" + "a1" * 18, "Next": "Scale"},
+        {"Variable": "$.b", "StringEquals": "ghp_͏" + "a1" * 18, "Next": "Scale"},
+        {"Variable": "$.c", "StringEquals": "ghp_\U000e0041" + "a1" * 18, "Next": "Scale"},
+        {"Variable": "$.d", "StringEquals": "ghp_️" + "a1" * 18, "Next": "Scale"},
+        {"Variable": "$.e", "StringEquals": "AKIA ABCDEFGHIJKLMNOP", "Next": "Scale"},
+        {"Variable": "$.f", "StringEquals": "scénario b", "Next": "Scale"},
+    ])
+    for index in range(5):
+        assert got[index].endswith('"<redacted>"'), (index, got[index])
+    # Visible text, including a space and a precomposed letter, is shown as it is.
+    assert got[5] == '$.f StringEquals "scénario b"'

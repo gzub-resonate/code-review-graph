@@ -190,3 +190,17 @@ HIDDEN_G = ['https://api.example.net/files/9f8e7d6c5b4a39281706f5e4d3c2b1a0%3Bx'
 ALLOWED_URLS = ['https://ok.example.net:8443/v1/refresh']
 """
     assert _constants(source) == {"ALLOWED_URLS": ["https://ok.example.net:8443/v1/refresh"]}
+
+
+def test_what_is_checked_is_what_is_stored_and_every_path_piece_is_checked() -> None:
+    source = """\
+HID_A = ['https://api.example.net/a%2Fhooks/x']
+HID_B = ['https://api.example.net/a%252Fhooks/x']
+HID_C = ['https://api.example.net/v1;9f8e7d6c5b4a39281706f5e4d3c2b1a0/x']
+HID_D = ['https://api.example.net/v1/ok;hooks']
+HID_E = ['https://api.example.net/%39f8e7d6c5b4a39281706f5e4d3c2b1a0']
+NONASCII_A = ['https://ｈooks.slack.com/services/T0/B0/XXXXXXXXXXXXXXXXXXXX']
+NONASCII_B = ['https://api.example.net/café']
+ALLOWED_URLS = ['https://ok.example.net/v1/refresh;v=2']
+"""
+    assert _constants(source) == {"ALLOWED_URLS": ["https://ok.example.net/v1/refresh;v=2"]}

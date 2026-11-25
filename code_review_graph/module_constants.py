@@ -43,36 +43,44 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 
 def _url_is_sensitive(url: str) -> bool:
-    """Whether a URL may hold a secret: a webhook, or a path segment shaped like a token.
+    """Whether a URL may hold a secret: a webhook, or a path piece shaped like a token.
 
     Such a URL is dropped whole, not trimmed. An allow-list's URLs are plain host and path
-    (``/v2/admin/verticals/refresh``); a long mixed letter-digit segment, a UUID, an account
-    id or a ``hooks``/``webhook`` host or segment is what a credential in a URL looks like.
-    The URL is normalised and parsed first, so a port, an upper-case or trailing-dot host, a
-    percent-encoded segment or a ``;parameter`` cannot hide what the checks look for; a URL
-    that cannot be parsed is dropped.
+    (``/v2/admin/verticals/refresh``); a long mixed letter-digit piece, a UUID, an account id
+    or a ``hooks``/``webhook`` host or piece is what a credential in a URL looks like.
+
+    What is checked is exactly what is stored: a URL with any non-ASCII character is dropped,
+    so no normalisation can change it between the check and the store. The host is matched
+    without port, case or trailing dot; the path is percent-decoded until it stops changing
+    (``%2F`` and ``%252F`` become separators) and every ``/`` and ``;`` piece is checked, as
+    is every piece of the undecoded path. A URL that cannot be parsed is dropped.
     """
-    import unicodedata
     from urllib.parse import unquote, urlsplit
 
     from .aws_config_names import _looks_like_token
 
+    if not url.isascii():
+        return True
     try:
-        parts = urlsplit(unicodedata.normalize("NFKC", url))
+        parts = urlsplit(url)
         host = (parts.hostname or "").lower().rstrip(".")
     except ValueError:
         return True
     if not host or _WEBHOOK_HOST.search(host):
         return True
-    for raw in parts.path.split("/"):
-        segment = unquote(raw).split(";", 1)[0]
-        if not segment:
-            continue
-        if _WEBHOOK_SEGMENT.fullmatch(segment) or _UUID.fullmatch(segment):
+    decoded = parts.path
+    for _ in range(3):
+        again = unquote(decoded)
+        if again == decoded:
+            break
+        decoded = again
+    pieces = {p for text in (parts.path, decoded) for p in re.split(r"[/;]", text) if p}
+    for piece in pieces:
+        if _WEBHOOK_SEGMENT.fullmatch(piece) or _UUID.fullmatch(piece):
             return True
-        if _looks_like_token(segment) or (
-            len(segment) >= 20 and not re.search(r"[._\-]", segment)
-            and re.search(r"[A-Za-z]", segment) and re.search(r"[0-9]", segment)
+        if _looks_like_token(piece) or (
+            len(piece) >= 20 and not re.search(r"[._\-]", piece)
+            and re.search(r"[A-Za-z]", piece) and re.search(r"[0-9]", piece)
         ):
             return True
     return False
