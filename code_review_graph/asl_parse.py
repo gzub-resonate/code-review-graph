@@ -93,6 +93,28 @@ class _AslObj(dict):
         self.line_end = line_end
 
 
+_ASL_NUMBER_TEXT = re.compile(r"-?\d{1,20}(?:\.\d{1,20})?(?:[eE][+-]?\d{1,4})?")
+
+
+class _AslNumber(int):
+    """A JSON number as the ASL reader hands it on: equal to ``0``, with its text kept.
+
+    No number is ever used as a value, so every one compares as ``0``. The text of a short,
+    well-formed one is kept as ``text`` for a Choice condition to show; anything else has
+    ``text`` empty, and the condition then shows ``?``, never a number it did not read.
+    """
+
+    text: str = ""
+
+    @classmethod
+    def read(cls, node: Any) -> "_AslNumber":
+        number = cls(0)
+        raw = node.text.decode("utf-8", errors="replace") if node.text else ""
+        if _ASL_NUMBER_TEXT.fullmatch(raw):
+            number.text = raw
+        return number
+
+
 def _asl_quote_placeholders(source: bytes) -> bytes:
     """Quote unquoted ``${key}`` template variables so the JSON grammar accepts them."""
     if b"${" not in source:
@@ -148,6 +170,119 @@ def _asl_error_equals(rule: Any) -> list[str]:
             if len(kept) >= _MAX_ASL_ERROR_NAMES:
                 break
     return kept
+
+
+_MAX_ASL_CONDITION_CHARS = 160
+_MAX_ASL_CONDITION_VALUE_CHARS = 48
+_MAX_ASL_CONDITION_DEPTH = 3
+_MAX_ASL_CONDITION_TERMS = 6
+_ASL_CONDITION_NOT_A_TEST = frozenset({"Variable", "Next", "Comment"})
+_ASL_COMPARISON_RE = re.compile(r"(?:String|Numeric|Boolean|Timestamp)[A-Za-z]*|Is[A-Z][A-Za-z]*")
+
+
+def _asl_condition_value(key: str, value: Any) -> str:
+    """One comparison operand: a quoted string, a number, a boolean or a ``...Path``."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, _AslNumber):
+        return value.text or "?"
+    if isinstance(value, (int, float)):
+        return str(value)[:_MAX_ASL_CONDITION_VALUE_CHARS]
+    if isinstance(value, str):
+        text = re.sub(r"[\x00-\x1f\x7f]", "", value)
+        if len(text) > _MAX_ASL_CONDITION_VALUE_CHARS:
+            text = text[: _MAX_ASL_CONDITION_VALUE_CHARS - 1] + "~"
+        return text if key.endswith("Path") else f'"{text}"'
+    return "?"
+
+
+def _asl_condition(rule: Any, depth: int = 0) -> Optional[str]:
+    """The test of a Choice rule as one short line, or ``None`` when it has none to read.
+
+    ``$.mode StringEquals "scale_down"``, ``not $.x IsPresent true``,
+    ``($.a BooleanEquals true and $.b NumericGreaterThan 3)``. A compound rule keeps at most
+    six terms and three levels, and the whole line is cut at 160 characters, so a crafted
+    definition cannot make the edge large.
+    """
+    if not isinstance(rule, _AslObj):
+        return None
+    if depth >= _MAX_ASL_CONDITION_DEPTH:
+        return "..."
+    for word in ("And", "Or"):
+        terms = rule.get(word)
+        if isinstance(terms, list):
+            parts = [
+                part for part in
+                (_asl_condition(term, depth + 1) for term in terms[:_MAX_ASL_CONDITION_TERMS])
+                if part
+            ]
+            if len(terms) > _MAX_ASL_CONDITION_TERMS:
+                parts.append("...")
+            return f"({f' {word.lower()} '.join(parts)})" if parts else None
+    if "Not" in rule:
+        inner = _asl_condition(rule.get("Not"), depth + 1)
+        return f"not {inner}" if inner else None
+    expression = rule.get("Condition")
+    if isinstance(expression, str):
+        return _asl_condition_value("Condition", expression).strip('"')
+    variable = rule.get("Variable")
+    for key, value in rule.items():
+        if key in _ASL_CONDITION_NOT_A_TEST or not _ASL_COMPARISON_RE.fullmatch(key):
+            continue
+        subject = variable if isinstance(variable, str) else "?"
+        subject = re.sub(r"[\x00-\x1f\x7f]", "", subject)[:_MAX_ASL_CONDITION_VALUE_CHARS]
+        return f"{subject} {key} {_asl_condition_value(key, value)}"
+    return None
+
+
+def _asl_condition_text(rule: Any) -> Optional[str]:
+    """:func:`_asl_condition`, cut to the length an edge keeps."""
+    text = _asl_condition(rule)
+    if text and len(text) > _MAX_ASL_CONDITION_CHARS:
+        text = text[: _MAX_ASL_CONDITION_CHARS - 1] + "~"
+    return text
+
+
+def read_choice_conditions(
+    source: bytes, json_parser: Any,
+) -> dict[tuple[int, int], Optional[str]]:
+    """The test of each Choice rule in an ASL file, by ``(line, index)`` of the rule.
+
+    ``(line, index)`` is what a ``choice`` edge stores (``edge.line`` and ``extra.index``), so
+    ``next_states_of`` can name the rule an edge came from. The graph never stores a Choice
+    rule's variable or value (the build keeps definitions value-free); this reads them from
+    the file when a query asks, with the same size and depth caps the build applies. A
+    position that two rules share (a file written on one line) maps to ``None``, never to a
+    guess.
+    """
+    if len(source) > _MAX_ASL_BYTES or json_parser is None:
+        return {}
+    root = json_parser.parse(_asl_quote_placeholders(source)).root_node
+    if root.has_error:
+        return {}
+    values = [c for c in root.named_children if c.type != "comment"]
+    budget = [_MAX_ASL_JSON_NODES]
+    document = _asl_read_value(values[0], 0, budget, set()) if len(values) == 1 else None
+    if not isinstance(document, _AslObj):
+        return {}
+    found: dict[tuple[int, int], Optional[str]] = {}
+    stack: list[Any] = [document]
+    visited = 0
+    while stack and visited < _MAX_ASL_JSON_NODES:
+        current = stack.pop()
+        visited += 1
+        if isinstance(current, _AslObj):
+            choices = current.get("Choices")
+            for index, rule in enumerate(choices if isinstance(choices, list) else []):
+                if not isinstance(rule, _AslObj):
+                    continue
+                key = (rule.line_start, index)
+                text = _asl_condition_text(rule)
+                found[key] = text if key not in found or found[key] == text else None
+            stack.extend(v for v in current.values() if isinstance(v, (dict, list)))
+        elif isinstance(current, list):
+            stack.extend(v for v in current if isinstance(v, (dict, list)))
+    return found
 
 
 def _sanitize_asl_name(name: str) -> str:
@@ -241,7 +376,7 @@ def _asl_read_value(node: Any, depth: int, budget: list[int], problems: set[str]
     if kind == "false":
         return False
     if kind == "number":
-        return 0
+        return _AslNumber.read(node)
     if kind == "array":
         items: list[Any] = []
         for child in node.named_children:
@@ -556,6 +691,7 @@ def parse_asl(
                 choices = state.get("Choices")
                 for index, rule in enumerate(choices if isinstance(choices, list) else []):
                     if isinstance(rule, _AslObj):
+                        # The rule's test is never stored (see read_choice_conditions).
                         transition(rule.get("Next"), "choice", rule.line_start, index)
             catches = state.get("Catch")
             for index, rule in enumerate(catches if isinstance(catches, list) else []):

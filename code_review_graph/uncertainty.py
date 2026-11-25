@@ -143,6 +143,14 @@ LANGUAGE_GAPS: tuple[LanguageGap, ...] = (
         ),
     ),
     LanguageGap(
+        languages=frozenset({"java"}),
+        patterns=frozenset({"publishers_of", "listeners_of"}),
+        note=(
+            "java spring events: publishEvent(new X()) and @EventListener/"
+            "@TransactionalEventListener are indexed; ApplicationListener is not"
+        ),
+    ),
+    LanguageGap(
         languages=frozenset({"go"}),
         patterns=frozenset({"inheritors_of"}),
         note=(
