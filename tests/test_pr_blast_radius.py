@@ -207,9 +207,10 @@ def test_a_missing_head_is_an_error_not_a_crash(pull_request):
     assert result["status"] == "error"
 
 
-def test_neither_pr_nor_head_is_refused(pull_request):
-    with pytest.raises(ValueError):
-        pr_blast_radius_func(repo_root=str(pull_request))
+def test_neither_pr_nor_head_reviews_the_labelled_last_commit(pull_request):
+    result = pr_blast_radius_func(repo_root=str(pull_request))
+    assert result["status"] == "ok"
+    assert result["scope"]["kind"] == "last_commit"
 
 
 def test_no_difference_is_an_empty_answer(pull_request):

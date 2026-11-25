@@ -544,10 +544,19 @@ class TestChanges:
         # Should still find functions even without ranges.
         assert len(result["changed_functions"]) >= 1
 
+    @pytest.fixture
+    def fake_last_commit(self, monkeypatch):
+        """The tests below use a fake repo path: give the default scope a last commit."""
+        monkeypatch.setattr(
+            "code_review_graph.tools.change_scope.resolve_last_commit",
+            lambda root, timeout=None: ("p" * 40, "h" * 40, []),
+        )
+
     # ---------------------------------------------------------------
     # detect_changes_func (integration)
     # ---------------------------------------------------------------
 
+    @pytest.mark.usefixtures("fake_last_commit")
     def test_detect_changes_tool_no_changes(self):
         """detect_changes_func returns clean result when no changes detected."""
         from code_review_graph.tools import detect_changes_func
@@ -573,6 +582,7 @@ class TestChanges:
             assert result["test_gaps"] == []
         assert getattr(self.store.close, "__func__", None) is GraphStore.close
 
+    @pytest.mark.usefixtures("fake_last_commit")
     def test_detect_changes_tool_reports_an_undiscoverable_diff_as_an_error(self):
         """The MCP tool must not flatten "could not look" into the all-clear.
 
@@ -601,6 +611,7 @@ class TestChanges:
         assert result["status"] == "error"
         assert "could not determine the changes" in result["error"]
 
+    @pytest.mark.usefixtures("fake_last_commit")
     def test_detect_changes_tool_asks_for_a_working_vcs(self):
         """The distinction is requested at the call, not hoped for.
 
@@ -628,9 +639,10 @@ class TestChanges:
             mock_get_store.return_value = (self.store, Path("/fake/repo"))
             detect_changes_func(base="HEAD~1", repo_root="/fake/repo")
 
-        discover.assert_called_once_with(Path("/fake/repo"), "HEAD~1", notes=[])
+        discover.assert_called_once_with(Path("/fake/repo"), "p" * 40, notes=[])
         raw_changed.assert_not_called()
 
+    @pytest.mark.usefixtures("fake_last_commit")
     @pytest.mark.parametrize("func_name,module", [
         ("detect_changes_func", "review"),
         ("get_affected_flows_func", "review"),
@@ -674,6 +686,7 @@ class TestChanges:
         # And it must not read like the clean-tree answer.
         assert "No changed files detected" not in str(result.get("summary", ""))
 
+    @pytest.mark.usefixtures("fake_last_commit")
     def test_detect_changes_tool_with_changes(self):
         """detect_changes_func returns full analysis for changed files."""
         from code_review_graph.tools import detect_changes_func

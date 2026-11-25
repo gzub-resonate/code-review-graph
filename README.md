@@ -641,6 +641,8 @@ The assistant uses these once the graph is built. The 25 tools that only read ca
 | `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories |
 | `pr_blast_radius_tool` | What a pull request's changed files reach, new files included, read from Git and reached through the base graph |
 
+The change tools (`detect_changes_tool`, `get_review_context_tool`, `get_impact_radius_tool`, `get_affected_flows_tool`, `pr_blast_radius_tool`) review the last commit when a call names no `pr`, `head`, `base` or `changed_files`, and label it in a `scope` object; see the tool reference in docs/COMMANDS.md.
+
 **MCP prompts** (5 workflow templates):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
 
