@@ -633,6 +633,7 @@ async def query_graph_tool(
     file_hint: Optional[str] = None,
     direction: Optional[str] = None,
     strict: bool = False,
+    routing_key: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -650,8 +651,11 @@ async def query_graph_tool(
     - previous_states_of: Find the Step Functions states that hand over to a state
     - triggers_of: Find methods invoked by a scheduler or other trigger
     - triggered_by: Find schedulers or other triggers that invoke the target
-    - publishers_of: Find methods that publish an event
-    - listeners_of: Find methods that listen for an event
+    - publishers_of: Find methods that publish an event; for an AMQP exchange
+      (``external:rabbitmq:<exchange>``) rows carry ``routing_key``
+    - listeners_of: Find methods that listen for an event; for an AMQP exchange rows carry
+      ``binding_key`` and ``queue``. ``routing_key`` links the two sides with AMQP topic
+      matching (see below)
     - advises: Find methods an AOP advice targets via its pointcut
     - advised_by: Find AOP advice methods that intercept the target
     - handlers_of: Find methods that handle an endpoint; the target may be a route such as
@@ -701,6 +705,16 @@ async def query_graph_tool(
             answers with the best match (exact name, file_hint file, kind, in-degree) plus
             ``ambiguous: true``, ``resolved_to`` and ``alternatives`` with a reason each. Set
             true to get the "ambiguous" candidates list and no rows instead.
+        routing_key: For publishers_of and listeners_of on ``external:rabbitmq:<exchange>`` only.
+            ``listeners_of`` takes a publisher's routing key and keeps the listeners whose
+            ``binding_key`` matches it; ``publishers_of`` takes a binding key (it may hold ``*``
+            or ``#``) and keeps the publishers whose ``routing_key`` matches it. Words split on
+            ``.``; ``*`` is exactly one word, ``#`` zero or more. A wildcard counts only in a
+            binding key that contains one, otherwise keys compare exactly; the exchange type is
+            never inferred. Each row's ``matched_via`` is ``exact_key``, ``topic_pattern`` (matched
+            only through a wildcard, not exact) or ``key_unknown`` (no key recorded on the edge).
+            An empty result for an exchange the graph has no AMQP edges for says so in
+            ``confidence``: it is not evidence about brokers.
 
     Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
@@ -712,7 +726,7 @@ async def query_graph_tool(
             detail_level=detail_level,
             max_results=limit if limit is not None else max_results,
             resolution=resolution, to=to, cursor=cursor, file_hint=file_hint,
-            direction=direction, strict=strict,
+            direction=direction, strict=strict, routing_key=routing_key,
         ),
         root,
     )
@@ -1981,6 +1995,15 @@ async def cross_repo_requests_tool(
             ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
             (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
             to see which services read or write a bucket and which repo defines it.
+            ``amqp`` lists the publishers and listeners of one RabbitMQ exchange across the
+            repos: ``service`` is the exchange (required; ``orders.exchange`` or
+            ``external:rabbitmq:orders.exchange``), ``route`` an optional key and ``status``
+            ``publisher`` or ``listener``. With ``route`` set, a listener row is kept when its
+            ``binding_key`` matches it and a publisher row when its ``routing_key`` matches it,
+            with AMQP topic wildcards (``*`` one word, ``#`` zero or more) applied only in
+            binding keys that hold one; ``matched_via`` is ``exact_key``, ``topic_pattern`` or
+            ``key_unknown``. Repos with no AMQP edges are named in ``repos_without_amqp``: a
+            repo indexed before the exchange edges existed shows nothing until it is rebuilt.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
         repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as

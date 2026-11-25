@@ -32,6 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .amqp_join import EXCHANGE_PREFIX, has_amqp_edges
 from .constants import GIT_TIMEOUT
 from .graph import _sanitize_name
 from .incremental import _load_ignore_patterns, _should_ignore
@@ -517,6 +518,26 @@ def _staleness(
 # ---------------------------------------------------------------------------
 
 
+def _amqp_unindexed_note(store: GraphStore, pattern: str, target: str) -> str | None:
+    """Say a zero for an AMQP exchange means nothing when no AMQP edge is indexed at all.
+
+    ``listeners_of`` and ``publishers_of`` on ``external:rabbitmq:<exchange>`` answer from
+    edges that end at an exchange. A graph with none (an older index, or a repo that does not
+    use RabbitMQ) cannot say whether the exchange has listeners, so the 0 is about the graph,
+    not the brokers. An empty graph keeps its own note. When some AMQP edge is indexed this
+    returns ``None`` and the usual note applies.
+    """
+    if pattern not in ("listeners_of", "publishers_of") or not target.startswith(EXCHANGE_PREFIX):
+        return None
+    if store.get_stats().total_nodes == 0 or has_amqp_edges(store):
+        return None
+    return (
+        "no AMQP bindings are indexed in this graph (no edge ends at "
+        f"{EXCHANGE_PREFIX}...), so this 0 says nothing about the brokers; rebuild the graph "
+        "with a version that indexes exchange bindings, or search the code directly"
+    )
+
+
 def empty_query_confidence(
     store: GraphStore,
     root: Path,
@@ -532,6 +553,9 @@ def empty_query_confidence(
     believing, and saying so is what stops an agent grepping anyway.
     """
     try:
+        amqp_note = _amqp_unindexed_note(store, pattern, target)
+        if amqp_note:
+            return _bounded(amqp_note)
         if node is None:
             if store.get_stats().total_nodes == 0:
                 return _bounded(

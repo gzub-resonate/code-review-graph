@@ -4,6 +4,22 @@
 
 ### Added
 
+- AMQP exchange queries, at query time (no graph rebuild; the links need graphs whose publisher and
+  listener edges meet on `external:rabbitmq:<exchange>`, so older graphs show nothing until
+  rebuilt). `query_graph_tool` `listeners_of` and `publishers_of` accept `routing_key` on such a
+  target and keep the rows linked to it with AMQP topic semantics (words split on `.`, `*` one
+  word, `#` zero or more), applied only when a binding key actually holds a wildcard; the exchange
+  type is never inferred. Rows carry `binding_key`, `routing_key` and `queue`, and `matched_via`
+  says `exact_key`, `topic_pattern` (matched only through a wildcard) or `key_unknown` (no key on
+  the edge). `publishers_of` now also takes an `external:` target. A zero for an exchange in a
+  graph with no AMQP edges at all now says that no AMQP bindings are indexed, instead of reading as
+  a confirmed absence. `cross_repo_requests_tool` `origin="amqp"` lists the publishers and
+  listeners of one exchange across the registered repos (`service` = exchange, `route` = optional
+  key, `status` = `publisher` or `listener`) and names repos with no AMQP edges in
+  `repos_without_amqp`.
+- A test pins how a Step Functions `startExecution` state links to the machine it starts: a
+  `REFERENCES` edge that `cross_repo_requests_tool` `origin="stepfunction"` joins to the machine
+  definition (`next_states_of` keeps to transitions inside one machine).
 - Spring AMQP bindings and cross-class constants. A `@RabbitListener(bindings = @QueueBinding(..))`
   now also writes a `CONSUMES` edge on `external:rabbitmq:<exchange>` for each (exchange, key)
   pair, with `extra.binding_key` (wildcards `*` and `#` kept verbatim), `extra.queue` and

@@ -8,6 +8,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, cast
 
+from ..amqp_join import EXCHANGE_PREFIX, link_kind
 from ..analysis import is_generated_file
 from ..aws_sdk_links import merge_resolved_names
 from ..config_keys import normalize_spring_config_key
@@ -144,7 +145,7 @@ _CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
 
 #: Patterns that can ask who points at something outside the repository.
 _EXTERNAL_TARGET_PATTERNS = frozenset(
-    {"callers_of", "references_to", "importers_of", "listeners_of"}
+    {"callers_of", "references_to", "importers_of", "listeners_of", "publishers_of"}
 )
 
 
@@ -156,6 +157,19 @@ def _is_external_target(pattern: str, target: str) -> bool:
     edges that end there instead of being searched for as a symbol.
     """
     return pattern in _EXTERNAL_TARGET_PATTERNS and target.startswith(("external:", "kafka:"))
+
+
+def _amqp_edge_fields(edge: Any) -> dict[str, Any]:
+    """The AMQP keys of a publisher or listener edge, sanitised for output.
+
+    ``routing_key`` (publisher), ``binding_key`` (listener, may hold ``*`` and ``#``) and
+    ``queue`` are strings read from a repository, so each goes through ``_sanitize_name``.
+    """
+    return {
+        key: _sanitize_name(value)
+        for key in ("routing_key", "binding_key", "queue")
+        if isinstance(value := edge.extra.get(key), str) and value
+    }
 
 
 class _RowWindow:
@@ -1314,6 +1328,7 @@ def query_graph(
     file_hint: str | None = None,
     direction: str | None = None,
     strict: bool = False,
+    routing_key: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1349,6 +1364,16 @@ def query_graph(
         strict: For handlers_of and references_to, keep the "ambiguous" answer (candidates, no
             rows) when a name matches several nodes. By default the best match answers, with
             ``ambiguous: true``, ``resolved_to`` and one-line ``alternatives``.
+        routing_key: For publishers_of and listeners_of on an AMQP exchange
+            (``external:rabbitmq:<exchange>``), keep only the rows linked to this key.
+            ``listeners_of`` takes a publisher's routing key and keeps the listeners whose
+            ``binding_key`` matches it; ``publishers_of`` takes a binding key (it may hold
+            the wildcards ``*`` and ``#``) and keeps the publishers whose ``routing_key``
+            matches it. Words split on ``.``; ``*`` is exactly one word and ``#`` zero or
+            more. A wildcard is applied only in a binding key that contains one, otherwise
+            keys compare exactly, and the exchange type is never inferred. Each kept row says
+            how it matched in ``matched_via``: ``exact_key``, ``topic_pattern`` (only through a
+            wildcard: not an exact match) or ``key_unknown`` (the edge records no key).
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
@@ -1375,6 +1400,15 @@ def query_graph(
     if direction is not None and direction not in (*ENDPOINT_DIRECTIONS, "all"):
         raise ValueError(
             f"direction must be one of {[*ENDPOINT_DIRECTIONS, 'all']}, got {direction!r}"
+        )
+    routing_key = routing_key or None
+    if routing_key is not None and (
+        pattern not in ("publishers_of", "listeners_of")
+        or not target.startswith(EXCHANGE_PREFIX)
+    ):
+        raise ValueError(
+            "routing_key applies only to publishers_of and listeners_of on an AMQP "
+            f"exchange target ({EXCHANGE_PREFIX}<exchange>)"
         )
 
     store, root = _get_store(repo_root)
@@ -1416,6 +1450,8 @@ def query_graph(
             scope_args["strict"] = True
         if file_hint:
             scope_args["file_hint"] = file_hint
+        if routing_key is not None:
+            scope_args["routing_key"] = routing_key
         page_scope = make_scope("query_graph_tool", **scope_args)
         page_stamp = graph_stamp(store)
         page_offset = _cursor_offset(cursor, page_scope, page_stamp)
@@ -2074,14 +2110,28 @@ def query_graph(
 
         elif pattern in ("publishers_of", "listeners_of"):
             edge_kind = "PUBLISHES" if pattern == "publishers_of" else "HANDLES"
+            amqp_channel = qn.startswith(EXCHANGE_PREFIX)
             for edge in store.get_edges_by_target(qn):
                 if edge.kind != edge_kind:
                     continue
+                amqp_fields: dict[str, Any] = {}
+                if amqp_channel:
+                    amqp_fields = _amqp_edge_fields(edge)
+                    if routing_key is not None:
+                        # The listener's binding key is the pattern; for publishers_of the
+                        # key asked for is the binding key and the publisher's is the subject.
+                        if pattern == "listeners_of":
+                            how = link_kind(edge.extra.get("binding_key"), routing_key)
+                        else:
+                            how = link_kind(routing_key, edge.extra.get("routing_key"))
+                        if how is None:
+                            continue
+                        amqp_fields["matched_via"] = how
                 source = store.get_node(edge.source_qualified)
                 if source:
-                    add_result(node_to_dict(source), edge)
+                    add_result({**node_to_dict(source), **amqp_fields}, edge)
                 else:
-                    edges_out.append(edge_to_dict(edge))
+                    edges_out.append({**edge_to_dict(edge), **amqp_fields})
 
         elif pattern == "advises":
             for edge in store.get_edges_by_source(qn):
@@ -2221,6 +2271,8 @@ def query_graph(
             ) + f", {results_omitted} omitted"
         elif results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
+        if routing_key is not None:
+            summary += f" linked to routing key '{_sanitize_name(routing_key)}'"
         if same_name_tests:
             summary += f" — skipped {same_name_tests} same-named test symbol(s)"
         if pattern == "tests_for" and inferred_results:
@@ -2270,6 +2322,8 @@ def query_graph(
                 result_fields += ("importer", "file", "import_level")
             if pattern == "handlers_of":
                 result_fields += ("endpoint",)
+            if pattern in ("publishers_of", "listeners_of"):
+                result_fields += ("matched_via", "routing_key", "binding_key", "queue")
             minimal_results = [
                 {
                     k: r[k]
