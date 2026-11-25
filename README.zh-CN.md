@@ -633,7 +633,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 单个 Wiki 页面 |
 | `list_repos_tool` | 已注册的仓库 |
 | `cross_repo_search_tool` | 搜索已注册的仓库；`repos` 可把搜索限定到一个子集 |
-| `cross_repo_requests_tool` | 把 Spring Feign 调用关联到其他已注册仓库中对应的端点 |
+| `cross_repo_requests_tool` | 把 Spring Feign 调用关联到其他已注册仓库中对应的端点；Feign 服务名通过可选的别名文件或仓库自身声明的名称（Spring 应用名、ECS 服务、ECR 仓库；见 [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md)）找到仓库；`origin="awssdk"` 关联 AWS SDK 调用，包括按配置档从 Spring 配置中读取的名称（只存储资源名称；见 [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration)） |
 | `pr_blast_radius_tool` | 从 Git 读取拉取请求的变更文件（包括新增文件），并通过基线图求出其影响范围 |
 
 **MCP 提示模板**（5 个工作流模板）：
@@ -691,6 +691,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for` 和 `detect-changes` 查找测试时每一跳最多跟随的被调用者数。按名称取前面的，因此同一张图谱总是给出同一个答案 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 为没有测试的变更符号向上回溯 `CALLS` 寻找已测试调用者的跳数。仅作为提示报告，不计为覆盖率 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 寻找该已测试调用者时检查的调用者数量上限 | `500` |
+| `CRG_SERVICE_ALIASES_FILE` | JSON 或 YAML 文件的路径，把 Feign 服务名映射到已注册的仓库（`{"alias": "repo", "prefix:billing-api-": "billing-api"}`）；见 [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) | 未设置 |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | 单次 `cross_repo_search_tool` 或 `cross_repo_requests_tool` 调用在停止启动新仓库并将其余仓库列入 `skipped_repos` 之前可运行的秒数。`0` 表示不限制 | `300` |
 | `CRG_CROSS_REPO_WORKERS` | 单次 `cross_repo_search_tool` 调用同时搜索的仓库数。`1` 表示逐个搜索。大于 32 的值按 32 处理 | `4` |
 | `CRG_TOOL_TIMEOUT` | 只读 MCP 工具的超时秒数（`0` 表示禁用）。不限制写入类工具：build、postprocess、embed、wiki 和 apply-refactor | `0` |

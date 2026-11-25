@@ -635,7 +635,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 위키 페이지 하나 |
 | `list_repos_tool` | 등록된 저장소 |
 | `cross_repo_search_tool` | 등록된 저장소 검색. `repos`로 대상을 좁힐 수 있음 |
-| `cross_repo_requests_tool` | Spring Feign 호출을 다른 등록된 저장소에서 대응하는 엔드포인트와 연결 |
+| `cross_repo_requests_tool` | Spring Feign 호출을 다른 등록된 저장소에서 대응하는 엔드포인트와 연결. Feign 서비스 이름은 선택적 별칭 파일이나 저장소가 선언하는 이름(Spring 애플리케이션 이름, ECS 서비스, ECR 저장소; [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) 참고)으로 저장소에 닿습니다. `origin="awssdk"`는 AWS SDK 호출을 연결하며, 프로파일별로 Spring 설정에서 읽은 이름도 포함합니다(리소스 이름만 저장; [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration) 참고) |
 | `pr_blast_radius_tool` | 풀 리퀘스트의 변경 파일(새 파일 포함)을 Git에서 읽고 기준 그래프를 따라 영향 범위를 구합니다 |
 
 **MCP 프롬프트**(워크플로 템플릿 5개):
@@ -693,6 +693,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for`와 `detect-changes`가 테스트를 찾을 때 홉마다 따라가는 피호출자의 최대 수. 이름순으로 앞의 것을 남기므로 같은 그래프는 언제나 같은 답을 줌 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |
+| `CRG_SERVICE_ALIASES_FILE` | Feign 서비스 이름을 등록된 저장소에 매핑하는 JSON 또는 YAML 파일의 경로(`{"alias": "repo", "prefix:billing-api-": "billing-api"}`); [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) 참고 | 설정 안 함 |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` 또는 `cross_repo_requests_tool` 한 번의 호출이 새 저장소 시작을 멈추고 나머지를 `skipped_repos`에 나열하기까지의 시간(초). `0`은 제한 없음 | `300` |
 | `CRG_CROSS_REPO_WORKERS` | `cross_repo_search_tool` 한 번의 호출이 동시에 검색하는 저장소 수. `1`은 하나씩 검색합니다. 32보다 큰 값은 32로 처리됩니다 | `4` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |

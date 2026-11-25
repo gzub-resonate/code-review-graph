@@ -146,7 +146,7 @@ def test_minimal_detail_pages_the_same_rows(repo):
     full, _ = read_all(root, spec, 6)
     mini, _ = read_all(root, spec, 6, detail_level="minimal")
     assert [r["name"] for r in mini] == [r["name"] for r in full]
-    assert set(mini[0]) <= {"name", "kind", "relative_path", "line"}
+    assert set(mini[0]) <= {"name", "kind", "relative_path", "line", "test_support"}
 
 
 @pytest.mark.parametrize("mode", sorted(MODES))

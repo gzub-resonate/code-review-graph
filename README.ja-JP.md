@@ -629,7 +629,7 @@ alias = "project-b"
 | `get_wiki_page_tool` | 1 つの Wiki ページ |
 | `list_repos_tool` | 登録済みのリポジトリ |
 | `cross_repo_search_tool` | 登録済みのリポジトリを検索。`repos` で対象を絞り込める |
-| `cross_repo_requests_tool` | Spring Feign の呼び出しを、他の登録済みリポジトリ内の対応するエンドポイントに結び付ける |
+| `cross_repo_requests_tool` | Spring Feign の呼び出しを、他の登録済みリポジトリ内の対応するエンドポイントに結び付ける。Feign のサービス名は、任意のエイリアスファイルか、リポジトリが宣言する名前（Spring アプリケーション名、ECS サービス、ECR リポジトリ。[docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) を参照）でリポジトリに届く。`origin="awssdk"` は AWS SDK の呼び出しを結び付け、プロファイルごとに Spring 設定から読んだ名前も含む（保存するのはリソース名のみ。[docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration) を参照） |
 | `pr_blast_radius_tool` | プルリクエストの変更ファイル（新規ファイルを含む）を Git から読み、ベースのグラフをたどって影響範囲を求める |
 
 **MCP プロンプト**（5 つのワークフローテンプレート）:
@@ -687,6 +687,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for` と `detect-changes` がテストを探すとき、1 ホップでたどる呼び出し先の最大数。名前順で先頭のものを残すので、同じグラフからは常に同じ答えが出る | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | テストのない変更シンボルについて、テスト済みの呼び出し元を探して `CALLS` を遡るホップ数。カバレッジではなく注記として報告されます | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |
+| `CRG_SERVICE_ALIASES_FILE` | Feign のサービス名を登録済みリポジトリに対応付ける JSON または YAML ファイルのパス（`{"alias": "repo", "prefix:billing-api-": "billing-api"}`）。[docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) を参照 | 未設定 |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` または `cross_repo_requests_tool` の1回の呼び出しが、新しいリポジトリの開始を止めて残りを `skipped_repos` に列挙するまでの秒数。`0` は無制限 | `300` |
 | `CRG_CROSS_REPO_WORKERS` | `cross_repo_search_tool` の1回の呼び出しが同時に検索するリポジトリ数。`1` は1つずつ検索します。32 を超える値は 32 になります | `4` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |

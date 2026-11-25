@@ -1421,7 +1421,8 @@ def query_graph(
     routing_key = routing_key or None
     if routing_key is not None and (
         pattern not in ("publishers_of", "listeners_of")
-        or not target.startswith(EXCHANGE_PREFIX)
+        or "::" in target
+        or (target.startswith(("external:", "kafka:")) and not target.startswith(EXCHANGE_PREFIX))
     ):
         raise ValueError(
             "routing_key applies only to publishers_of and listeners_of on an AMQP "
@@ -1694,6 +1695,20 @@ def query_graph(
                             ),
                         }
 
+        if (
+            not node
+            and pattern in ("publishers_of", "listeners_of")
+            and not external_target
+            and "::" not in target
+        ):
+            # A bare exchange name (``api.e.topic.vertical``): exchanges are edge ends, never
+            # nodes, so after the symbol search found nothing read it as the exchange.
+            channel = EXCHANGE_PREFIX + target
+            if store._conn.execute(
+                "SELECT 1 FROM edges WHERE target_qualified = ? LIMIT 1", (channel,),
+            ).fetchone():
+                target, external_target = channel, True
+
         if not node and pattern not in ("consumers_of", "file_summary") and not external_target:
             # This branch, not the empty-result path below, is where an
             # unresolved target actually lands for most patterns, so the
@@ -1708,6 +1723,11 @@ def query_graph(
             return unresolved
 
         qn = node.qualified_name if node else target
+        if routing_key is not None and not qn.startswith(EXCHANGE_PREFIX):
+            raise ValueError(
+                "routing_key applies only to publishers_of and listeners_of on an AMQP "
+                f"exchange target ({EXCHANGE_PREFIX}<exchange>)"
+            )
 
         if pattern == "callers_of":
             # Sources reached through the qualified target. A source found

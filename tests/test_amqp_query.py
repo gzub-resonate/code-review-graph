@@ -423,3 +423,29 @@ class TestProducesPublishers:
             from code_review_graph.amqp_join import read_channel_edges
             rows = [r for r in read_channel_edges(store, EXCHANGE) if r["role"] == "publisher"]
         assert {r["routing_key"] for r in rows} == set(PUBLISHERS.values())
+
+    def test_a_bare_exchange_name_is_read_as_the_exchange(self, produces_repo):
+        bare = EXCHANGE.removeprefix("external:rabbitmq:")
+        full = query_graph("publishers_of", EXCHANGE, repo_root=str(produces_repo))
+        reply = query_graph("publishers_of", bare, repo_root=str(produces_repo))
+        assert reply["status"] == "ok"
+        assert _names(reply) == _names(full)
+        listeners = query_graph("listeners_of", bare, repo_root=str(produces_repo))
+        assert listeners["result_count"] == len(LISTENERS)
+
+    def test_a_routing_key_works_with_a_bare_exchange_name(self, produces_repo):
+        bare = EXCHANGE.removeprefix("external:rabbitmq:")
+        reply = query_graph(
+            "publishers_of", bare, repo_root=str(produces_repo), routing_key="orders.*",
+        )
+        assert reply["status"] == "ok" and reply["result_count"] >= 1
+
+    def test_an_unknown_bare_name_is_still_not_found(self, produces_repo):
+        reply = query_graph("publishers_of", "no.such.exchange", repo_root=str(produces_repo))
+        assert reply["status"] == "not_found"
+
+    def test_the_no_edges_note_keeps_the_whole_target(self, produces_repo):
+        reply = query_graph(
+            "publishers_of", "external:rabbitmq:nowhere", repo_root=str(produces_repo),
+        )
+        assert "external:rabbitmq:nowhere" in reply["confidence"]
