@@ -192,3 +192,25 @@ def test_a_file_changed_after_indexing_gives_no_condition_and_says_why(tmp_path:
     assert "changed since it was indexed" in choice["condition_unavailable"]
     # Nothing of the edited rule leaks into the answer.
     assert "$.other" not in json.dumps(choice)
+
+
+def test_credential_shaped_operands_are_redacted_not_trimmed() -> None:
+    got = _conditions([
+        {"Variable": "$.k", "StringEquals": "AKIAABCDEFGHIJKLMNOP", "Next": "Scale"},
+        {"Variable": "$.t", "StringEquals": "ghp_" + "a1" * 18, "Next": "Scale"},
+        {"Variable": "$.a", "StringEquals": "123456789012", "Next": "Scale"},
+        {"Variable": "$.h", "StringEquals": "Bearer abcdefghijklmnop", "Next": "Scale"},
+        {"Variable": "$.u", "StringEquals": "https://user:pw@host.example.net/x", "Next": "Scale"},
+        {"Variable": "$.m", "StringEquals": "scale_down", "Next": "Scale"},
+        {"Condition": "{% $states.input.token = 'sk-abcdefghijklmnopqrstuvwxyz0123' %}",
+         "Next": "Scale"},
+        {"Variable": "$.p", "StringEqualsPath": "$.otherField", "Next": "Scale"},
+    ])
+    for index in (0, 1, 2, 3, 4):
+        assert got[index] == f"$.{'ktahu'[index]} StringEquals \"<redacted>\""
+    assert got[5] == '$.m StringEquals "scale_down"'
+    assert got[6] == "<redacted>"
+    assert got[7] == "$.p StringEqualsPath $.otherField"
+    text = " ".join(t for t in got.values() if t)
+    for leaked in ("AKIA", "ghp_", "123456789012", "Bearer", "user:pw", "sk-abc"):
+        assert leaked not in text
