@@ -252,3 +252,27 @@ def test_only_visible_characters_are_checked_and_shown() -> None:
         assert got[index].endswith('"<redacted>"'), (index, got[index])
     # Visible text, including a space and a precomposed letter, is shown as it is.
     assert got[5] == '$.f StringEquals "scénario b"'
+
+
+def test_blank_rendering_letters_and_symbols_cannot_split_a_credential_prefix() -> None:
+    """Hangul fillers and the Braille blank are letters or symbols to Unicode but draw nothing."""
+    token = "a1" * 18
+    got = _conditions([
+        {"Variable": "$.a", "StringEquals": "ghㅤp_" + token, "Next": "Scale"},
+        {"Variable": "$.b", "StringEquals": "ghᅟp_" + token, "Next": "Scale"},
+        {"Variable": "$.c", "StringEquals": "ghᅠp_" + token, "Next": "Scale"},
+        {"Variable": "$.d", "StringEquals": "ghﾠp_" + token, "Next": "Scale"},
+        {"Variable": "$.e", "StringEquals": "gh⠀p_" + token, "Next": "Scale"},
+        {"Variable": "$.f", "StringEquals": "AKㅤIAABCDEFGHIJKLMNOP", "Next": "Scale"},
+        {"Variable": "$.g", "StringEquals": "gh᠎p_" + token, "Next": "Scale"},
+        {"Variable": "$.h", "StringEquals": "gh឴p_" + token, "Next": "Scale"},
+    ])
+    for index in range(8):
+        assert got[index].endswith('"<redacted>"'), (index, got[index])
+    # Real Hangul letters and a plain Braille dot pattern are visible text and still show.
+    shown = _conditions([
+        {"Variable": "$.k", "StringEquals": "확인", "Next": "Scale"},
+        {"Variable": "$.m", "StringEquals": "⠁⠃", "Next": "Scale"},
+    ])
+    assert shown[0] == '$.k StringEquals "확인"'
+    assert shown[1] == '$.m StringEquals "⠁⠃"'
