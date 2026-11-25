@@ -59,6 +59,20 @@ def _clean(value: Any) -> str:
     return " ".join(_sanitize_name(str(value)).split())
 
 
+def _clean_any(value: Any) -> Any:
+    """:func:`_clean` applied to every string in *value*: list items, dict keys and values.
+
+    Numbers, booleans and ``None`` pass through; list lengths are kept.
+    """
+    if isinstance(value, str):
+        return _clean(value)
+    if isinstance(value, (list, tuple)):
+        return [_clean_any(v) for v in value]
+    if isinstance(value, dict):
+        return {_clean(k): _clean_any(v) for k, v in value.items()}
+    return value
+
+
 class Declaration(dict):  # type: ignore[type-arg]
     """One Terraform ``declare`` edge: service, kind, name, file (relative), line, type."""
 
@@ -197,13 +211,10 @@ class _Matcher:
 
 def _item(kind: str, repo: str, name: str, file: str, line: Optional[int], via: str,
           **extra: Any) -> dict[str, Any]:
-    item: dict[str, Any] = {
-        "kind": kind, "name": _clean(name), "repo": _clean(repo), "file": _clean(file),
-        "line": line, "matched_via": via,
-    }
-    for key, value in extra.items():
-        item[key] = _clean(value) if isinstance(value, str) else value
-    return item
+    return _clean_any({
+        "kind": kind, "name": name, "repo": repo, "file": file, "line": line,
+        "matched_via": via, **extra,
+    })
 
 
 def _summarise_repo(
@@ -275,10 +286,10 @@ def _summarise_repo(
                     terraform_type=decl["terraform_type"],
                 ))
     summary: dict[str, Any] = {
-        "identity": [
-            {"name": _clean(name), "matched_via": via}
+        "identity": _clean_any([
+            {"name": name, "matched_via": via}
             for name, via in _identity_names(entry, own, rules, lookup, index)[:_MAX_IDENTITIES]
-        ],
+        ]),
     }
     counts: dict[str, int] = {}
     for kind, key in _CATEGORIES:
