@@ -4,6 +4,16 @@
 
 ### Added
 
+- `python -m code_review_graph.index_fingerprint` prints an index fingerprint: a short hash of
+  the code a graph build runs (the import closure of the build, update, post-processing, embed
+  and schema-migration entry points, each module as a normalised syntax tree so comment, docstring
+  and formatting edits do not move it), the installed tree-sitter grammar and embedding
+  dependency versions, and the environment variables that pick an embedding model. A deployment
+  can rebuild its graphs when the fingerprint changes instead of on every version or commit
+  change. `compute_fingerprint()` is importable, cached per process and never raises; it returns
+  `unknown` when it cannot compute. A test fails when a new module is neither reached from the
+  build nor listed as query-side only.
+
 - Terraform wiring between AWS resources, read from `.tf` files and listed by
   `cross_repo_requests_tool` with `origin="awssdk"`: declarations of queues, topics, Lambda
   functions, DynamoDB tables, EventBridge rules and Scheduler schedules; and what fires what (a
