@@ -276,3 +276,28 @@ def test_blank_rendering_letters_and_symbols_cannot_split_a_credential_prefix() 
     ])
     assert shown[0] == '$.k StringEquals "확인"'
     assert shown[1] == '$.m StringEquals "⠁⠃"'
+
+
+def test_a_non_ascii_character_of_any_kind_cannot_split_a_credential_for_the_check() -> None:
+    """The credential check also runs with every non-ASCII character removed (an allowlist)."""
+    token = "a1" * 18
+    odd = [
+        "ㅤ", "ᅟ", "⠀", "឴",  # on the blank-glyph list
+        "\U0001d159",  # not on it: a musical symbol (a symbol to Unicode, so it would be kept)
+        "é", "Ж", "中", "\U0001f600",  # visible letters and an emoji
+        "​", "⁣", "️",  # invisible
+    ]
+    for ch in odd:
+        got = _conditions([
+            {"Variable": "$.a", "StringEquals": f"gh{ch}p_{token}", "Next": "Scale"},
+            {"Variable": "$.b", "StringEquals": f"AKIA{ch}ABCDEFGHIJKLMNOP", "Next": "Scale"},
+            {"Variable": "$.c", "StringEquals": f"sk-{ch}abcdefghijklmnopqrstuvwxyz0123",
+             "Next": "Scale"},
+        ])
+        for index in range(3):
+            assert got[index].endswith('"<redacted>"'), (hex(ord(ch[0])), index, got[index])
+    # Ordinary text that mixes scripts, with nothing credential-shaped in it, still shows.
+    shown = _conditions([
+        {"Variable": "$.k", "StringEquals": "café scale_down", "Next": "Scale"},
+    ])
+    assert shown[0] == '$.k StringEquals "café scale_down"'
