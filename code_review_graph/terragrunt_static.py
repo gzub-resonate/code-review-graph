@@ -232,6 +232,66 @@ class TerragruntEvaluator:
                 merged[name] = (value, value_expr.start_point[0] + 1)
         return [(k, v[0], v[1]) for k, v in merged.items()], self._include_reason
 
+    def input_objects(
+        self, key: str, fields: frozenset[str],
+    ) -> tuple[list[dict[str, Optional[str]]], Optional[str]]:
+        """``([{field: value}], reason)`` for the list of objects ``inputs.<key>``.
+
+        The list is written out in the unit (or in the first included file that defines it).
+        Only the entries named in *fields* are evaluated; every other entry of an object (a
+        policy, an ``input`` document, an environment) is never visited. A value that does not
+        reduce to a string is ``None``.
+        """
+        for frame in self._input_frames():
+            expr = self._inputs(frame).get(key)
+            if expr is None:
+                continue
+            out: list[dict[str, Optional[str]]] = []
+            for item in self._list_items(expr)[:MAX_LIST_ITEMS]:
+                row: dict[str, Optional[str]] = {}
+                for name, value_expr in self._object_entries(item):
+                    if name in fields and name not in row:
+                        flag = self._flag(value_expr)
+                        row[name] = flag if flag is not None else (
+                            self._evaluate_in(value_expr, frame)[0]
+                        )
+                out.append(row)
+            return out, self._include_reason
+        return [], self._include_reason
+
+    @staticmethod
+    def _flag(expr: Any) -> Optional[str]:
+        """``"true"`` or ``"false"`` for an expression that is exactly that literal."""
+        text = _text(expr).strip()
+        return text if text in ("true", "false") else None
+
+    def input_flag(self, key: str) -> Optional[str]:
+        """``"true"``/``"false"`` when ``inputs.<key>`` is exactly that literal, else ``None``."""
+        for frame in self._input_frames():
+            expr = self._inputs(frame).get(key)
+            if expr is not None:
+                return self._flag(expr)
+        return None
+
+    def input_strings(self, key: str) -> tuple[list[Optional[str]], Optional[str]]:
+        """``([value], reason)`` for the list of strings ``inputs.<key>``."""
+        for frame in self._input_frames():
+            expr = self._inputs(frame).get(key)
+            if expr is None:
+                continue
+            items = self._list_items(expr)[:MAX_LIST_ITEMS]
+            return [self._evaluate_in(i, frame)[0] for i in items], self._include_reason
+        return [], self._include_reason
+
+    @staticmethod
+    def _list_items(expr: Any) -> list[Any]:
+        """The element expressions of a list written out (``[a, b]``); nothing otherwise."""
+        kids = [c for c in expr.named_children if c.type != "comment"]
+        if len(kids) != 1 or kids[0].type != "collection_value":
+            return []
+        tup = next((c for c in kids[0].children if c.type == "tuple"), None)
+        return [c for c in tup.children if c.type == "expression"] if tup is not None else []
+
     def _evaluate_in(
         self, expr: Any, frame: _Frame, holes: bool = False,
     ) -> tuple[Optional[str], Optional[str]]:

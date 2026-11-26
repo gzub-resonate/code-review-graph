@@ -57,6 +57,42 @@
   return a compact `edges` list (`target`, `via`, `condition`, `line`) beside the names, so a
   Choice branch's test is no longer lost; it stays about a third of the standard reply.
   Query-time only; the index fingerprint is unchanged.
+- Python boto3: `logs`, `cloudwatch`, `application-autoscaling` and `sts` clients are bound
+  (`cwl.get_log_events(logGroupName=...)` gets a `logs` row), ECS service and cluster calls name the
+  service or cluster, Batch queue and job calls and EventBridge rule calls (`put_rule`,
+  `put_targets` ...) name theirs. A call on a bound client that passes arguments but names no resource parameter now
+  keeps a `?` row marked `unresolved_reason: no_resource_param` at confidence 0.3 (filter on it);
+  existing rows are unchanged. Not added: sagemaker, ec2, ses and emr (many resource kinds, mostly
+  dynamic ids). This changes the index fingerprint.
+- Python `requests` / `httpx` calls (module-level verbs, `request`, `Session()`/`Client()` objects)
+  become client `Endpoint` nodes (`client="py_http"`) holding only the host of a literal URL, or
+  the name of the variable it comes from; paths, query strings and credentials are never stored
+  (a webhook URL shows as its host). `cross_repo_requests_tool` `origin="external"` lists them.
+  This changes the index fingerprint.
+- Module-level Python constants that name a resource (an ARN, `s3://` location, or a name like
+  `*_BUCKET`, `*_QUEUE`, `*_STATE_MACHINE_ARN`) are stored as `Variable` nodes with a masked
+  `resource_value` (secret-looking values dropped, account ids replaced by `ACCOUNT`, 200
+  characters). An unresolved boto3 call that names an UPPER_CASE constant of another module
+  (`BUCKET` or `consts.BUCKET`) carries `const_ref` and is resolved at build time into
+  `resolved_names` when the repo has one value for it. `make_client("svc")` / `get_client("svc")`
+  with a literal service binds a low-confidence client (`client_inferred`). This changes the index
+  fingerprint.
+- `cross_repo_requests_tool` `origin="trigger"` reads the triggers a Terragrunt Lambda unit sets in
+  `inputs` (`aws_cloudwatch_event_rules`, `..._ignore_changes`, `existing_sns_topics`,
+  `include_sqs`/`sqs_name`) as rows with `via: terragrunt_inputs`, keyed on the unit's
+  `function_name`; the rule's `input` is never read. Shared-module rows whose firing side is only a
+  Terraform label are marked `template: true`. Units need a rebuild.
+- The Java SQS/SNS and AWS SDK extractors follow one same-file hop to a configuration getter or `@Value` field: a
+  local variable, a no-argument own-class method that only returns it, a resource-lookup wrapper
+  (`helper.getQueueUrl(props.getQueueName())`), a request variable built earlier in the method, and a chained
+  getter (`props.getDynamo().getTableName()`, a placeholder only when the repo's configuration defines the nested
+  key). Ambiguous cases (reassigned or shadowed locals, overloaded or multi-statement methods, parameters) yield
+  no key. This changes the index fingerprint, so every repo is reindexed once. New module `java_config_hops.py`.
+- `cross_repo_requests_tool` `origin="awssdk"`: a row named per profile at build time (`resolved_names`) now
+  reports `target_source: "config"`, and a key defined only in profile-bound documents with differing values
+  reports `target_source: "config"`, `config_profile: "differs"` and the per-profile names in
+  `config_alternatives` (the name stays unresolved; secret-looking values are filtered as before).
+  Query-time only.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,

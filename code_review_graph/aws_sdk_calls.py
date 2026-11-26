@@ -39,13 +39,18 @@ from typing import Any, NamedTuple, Optional
 from . import aws_terraform_wiring as _wiring
 from .config_keys import normalize_spring_config_key
 from .infra_references import aws_external_target, reduce_arn
+from .java_config_hops import follow, getter_chain
 
 __all__ = [
-    "aws_sdk_edges", "RESOLUTION", "UNRESOLVED_NAME", "classify_access", "sdk_operation_name",
+    "aws_sdk_edges", "RESOLUTION", "UNRESOLVED_NAME", "NO_RESOURCE_PARAM", "classify_access",
+    "sdk_operation_name",
 ]
 
 RESOLUTION = "aws_sdk"
 UNRESOLVED_NAME = "?"
+#: ``unresolved_reason`` of a client call that names no resource parameter at all (``?`` row,
+#: confidence 0.3): the call is known, its target is not.
+NO_RESOURCE_PARAM = "no_resource_param"
 _DYN = "\x00"
 _MAX_EDGES_PER_FILE = 2000
 #: Longest line a pattern is run on, and the most text read from one file. Longer lines are
@@ -64,7 +69,7 @@ _URI_SUFFIXES = frozenset({
     ".sc", ".kt", ".kts", ".sh", ".bash", ".tf",
 })
 _MARKERS: dict[str, tuple[bytes, ...]] = {
-    "python": (b"boto3", b"botocore"),
+    "python": (b"boto3", b"botocore", b"make_client(", b"get_client("),
     "java": (b"software.amazon.awssdk", b"com.amazonaws"),
     "javascript": (b"@aws-sdk/",),
     "typescript": (b"@aws-sdk/",),
@@ -80,6 +85,9 @@ class Val(NamedTuple):
     #: ``(declared type, property)`` for a bean getter such as ``props.getS3Bucket()``. The
     #: name is not in this file, so the link step looks for the type's configuration prefix.
     getter: Optional[tuple[str, str]] = None
+    #: UPPER_CASE name of a constant that is not in this file (``BUCKET`` or ``consts.BUCKET``).
+    #: Joined at build time with the resource-like module constants of the repo.
+    const_ref: Optional[str] = None
 
 
 class _Svc(NamedTuple):
@@ -109,6 +117,12 @@ SERVICES: dict[str, _Svc] = {
     ),
     "elasticache": _Svc("elasticache", "cache-cluster", ("cacheclusterid",)),
     "es": _Svc("es", "search-domain", ("domainname", "domainnames")),
+    "logs": _Svc("logs", "log-group", ("loggroupname", "loggroupnames", "loggroupidentifier")),
+    "cloudwatch": _Svc("cloudwatch", "alarm", ("alarmname", "alarmnames")),
+    "application-autoscaling": _Svc(
+        "application-autoscaling", "scalable-target", ("resourceid", "resourceids"),
+    ),
+    "sts": _Svc("sts", "role", ("rolearn",)),
 }
 #: Services whose resources are data stores. A name is only joined to a declaration of the same
 #: kind (a replication group is not a cache cluster of the same name); see ``aws_sdk_links``.
@@ -133,6 +147,21 @@ _REPLICATION_GROUP_OPS = (
     "test_failover", "start_migration", "complete_migration", "test_migration",
     "modify_replication_group_shard_configuration",
 )
+_ECS_SERVICE_OPS = ("update_service", "create_service", "delete_service", "describe_services")
+_ECS_CLUSTER_OPS = (
+    "list_services", "list_tasks", "describe_tasks", "stop_task", "list_container_instances",
+    "describe_container_instances", "describe_clusters", "delete_cluster", "update_cluster",
+    "execute_command",
+)
+_BATCH_QUEUE_OPS = (
+    "describe_job_queues", "update_job_queue", "delete_job_queue", "create_job_queue",
+)
+_BATCH_JOB_OPS = ("describe_jobs", "terminate_job", "cancel_job")
+_EVENT_RULE_OPS = (
+    "put_rule", "describe_rule", "delete_rule", "enable_rule", "disable_rule", "put_targets",
+    "remove_targets", "list_targets_by_rule",
+)
+_METRIC_OPS = ("put_metric_data", "get_metric_statistics", "list_metrics")
 #: Per-operation resource parameters that differ from the service's.
 _OP_PARAMS: dict[tuple[str, str], tuple[str, ...]] = {
     ("secretsmanager", "create_secret"): ("name",),
@@ -143,16 +172,30 @@ _OP_PARAMS: dict[tuple[str, str], tuple[str, ...]] = {
         "targetgrouparn", "targetgrouparns", "names", "name",
     ) for op in _TARGET_GROUP_OPS},
     **{("elasticache", op): ("replicationgroupid",) for op in _REPLICATION_GROUP_OPS},
+    **{("ecs", op): ("service", "services", "servicename") for op in _ECS_SERVICE_OPS},
+    **{("ecs", op): ("cluster", "clusters") for op in _ECS_CLUSTER_OPS},
+    **{("batch", op): ("jobqueue", "jobqueues", "jobqueuename") for op in _BATCH_QUEUE_OPS},
+    **{("batch", op): ("jobid", "jobs") for op in _BATCH_JOB_OPS},
+    ("batch", "register_job_definition"): ("jobdefinitionname",),
+    **{("events", op): ("name", "rule") for op in _EVENT_RULE_OPS},
+    **{("cloudwatch", op): ("namespace",) for op in _METRIC_OPS},
 }
 #: Per-operation resource kind that differs from the service's.
 _OP_KIND: dict[tuple[str, str], str] = {
     **{("rds", op): "db-cluster" for op in _RDS_CLUSTER_OPS},
     **{("elasticloadbalancing", op): "target-group" for op in _TARGET_GROUP_OPS},
     **{("elasticache", op): "replication-group" for op in _REPLICATION_GROUP_OPS},
+    **{("ecs", op): "ecs-service" for op in _ECS_SERVICE_OPS},
+    **{("ecs", op): "cluster" for op in _ECS_CLUSTER_OPS},
+    **{("batch", op): "job-queue" for op in _BATCH_QUEUE_OPS},
+    **{("batch", op): "batch-job" for op in _BATCH_JOB_OPS},
+    **{("events", op): "rule" for op in _EVENT_RULE_OPS},
+    **{("cloudwatch", op): "metric-namespace" for op in _METRIC_OPS},
 }
 #: Parameters that take a list of names; each item (up to ten) is an edge.
 _LIST_PARAMS = frozenset({
     "names", "loadbalancerarns", "loadbalancernames", "targetgrouparns", "domainnames",
+    "loggroupnames", "alarmnames", "resourceids", "services", "clusters", "jobqueues", "jobs",
 })
 _MAX_LIST_ITEMS = 10
 #: boto3 ``client(<name>)`` -> service key.
@@ -162,6 +205,8 @@ _BOTO_SERVICE = {
     "firehose": "firehose", "events": "events", "eventbridge": "events", "ecs": "ecs",
     "glue": "glue", "batch": "batch", "rds": "rds", "elbv2": "elasticloadbalancing",
     "elb": "elasticloadbalancing", "elasticache": "elasticache", "es": "es", "opensearch": "es",
+    "logs": "logs", "cloudwatch": "cloudwatch",
+    "application-autoscaling": "application-autoscaling", "sts": "sts",
 }
 #: Java package segment (SDK v2 and v1) -> service key.
 _JAVA_PKG = {
@@ -334,6 +379,14 @@ _NAME_RE: dict[str, re.Pattern[str]] = {
     "cache-cluster": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,49}$"),
     "replication-group": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,39}$"),
     "search-domain": re.compile(r"^[a-z][a-z0-9\-]{2,27}$"),
+    "log-group": re.compile(r"^[A-Za-z0-9_.\-/#]{1,512}$"),
+    "metric-namespace": re.compile(r"^[A-Za-z0-9_.\-/#:]{1,255}$"),
+    "alarm": re.compile(r"^[A-Za-z0-9_.\-/:]{1,255}$"),
+    "scalable-target": re.compile(r"^[A-Za-z0-9_.\-/:#]{1,1600}$"),
+    "ecs-service": re.compile(r"^[A-Za-z0-9_\-]{1,255}$"),
+    "job-queue": re.compile(r"^[A-Za-z0-9_\-]{1,128}$"),
+    "batch-job": re.compile(r"^[A-Za-z0-9\-]{1,128}$"),
+    "role": re.compile(r"^[A-Za-z0-9_+=,.@\-]{1,64}$"),
 }
 #: ARN resource prefix per kind for services ``reduce_arn`` does not know.
 _OWN_ARN = {
@@ -341,7 +394,12 @@ _OWN_ARN = {
     "parameter": ("ssm", "parameter"),
     "stream": ("kinesis", "stream/"), "delivery-stream": ("firehose", "deliverystream/"),
     "event-bus": ("events", "event-bus/"),
+    "log-group": ("logs", "log-group:"), "alarm": ("cloudwatch", "alarm:"),
+    "rule": ("events", "rule/"), "ecs-service": ("ecs", "service/"),
+    "job-queue": ("batch", "job-queue/"), "role": ("iam", "role/"),
 }
+#: Kinds whose ARN resource may carry a path (``cluster/name``) before the name.
+_ARN_LAST_SEGMENT = frozenset({"rule", "ecs-service", "role"})
 _PLACEHOLDER_OK = re.compile(r"[A-Za-z0-9_.\-\[\]]{1,128}")
 _PROP_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z0-9_.\-]+)(?::[^}]*)?\}$")
 
@@ -378,6 +436,10 @@ def _name_from_arn(kind: str, text: str) -> Optional[str]:
             rest = rest.split("/", 1)[0]
         elif kind == "secret":
             rest = re.sub(r"-[A-Za-z0-9]{6}$", "", rest)
+        elif kind == "log-group":
+            rest = rest.split(":", 1)[0]
+        elif kind in _ARN_LAST_SEGMENT:
+            rest = rest.rsplit("/", 1)[-1]
         elif kind == "parameter":
             rest = rest[1:] if rest.startswith("/") else rest
             rest = rest if rest.count("/") == 0 else "/" + rest
@@ -478,6 +540,8 @@ class _Out:
             info["unresolved"] = True
             if placeholder:
                 info["placeholder"] = placeholder[:128]
+            if value.const_ref:
+                info["const_ref"] = value.const_ref[:80]
             if value.getter:
                 info["config_getter"] = {"type": value.getter[0][:128],
                                          "property": value.getter[1][:128]}
@@ -521,6 +585,9 @@ def _unique_consts(pairs: list[tuple[str, str]]) -> dict[str, str]:
     return {k: v for k, v in seen.items() if v is not None}
 
 
+_CONST_NAME = re.compile(r"[A-Z][A-Z0-9_]{1,80}")
+#: Names of a function that returns a boto3 client of the literal service it is given.
+_CLIENT_FACTORIES = frozenset({"make_client", "get_client"})
 _ENV_CALL = re.compile(r"^(?:os\.)?(?:environ\.get|getenv)$")
 _FORMAT_FIELD = re.compile(r"\{[^{}]*\}|%[sdr]")
 
@@ -533,6 +600,8 @@ class _Binding(NamedTuple):
     svc: str
     val: Val = Val()
     op: str = ""
+    #: The client came from a factory call (``make_client("sfn")``), not ``boto3.client``.
+    inferred: bool = False
 
 
 class _Python:
@@ -609,8 +678,18 @@ class _Python:
                     return Val(None, key.template)
             return Val()
         if t == "identifier":
-            const = self.consts.get(_text(node, src))
-            return Val(const) if const is not None else Val()
+            name = _text(node, src)
+            const = self.consts.get(name)
+            if const is not None:
+                return Val(const)
+            return Val(const_ref=name) if _CONST_NAME.fullmatch(name) else Val()
+        if t == "attribute":
+            obj = node.child_by_field_name("object")
+            attr = node.child_by_field_name("attribute")
+            if obj is not None and attr is not None and obj.type == "identifier" \
+                    and _CONST_NAME.fullmatch(_text(attr, src)) \
+                    and _text(obj, src) not in ("self", "cls"):
+                return Val(const_ref=_text(attr, src))
         return Val()
 
     @staticmethod
@@ -690,11 +769,16 @@ class _Python:
 
     def value_binding(self, call: Any) -> Optional[_Binding]:
         fn = call.child_by_field_name("function")
+        if fn is not None and fn.type == "identifier" \
+                and _text(fn, self.src) in _CLIENT_FACTORIES:
+            return self._factory_binding(call)
         if fn is None or fn.type != "attribute":
             return None
         attr = _text(fn.child_by_field_name("attribute"), self.src)
         recv = fn.child_by_field_name("object")
         pos, kws, _splat = self._args(call)
+        if attr in _CLIENT_FACTORIES:
+            return self._factory_binding(call)
         if attr in ("client", "resource"):
             arg = pos[0] if pos else kws.get("service_name")
             service = self.val(arg).template if arg is not None else None
@@ -711,8 +795,21 @@ class _Python:
             return _Binding("bucket", "s3", self.val(arg) if arg is not None else Val())
         if attr == "get_paginator" and base.kind in ("client", "resource") and pos:
             op = self.val(pos[0]).template
-            return _Binding("paginator", base.svc, op=op) if op and _DYN not in op else None
+            return _Binding("paginator", base.svc, op=op, inferred=base.inferred) \
+                if op and _DYN not in op else None
         return None
+
+    def _factory_binding(self, call: Any) -> Optional[_Binding]:
+        """A low-confidence client for ``make_client("sfn")`` / ``mod.get_client("sfn")``.
+
+        Only a literal boto3 service name binds. The factory itself is not looked at (it is
+        usually in another file), so every row from this client is marked inferred.
+        """
+        pos, kws, _splat = self._args(call)
+        arg = pos[0] if pos else kws.get("service_name") or kws.get("service")
+        service = self.val(arg).template if arg is not None else None
+        key = _BOTO_SERVICE.get((service or "").lower())
+        return _Binding("client", key, inferred=True) if key else None
 
     def collect_bindings(self) -> None:
         for node in _walk(self.root):
@@ -748,7 +845,14 @@ class _Python:
             base = self.expr_binding(recv)
             if base is None:
                 continue
+            before = len(self.out.edges)
             self._site(node, base, method)
+            if base.inferred:
+                for edge in self.out.edges[before:]:
+                    edge.extra.update(
+                        confidence=min(0.5, edge.extra.get("confidence", 0.5)),
+                        confidence_tier="INFERRED", client_inferred="factory",
+                    )
 
     def _site(self, call: Any, base: _Binding, method: str) -> None:
         line = _line(call)
@@ -817,6 +921,15 @@ class _Python:
                 return
         if splat:
             self.out.add(svc, op, Val(), line, sdk)
+        elif kws:
+            # The call names none of the resource parameters this service is known by. Keep a
+            # service-level row so the call is still listed, marked so a consumer can drop it.
+            # A call with no argument at all (``describe_db_instances()``) lists everything and
+            # names no resource: no row, as before.
+            self.out.add(
+                svc, op, Val(), line, sdk,
+                extra={"unresolved_reason": NO_RESOURCE_PARAM, "confidence": 0.3},
+            )
 
 
 # -- Java -----------------------------------------------------------------------------------
@@ -920,6 +1033,21 @@ class _Java:
         return None
 
     def val(self, node: Any) -> Val:
+        got = self._val(node)
+        if (
+            got.template is not None or got.placeholder or got.getter
+            or node.type not in ("identifier", "method_invocation")
+        ):
+            return got
+        # One same-file hop (local alias, own-class method, lookup wrapper) to a binding.
+        hopped = follow(node, self._binding)
+        return hopped if hopped is not None else got
+
+    def _binding(self, node: Any) -> Optional[Val]:
+        got = self._val(node)
+        return got if got.placeholder or got.getter else None
+
+    def _val(self, node: Any) -> Val:
         src = self.src
         t = node.type
         if t == "string_literal":
@@ -957,6 +1085,12 @@ class _Java:
                 if getter and owner:
                     prop = getter.group(2)[0].lower() + getter.group(2)[1:]
                     return Val(None, None, (owner, prop))
+            chain = getter_chain(node) if obj is not None and obj.type == "method_invocation" \
+                else None
+            if chain is not None and chain[0].type == "identifier":
+                owner = self.var_types.get(_text(chain[0], src))
+                if owner:
+                    return Val(None, None, (owner, ".".join(chain[1])))
             if name is None or first is None:
                 return Val()
             n, o = _text(name, src), (_text(obj, src) if obj is not None else "")

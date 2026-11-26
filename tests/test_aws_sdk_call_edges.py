@@ -627,3 +627,118 @@ def test_tool_output_sanitises_every_string_from_repo_content(monkeypatch: Any) 
             if isinstance(text, str):
                 assert len(text) <= 256, key
                 assert not any(ord(ch) < 32 and ch not in "\t\n" for ch in text), key
+
+
+# -- boto3: logs, cloudwatch, events rules, autoscaling, ECS services, Batch ------------------
+
+
+def _extras(src: str) -> dict[tuple[str, str], dict[str, Any]]:
+    return {(e.target, e.extra["operation"]): e.extra for e in aws_edges("app.py", src)}
+
+
+def test_python_logs_cloudwatch_and_autoscaling_clients_are_bound() -> None:
+    src = (
+        "import boto3\n"
+        "cwl = boto3.client('logs')\n"
+        "cw = boto3.client('cloudwatch')\n"
+        "aas = boto3.client('application-autoscaling')\n"
+        "def f(group, stream):\n"
+        "    cwl.get_log_events(logGroupName=group, logStreamName=stream)\n"
+        "    cwl.filter_log_events(logGroupName='/aws/lambda/etl')\n"
+        "    cw.put_metric_alarm(AlarmName='etl-errors')\n"
+        "    cw.put_metric_data(Namespace='Resonate/ETL', MetricData=[])\n"
+        "    aas.register_scalable_target(ResourceId='service/main/api', ServiceNamespace='ecs')\n"
+    )
+    got = _extras(src)
+    assert got[("external:aws-logs:?", "get_log_events")]["unresolved"] is True
+    assert ("external:aws-logs:/aws/lambda/etl", "filter_log_events") in got
+    assert ("external:aws-cloudwatch:etl-errors", "put_metric_alarm") in got
+    ns = got[("external:aws-cloudwatch:Resonate/ETL", "put_metric_data")]
+    assert ns["target_kind"] == "metric-namespace"
+    assert ("external:aws-application-autoscaling:service/main/api", "register_scalable_target") \
+        in got
+
+
+def test_python_events_rule_ops_ecs_services_batch_and_sts() -> None:
+    src = (
+        "import boto3\n"
+        "ev = boto3.client('events')\n"
+        "ecs = boto3.client('ecs')\n"
+        "batch = boto3.client('batch')\n"
+        "sts = boto3.client('sts')\n"
+        "def f(role, ids):\n"
+        "    ev.put_rule(Name='nightly', ScheduleExpression='rate(1 day)')\n"
+        "    ev.put_events(Entries=[{'Detail': '{}'}])\n"
+        "    ecs.update_service(cluster='techops', service='postfix', desiredCount=0)\n"
+        "    ecs.describe_services(cluster='techops', services=['a', 'b'])\n"
+        "    ecs.list_tasks(cluster='techops')\n"
+        "    ecs.run_task(cluster='techops', taskDefinition='etl:3')\n"
+        "    batch.describe_jobs(jobs=ids)\n"
+        "    batch.update_job_queue(jobQueue='etl-queue', state='DISABLED')\n"
+        "    batch.submit_job(jobName='x', jobQueue='q', jobDefinition='etl-def')\n"
+        "    sts.assume_role(RoleArn='arn:aws:iam::123456789012:role/ci/deployer')\n"
+        "    sts.get_caller_identity()\n"
+    )
+    got = _extras(src)
+    assert ("external:aws-events:nightly", "put_rule") in got
+    assert got[("external:aws-events:default", "put_events")]["target_kind"] == "event-bus"
+    assert got[("external:aws-ecs:postfix", "update_service")]["target_kind"] == "ecs-service"
+    assert ("external:aws-ecs:a", "describe_services") in got
+    assert ("external:aws-ecs:b", "describe_services") in got
+    assert got[("external:aws-ecs:techops", "list_tasks")]["target_kind"] == "cluster"
+    assert ("external:aws-ecs:etl", "run_task") in got  # unchanged: the task definition
+    assert got[("external:aws-batch:?", "describe_jobs")]["target_kind"] == "batch-job"
+    assert got[("external:aws-batch:etl-queue", "update_job_queue")]["target_kind"] == "job-queue"
+    assert ("external:aws-batch:etl-def", "submit_job") in got
+    assert ("external:aws-sts:deployer", "assume_role") in got
+    assert not any(op == "get_caller_identity" for _t, op in got)
+    assert "123456789012" not in repr(got)
+
+
+def test_python_call_without_a_resource_parameter_is_a_low_confidence_unresolved_row() -> None:
+    src = (
+        "import boto3\n"
+        "ssm = boto3.client('ssm')\n"
+        "s3 = boto3.client('s3')\n"
+        "def f(kw):\n"
+        "    ssm.send_command(InstanceIds=['i-1'], DocumentName='AWS-RunShellScript')\n"
+        "    s3.put_object(**kw)\n"
+        "    s3.list_buckets()\n"
+        "    ssm.describe_instance_information()\n"
+        "    s3.get_paginator('list_objects_v2')\n"
+        "    s3.generate_presigned_url('get_object')\n"
+    )
+    got = _extras(src)
+    bare = got[("external:aws-ssm:?", "send_command")]
+    assert bare["unresolved"] is True
+    assert bare["unresolved_reason"] == "no_resource_param"
+    assert bare["confidence"] == 0.3
+    # A splatted call stays what it was: unresolved at the usual confidence, no reason.
+    splat = got[("external:aws-s3:?", "put_object")]
+    assert splat["confidence"] == 0.6 and "unresolved_reason" not in splat
+    assert not any(op in ("list_buckets", "get_paginator", "generate_presigned_url",
+                          "describe_instance_information")
+                   for _t, op in got)
+
+
+def test_python_existing_rows_are_unchanged_by_the_new_services_and_fallback() -> None:
+    src = (
+        "import boto3\n"
+        "s3 = boto3.client('s3')\n"
+        "ddb = boto3.resource('dynamodb')\n"
+        "lam = boto3.client('lambda')\n"
+        "t = ddb.Table('orders')\n"
+        "def f(b):\n"
+        "    s3.put_object(Bucket='bkt', Key='k')\n"
+        "    s3.get_object(Bucket=b, Key='k')\n"
+        "    t.get_item(Key={'id': 1})\n"
+        "    lam.invoke(FunctionName='worker')\n"
+    )
+    got = _extras(src)
+    assert set(got) == {
+        ("external:aws-s3:bkt", "put_object"), ("external:aws-s3:?", "get_object"),
+        ("external:aws-dynamodb:orders", "get_item"), ("external:aws-lambda:worker", "invoke"),
+    }
+    assert got[("external:aws-s3:bkt", "put_object")]["confidence"] == 1.0
+    assert got[("external:aws-s3:?", "get_object")]["confidence"] == 0.6
+    assert "unresolved_reason" not in got[("external:aws-s3:?", "get_object")]

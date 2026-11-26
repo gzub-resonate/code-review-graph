@@ -112,6 +112,9 @@ class TestReducers:
             "step_function_file_path", "name", "replacement_vars", "lambda_replacement_vars",
             "step_function_replacement_vars", "sns_topic_replacement_vars",
             "handler", "function_name", "git_repo_sub_dir",
+            # EventBridge rules, schedules, SNS topics and SQS queue of a Lambda unit.
+            "aws_cloudwatch_event_rules", "aws_cloudwatch_event_rules_ignore_changes",
+            "schedules", "existing_sns_topics", "include_sqs", "sqs_name",
         }
 
 

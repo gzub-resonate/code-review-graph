@@ -48,7 +48,7 @@ try:  # PyYAML is a hard dependency of the package; guard anyway so a build neve
 except ImportError:  # pragma: no cover
     _yaml = None  # type: ignore[assignment]
 
-from .aws_sdk_calls import _NAME_RE, _name_from_arn
+from .aws_sdk_calls import _NAME_RE, Val, _name_from_arn, resolve_name
 from .config_keys import SECRET_TOKENS as _SECRET_TOKENS  # noqa: F401
 from .config_keys import is_secret_key, normalize_spring_config_key
 
@@ -382,6 +382,10 @@ def resolve_config_names(conn: sqlite3.Connection, commit: bool = True) -> dict[
         if "/src/test/" not in r[0] and "/test/resources/" not in r[0]
     ] if wanted else []
     values = _Values(wanted)
+    constants = _resource_constants(conn, {
+        info["const_ref"] for _row, info, _kind, key in planned
+        if key is None and info.get("unresolved") and isinstance(info.get("const_ref"), str)
+    })
     resolved = masked = 0
     updates: list[tuple[str, int]] = []
     for row, info, kind, key in planned:
@@ -398,6 +402,11 @@ def resolve_config_names(conn: sqlite3.Connection, commit: bool = True) -> dict[
                 resolved += 1
             if env:
                 info["env_placeholder"] = env
+        elif info.get("unresolved") and kind and isinstance(info.get("const_ref"), str):
+            found = _constant_name(constants, row[3], kind, info["const_ref"])
+            if found:
+                info["resolved_names"] = {"default": found}
+                resolved += 1
         after = json.dumps({k: info.get(k) for k in _OUTPUT_FIELDS}, sort_keys=True)
         if before != after:
             updates.append((json.dumps(info, separators=(",", ":")), row[0]))
@@ -406,6 +415,42 @@ def resolve_config_names(conn: sqlite3.Connection, commit: bool = True) -> dict[
         if commit:
             conn.commit()
     return {"candidates": len(planned), "resolved": resolved, "masked": masked}
+
+
+def _resource_constants(
+    conn: sqlite3.Connection, names: set[str],
+) -> dict[str, list[tuple[str, str]]]:
+    """``constant name -> [(file, value)]`` of the resource-like module constants of *names*."""
+    if not names:
+        return {}
+    out: dict[str, list[tuple[str, str]]] = {}
+    rows = conn.execute(
+        "SELECT name, file_path, json_extract(extra, '$.resource_value') FROM nodes "
+        "WHERE kind = 'Variable' AND json_valid(extra) "
+        "AND json_extract(extra, '$.resource_value') IS NOT NULL",
+    ).fetchall()
+    for name, file_path, value in rows:
+        if name in names and isinstance(value, str):
+            out.setdefault(name, []).append((file_path, value))
+    return out
+
+
+def _constant_name(
+    constants: dict[str, list[tuple[str, str]]], edge_file: str, kind: str, ref: str,
+) -> Optional[str]:
+    """The resource name a constant stands for, if the repo has one value for it.
+
+    The constants in the edge's own directory are preferred over the rest of the repo. Two
+    different values (two modules, two environments) give no answer rather than a guess.
+    """
+    candidates = constants.get(ref, [])
+    here = edge_file.rsplit("/", 1)[0]
+    near = [c for c in candidates if c[0].rsplit("/", 1)[0] == here]
+    values = {v for _f, v in (near or candidates)}
+    if len(values) != 1:
+        return None
+    name, _placeholder = resolve_name(kind, Val(next(iter(values))))
+    return name
 
 
 def _names_for(

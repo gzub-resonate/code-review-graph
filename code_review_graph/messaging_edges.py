@@ -46,6 +46,7 @@ from typing import Any, Optional
 
 from .aws_sdk_calls import classify_access, sdk_operation_name
 from .config_keys import normalize_spring_config_key
+from .java_config_hops import follow, getter_chain, local_alias
 
 UNRESOLVED_NAME = "?unresolved"
 _UNKNOWN = "${?}"
@@ -228,16 +229,17 @@ _BEAN_GETTER = re.compile(r"(?:get|is)([A-Z]\w*)")
 
 
 def _java_getter(node, var_types: Optional[dict[str, str]]) -> Optional[tuple[str, str]]:
-    """``(declared type, property)`` of a bean getter call such as ``props.getQueueName()``."""
-    if not var_types or node.type != "method_invocation" or _args(node):
+    """``(declared type, property)`` of a bean getter call such as ``props.getQueueName()``.
+
+    A chain such as ``props.getDynamo().getTableName()`` reads the nested property
+    ``dynamo.tableName`` of ``props``' type.
+    """
+    if not var_types or node.type != "method_invocation":
         return None
-    name = node.child_by_field_name("name")
-    owner = node.child_by_field_name("object")
-    if name is None or owner is None:
+    chain = getter_chain(node)
+    if chain is None:
         return None
-    match = _BEAN_GETTER.fullmatch(_text(name))
-    if match is None:
-        return None
+    owner, props = chain
     if owner.type == "field_access":
         target = owner.child_by_field_name("object")
         field = owner.child_by_field_name("field")
@@ -247,11 +249,10 @@ def _java_getter(node, var_types: Optional[dict[str, str]]) -> Optional[tuple[st
     declared = var_types.get(_text(owner))
     if not declared:
         return None
-    prop = match.group(1)
-    return declared, prop[0].lower() + prop[1:]
+    return declared, ".".join(props)
 
 
-def _java_dest(
+def _java_dest_direct(
     node, consts: dict[str, set[str]], splitter, var_types: Optional[dict[str, str]] = None,
 ) -> Dest:
     raw = _java_string(node, consts)
@@ -265,6 +266,43 @@ def _java_dest(
         # unresolved identifier here never has one; a literal with one is handled below.
         return Dest(None, config_key=key, expr=expr)
     return splitter(raw)
+
+
+def _java_dest(
+    node, consts: dict[str, set[str]], splitter, var_types: Optional[dict[str, str]] = None,
+) -> Dest:
+    dest = _java_dest_direct(node, consts, splitter, var_types)
+    if (
+        var_types is None or not dest.unresolved or dest.config_key or dest.getter
+        or dest.env_var or node.type not in ("identifier", "method_invocation")
+    ):
+        return dest
+    main_method = _enclosing_method(node)
+    cache: dict[int, dict[str, str]] = {}
+
+    def direct(hop) -> Optional[Dest]:
+        method = _enclosing_method(hop)
+        if method is main_method or method is None:
+            types = var_types
+        else:
+            types = cache.setdefault(method.id, _java_var_types(method))
+        got = _java_dest_direct(hop, consts, splitter, types)
+        return got if got.unresolved and (got.config_key or got.getter) else None
+
+    hopped = follow(node, direct)
+    if hopped is None:
+        return dest
+    expr = " ".join(_text(node).split())[:_MAX_EXPR]
+    return Dest(None, config_key=hopped.config_key, expr=expr, getter=hopped.getter)
+
+
+def _enclosing_method(node):
+    parent = node.parent
+    while parent is not None and parent.type not in (
+        "method_declaration", "constructor_declaration",
+    ):
+        parent = parent.parent
+    return parent
 
 
 def _java_collect_consts(scope, view: Optional[dict] = None) -> dict[str, set[str]]:
@@ -984,6 +1022,11 @@ def _java_call_edges(method_node, consts, var_types, source, file_path, out) -> 
         if service in ("sqs", "sns"):
             splitter = name_from_reference
             dests = _builder_destination(invocation, _BUILDER_KEYS[service])
+            if not dests and len(args) == 1 and args[0].type == "identifier":
+                # ``sqs.sendMessage(request)`` with ``request`` built once, earlier, in this method.
+                init = local_alias(args[0])
+                if init is not None:
+                    dests = _builder_destination(init, _BUILDER_KEYS[service])
             if not dests and args and args[0].type not in (
                 "lambda_expression", "method_reference",
             ):
