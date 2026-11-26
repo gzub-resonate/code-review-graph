@@ -249,6 +249,13 @@ def test_a_pull_request_touching_many_files_is_capped(tmp_path):
     assert result["totals"]["files"] == 70
     assert len(result["files"]) == 50 and result["files_truncated"] is True
     assert result["totals"]["symbols_added"] == 70
+    assert result["files_total"] == 70
+    assert "showing 50 of 70" in result["summary"]
+    # every other capped list says its true size and whether it was cut
+    for key in ("contract_changes", "endpoints", "same_file_endpoints", "schema_changes"):
+        assert result[f"{key}_total"] == len(result[key]) == 0
+        assert result[f"{key}_truncated"] is False
+    assert result["external_callers_truncated"] is False
 
 
 @pytest.mark.parametrize("ref", ["--stat", "-p", "--no-index", "--output=/tmp/x", "-"])

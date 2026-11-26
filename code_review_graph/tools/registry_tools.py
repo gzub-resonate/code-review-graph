@@ -2292,6 +2292,7 @@ def cross_repo_requests_func(
             ),
             "origin": origin or "all",
             "results": results,
+            "results_shown": len(results),
             "counts": counts,
             "multiple_candidates_total": multiple_total,
             "total": total,
@@ -2423,6 +2424,8 @@ def handlers_of_route_across_repos(
             f"{' ...' if len(matched) > 10 else ''}. Pass repo_root for one repo's full answer."
         ),
         "repos_matched": matched[:20],
+        "repos_matched_total": len(matched),
+        "repos_matched_truncated": len(matched) > 20,
         **scope,
         "result_count": total_rows,
         "results_omitted": max(0, total_rows - len(rows)),

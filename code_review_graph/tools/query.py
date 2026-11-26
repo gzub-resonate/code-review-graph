@@ -1468,9 +1468,14 @@ def _attach_resolution_notes(
         )
     if route_endpoints:
         response["matched_endpoints"] = [endpoint_label(n) for n in route_endpoints[:10]]
+        response["matched_endpoints_total"] = len(route_endpoints)
+        response["matched_endpoints_truncated"] = len(route_endpoints) > 10
     if java_importers:
         response["importers_level"] = java_importers["level"]
         response["java_classes"] = java_importers["classes"]
+        response["java_classes_total"] = java_importers.get(
+            "classes_total", len(java_importers["classes"]),
+        )
         response["note"] = java_importers["note"]
 
 
@@ -2208,6 +2213,7 @@ def query_graph(
                 if java_classes:
                     java_importers = {
                         "level": "class", "classes": java_classes[:10],
+                        "classes_total": len(java_classes),
                         "note": "Java imports are by class; rows are the importers of the "
                                 "classes this file declares (import_level: class, or "
                                 "package_wildcard for 'pkg.*').",

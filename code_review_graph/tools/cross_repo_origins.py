@@ -217,8 +217,10 @@ def external_links(
                 "host": group.key, "vendor": group.vendor, "vendor_basis": group.vendor_basis,
                 "status": group.status, "repo": label, "calls": 0, "sources": {},
                 "files": [], "samples": [], "hosts_seen": [],
+                "_all_files": set(), "_all_hosts": set(),
             })
             cell["calls"] += 1
+            cell["_all_files"].add(call["file"])
             cell["sources"][group.source] = cell["sources"].get(group.source, 0) + 1
             if call["file"] not in cell["files"] and len(cell["files"]) < _MAX_FILES:
                 cell["files"].append(call["file"])
@@ -230,6 +232,8 @@ def external_links(
             if group.unresolved_key:
                 cell["unresolved_key"] = group.unresolved_key
             seen = cell["hosts_seen"]
+            if group.host and group.host != group.key:
+                cell["_all_hosts"].add(group.host)
             if (group.host and group.host != group.key and group.host not in seen
                     and len(seen) < _MAX_HOSTS_SEEN):
                 seen.append(group.host)
@@ -241,7 +245,16 @@ def external_links(
     )
     for row in rows:
         row["host_calls"] = per_host[row["host"]]
-        if not row["hosts_seen"]:
+        # Totals for the lists capped above, so a short list is never read as the whole one.
+        row["files_total"] = len(row.pop("_all_files"))
+        row["files_truncated"] = row["files_total"] > len(row["files"])
+        row["samples_total"] = row["calls"]
+        row["samples_truncated"] = row["calls"] > len(row["samples"])
+        all_hosts = row.pop("_all_hosts")
+        if row["hosts_seen"]:
+            row["hosts_seen_total"] = len(all_hosts)
+            row["hosts_seen_truncated"] = len(all_hosts) > len(row["hosts_seen"])
+        else:
             del row["hosts_seen"]
         if not row["vendor"]:
             del row["vendor"], row["vendor_basis"]
@@ -256,11 +269,15 @@ def external_links(
     )
     summary = (
         f"{sum(c['calls'] for c in cells.values())} external call(s) to {len(per_host)} host "
-        f"group(s) in {len(rows)} (host, repo) row(s) across {len(selected)} repo(s)"
+        f"group(s) in {len(rows)} (host, repo) row(s) across {len(selected)} repo(s); "
+        "each row lists at most "
+        f"{_MAX_FILES} files and {_MAX_SAMPLES} samples (see files_total, samples_total)"
     )
     return _reply(
         "external", summary, page, status_counts, len(selected), skipped, unreadable, unknown,
         hosts_total=len(per_host), feign_calls_to_registered_repos=internal,
+        results_shown=len(page.items),
+        hosts_shown=len({r["host"] for r in page.items}),
     )
 
 

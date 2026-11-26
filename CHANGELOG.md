@@ -4,6 +4,15 @@
 
 ### Added
 
+- Capped lists in replies now state their true size, additively. `cross_repo_requests_tool`
+  `origin="external"` rows gain `files_total`, `files_truncated`, `samples_total`,
+  `samples_truncated` and (with `hosts_seen`) `hosts_seen_total`/`hosts_seen_truncated`; the reply
+  gains `results_shown` and `hosts_shown`, and the summary says rows list at most five files and
+  three samples. The Feign/JS reply gains `results_shown` (the page size; `total` and `counts` cover
+  every row). `pr_blast_radius_tool` first pages gain `*_total`/`*_truncated` for `contract_changes`,
+  `endpoints`, `same_file_endpoints` and `schema_changes`, and `external_callers_truncated`.
+  `query_graph_tool` gains `repos_matched_total`/`repos_matched_truncated` (route `handlers_of`
+  across repos), `matched_endpoints_total`/`_truncated` and `java_classes_total`. Query-time only.
 - `query_graph_tool` `handlers_of` with a route (`POST /v2/respondents/avmap`) no longer needs
   `repo_root`: omit it on a multi-repo server, or pass `"*"`, and every registered repo with a graph
   is asked. The reply names `repos_matched` and tags rows with `repo`, stays small (default 20

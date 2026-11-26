@@ -383,6 +383,8 @@ class TestRouteLookupWithoutRepoRoot:
         assert result["status"] == "ok"
         assert [m["repo"] for m in result["repos_matched"]] == ["respondents-api"]
         assert result["repos_searched"] == 2
+        assert result["repos_matched_total"] == 1
+        assert result["repos_matched_truncated"] is False
         assert [r["name"] for r in result["results"]] == ["avmap"]
         assert result["results"][0]["repo"] == "respondents-api"
         assert "respondents-api" in result["summary"]
