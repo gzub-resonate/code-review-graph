@@ -1908,7 +1908,12 @@ def cross_repo_requests_func(
             "status": "ok",
             "summary": (
                 (
-                    f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
+                    # A filtered request names its origin, also when nothing matched.
+                    f"{total} JS/TS call(s) (origin=js) in {len(searched)} repo(s)"
+                    if origin == "js"
+                    else f"{total} Feign call(s) (origin=feign) in {len(searched)} repo(s)"
+                    if origin == "feign"
+                    else f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
                     f"{origin_counts.get('js', 0)} JS/TS) in {len(searched)} repo(s)"
                     if origin_counts.get("js")
                     else f"{total} Feign call(s) in {len(searched)} repo(s)"
@@ -1917,6 +1922,7 @@ def cross_repo_requests_func(
                 + shown_range(page)
                 + notes
             ),
+            "origin": origin or "all",
             "results": results,
             "counts": counts,
             "total": total,
