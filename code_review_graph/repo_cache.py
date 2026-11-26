@@ -5,6 +5,10 @@ it defines, declares and is called) from its graph database and some of its file
 lives for days and a graph changes only when the indexer publishes a rebuild, so those reads
 are kept in this process and used again while the repo's graph file is the same one.
 
+Parallel reads of several repos run on one bounded thread pool shared by all calls (size
+``CRG_CROSS_REPO_WORKERS``, default the CPU count capped at 4), so concurrent calls do not each
+start their own threads.
+
 A cached value is shared between calls and threads: callers must treat it as read-only.
 
 Concurrent calls that need the same missing value share one computation (``SingleFlight``):
@@ -28,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .constants import env_float
+from .constants import CROSS_REPO_WORKERS_ENV, CROSS_REPO_WORKERS_MAX, env_float, env_int
 from .errors import GraphStoreError
 
 logger = logging.getLogger(__name__)
@@ -255,19 +259,88 @@ MEMO = RepoMemo()
 INFRASTRUCTURE_RESULTS = ResultCache()
 
 
+POOL_THREADS_CAP = 4
+_POOL_LOCK = threading.Lock()
+_POOL: ThreadPoolExecutor | None = None
+
+
+def shared_pool_size() -> int:
+    """Threads in the shared pool: ``CRG_CROSS_REPO_WORKERS``, else the CPU count capped at 4.
+
+    Read when the pool is first used, so it holds for the life of the process.
+    """
+    default = min(os.cpu_count() or 1, POOL_THREADS_CAP)
+    return max(1, min(env_int(CROSS_REPO_WORKERS_ENV, default), CROSS_REPO_WORKERS_MAX))
+
+
+def _shared_pool() -> ThreadPoolExecutor:
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = ThreadPoolExecutor(
+                max_workers=shared_pool_size(), thread_name_prefix="crg-xrepo",
+            )
+        return _POOL
+
+
+def _reset_shared_pool() -> None:
+    """Drop the shared pool so the next use makes a new one (for tests)."""
+    global _POOL
+    with _POOL_LOCK:
+        pool, _POOL = _POOL, None
+    if pool is not None:
+        pool.shutdown(wait=True)
+
+
+def _run(fn: Callable[[T], R], todo: list[T], workers: int) -> list[R]:
+    """``[fn(item) for item in todo]`` on the calling thread plus helpers from the shared pool.
+
+    Calls share one bounded pool, so N concurrent calls use at most the pool's threads (plus
+    their own callers) rather than N pools. The caller works through the items itself and
+    helpers only take items from the same queue, so a call never waits for a helper that has
+    not started (it cancels it): no deadlock when the pool is busy or ``fn`` calls this again.
+    """
+    count = len(todo)
+    if workers <= 1 or count <= 1:
+        return [fn(item) for item in todo]
+    results: list[Any] = [None] * count
+    errors: dict[int, BaseException] = {}
+    lock = threading.Lock()
+    cursor = iter(range(count))
+
+    def drain() -> None:
+        while True:
+            with lock:
+                if errors:
+                    return
+                index = next(cursor, None)
+            if index is None:
+                return
+            try:
+                results[index] = fn(todo[index])
+            except BaseException as exc:
+                with lock:
+                    errors[index] = exc
+                return
+
+    pool = _shared_pool()
+    helpers = [pool.submit(drain) for _ in range(min(workers, count) - 1)]
+    drain()
+    for helper in helpers:
+        if not helper.cancel():
+            helper.result()
+    if errors:
+        raise errors[min(errors)]
+    return results  # type: ignore[no-any-return]
+
+
 def parallel_map(fn: Callable[[T], R], items: Iterable[T], workers: int) -> list[R]:
     """``[fn(item) for item in items]`` on up to *workers* threads, in the order of *items*.
 
     ``fn`` must not raise: the first exception ends the call. One worker runs on the calling
-    thread, as before.
+    thread, as before; the others come from one pool shared by every call (see ``_run``).
     """
-    todo = list(items)
-    if workers <= 1 or len(todo) <= 1:
-        return [fn(item) for item in todo]
-    with ThreadPoolExecutor(
-        max_workers=min(workers, len(todo)), thread_name_prefix="crg-xrepo",
-    ) as pool:
-        return list(pool.map(fn, todo))
+    return _run(fn, list(items), workers)
 
 
 def parallel_map_budget(
@@ -285,17 +358,10 @@ def parallel_map_budget(
     todo = list(items)
     size = max(1, workers)
     results: list[Any] = []
-    if not todo:
-        return results
-    with ThreadPoolExecutor(
-        max_workers=min(size, len(todo)), thread_name_prefix="crg-xrepo",
-    ) as pool:
-        for start in range(0, len(todo), size):
-            batch = todo[start:start + size]
-            if out_of_budget():
-                results.extend(SKIPPED for _ in batch)
-            elif size == 1 or len(batch) == 1:
-                results.extend(fn(item) for item in batch)
-            else:
-                results.extend(pool.map(fn, batch))
+    for start in range(0, len(todo), size):
+        batch = todo[start:start + size]
+        if out_of_budget():
+            results.extend(SKIPPED for _ in batch)
+        else:
+            results.extend(_run(fn, batch, size))
     return results
