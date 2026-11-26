@@ -1607,8 +1607,12 @@ def query_graph(
                 target_path, separator, symbol = target.partition("::")
                 abs_target = f"{normalize_file_path(root / target_path)}{separator}{symbol}"
                 node = store.get_node(abs_target)
-            if not node and pattern == "handlers_of":
-                matched = match_route_endpoints(store, target)
+            if not node and pattern in ("handlers_of", "requesters_of"):
+                # A route-shaped target names Endpoint nodes only. requesters_of reads the
+                # outbound (client) ones too, which are what requests point at.
+                matched = match_route_endpoints(
+                    store, target, any_role=pattern == "requesters_of",
+                )
                 if matched is not None:
                     if not matched:
                         return {
@@ -2350,14 +2354,25 @@ def query_graph(
                     edges_out.append(edge_to_dict(edge))
 
         elif pattern == "requesters_of":
-            for edge in store.get_edges_by_target(qn):
-                if edge.kind != SPRING_FEIGN_EDGE_KIND:
-                    continue
-                requester = store.get_node(edge.source_qualified)
-                if requester:
-                    add_result(node_to_dict(requester), edge)
-                else:
-                    edges_out.append(edge_to_dict(edge))
+            seen_requesters: set[str] = set()
+            for endpoint_node in route_endpoints or [None]:
+                requested = endpoint_node.qualified_name if endpoint_node else qn
+                for edge in store.get_edges_by_target(requested):
+                    if edge.kind != SPRING_FEIGN_EDGE_KIND:
+                        continue
+                    if route_endpoints:
+                        key = f"{edge.source_qualified}|{requested}"
+                        if key in seen_requesters:
+                            continue
+                        seen_requesters.add(key)
+                    requester = store.get_node(edge.source_qualified)
+                    if requester:
+                        row_out = node_to_dict(requester)
+                        if endpoint_node is not None and len(route_endpoints) > 1:
+                            row_out["endpoint"] = endpoint_label(endpoint_node)
+                        add_result(row_out, edge)
+                    else:
+                        edges_out.append(edge_to_dict(edge))
 
         elif pattern == "consumers_of":
             raw_key = node.name if node else target.removeprefix("config:")
@@ -2466,7 +2481,7 @@ def query_graph(
                 result_fields += ("import_target", "import_target_kind")
             elif pattern == "importers_of":
                 result_fields += ("importer", "file", "import_level")
-            if pattern == "handlers_of":
+            if pattern in ("handlers_of", "requesters_of"):
                 result_fields += ("endpoint",)
             if pattern in ("publishers_of", "listeners_of"):
                 result_fields += (

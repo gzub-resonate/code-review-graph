@@ -604,6 +604,9 @@ route: `POST /v1/items`, `/v1/items/{id}`, `GET /items/{itemId}`. Path variables
 `<id>`) are equal, case and a trailing slash do not matter, a route that ends with the given path
 on a segment boundary matches when the full one does not, and the reply lists
 `matched_endpoints`.
+`requesters_of` takes the same route targets and matches Endpoint nodes only (outbound client endpoints
+included), so a route no longer resolves to classes or methods that share its words; with several matching
+endpoints each row names its `endpoint`, and a route no endpoint has is `not_found`.
 
 **Java importers.** Java imports are by class, so `importers_of` on a Java file path reads the
 classes the file declares: importers the build bound to the file, imports that kept the

@@ -915,6 +915,9 @@
 - `query_graph_tool` `publishers_of` and `listeners_of` rows now carry `call_site` (the call-site
   `line`, and `file` when it differs), so `detail_level="minimal"` keeps the line the exchange
   form of `cross_repo_requests_tool` returns. Additive.
+- `query_graph_tool` `requesters_of` with a route target (`GET /v2/attributevalues`) matches Endpoint
+  nodes only, like `handlers_of`, instead of an `ambiguous` list that mixed in classes. Several
+  matching endpoints are all answered (each row names its `endpoint`); no match is `not_found`.
 
 ## [2.4.0] - 2026-11-10
 
