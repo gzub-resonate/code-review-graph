@@ -65,15 +65,20 @@ from .constants import (
 from .custom_languages import CustomLanguage, load_custom_languages
 from .infra_references import (
     DYNAMIC_GITHUB_ACTIONS_TARGET,
+    EVENT_RULE_FIELDS,
+    EVENT_RULE_LIST_KEYS,
     EXTERNAL_DYNAMIC_DOCKER_TARGET,
     EXTERNAL_DYNAMIC_TERRAFORM_TARGET,
     EXTERNAL_DYNAMIC_TERRAGRUNT_TARGET,
     EXTERNAL_TERRAFORM_MODULE_PREFIX,
     MAX_DOCKERFILE_BYTES,
     MAX_DOCKERFILE_LINES,
+    MAX_EVENT_RULES,
     MAX_INFRA_REFERENCES_PER_FILE,
     MAX_REPLACEMENT_VARS,
+    MAX_SNS_TOPICS,
     REPLACEMENT_VAR_MAPS,
+    SNS_TOPICS_KEY,
     TERRAGRUNT_INPUT_TRIGGER_KEYS,
     clean_stage_alias,
     docker_image_target,
@@ -86,9 +91,11 @@ from .infra_references import (
     parse_docker_image,
     parse_github_uses,
     parse_terragrunt_source,
+    reduce_event_rule,
     reduce_lambda_handler,
     reduce_lambda_name,
     reduce_replacement_var,
+    reduce_trigger_name,
 )
 from .java_scheduling import schedule_timing
 from .messaging_edges import (
@@ -14703,10 +14710,55 @@ class CodeParser:
             )
             if source_dir:
                 info["source_dir"] = source_dir
+        self._terragrunt_triggers(evaluator, info, reasons)
         if "depth_limit" in reasons:
             info["dynamic_reason"] = "depth_limit"
         if info:
             file_extra["terragrunt_inputs"] = info
+
+    @staticmethod
+    def _terragrunt_triggers(
+        evaluator: TerragruntEvaluator, info: dict[str, Any], reasons: set[str],
+    ) -> None:
+        """What a Lambda unit says fires it: event rules, schedules, SNS topics, an SQS queue.
+
+        Only names, schedule expressions and event-pattern ``source`` strings are kept. The
+        ``input`` document, the description and every other entry of a rule are never read,
+        and a name that looks like a secret is dropped (see ``reduce_event_rule``).
+        """
+        if not evaluator.is_deployable():
+            return
+        rules: list[dict[str, Any]] = []
+        for key in EVENT_RULE_LIST_KEYS:
+            items, reason = evaluator.input_objects(key, EVENT_RULE_FIELDS)
+            reasons.add(reason or "")
+            for item in items:
+                rule = reduce_event_rule(item)
+                if rule is not None and len(rules) < MAX_EVENT_RULES:
+                    rules.append(
+                        {**rule, "list": key} if key != "aws_cloudwatch_event_rules" else rule,
+                    )
+        topics, reason = evaluator.input_strings(SNS_TOPICS_KEY)
+        reasons.add(reason or "")
+        names = [n for n in (reduce_trigger_name(t) for t in topics) if n][:MAX_SNS_TOPICS]
+        queue: Optional[str] = None
+        if evaluator.input_flag("include_sqs") == "true":
+            raw, _reason, found = evaluator.input_value("sqs_name")
+            queue = reduce_trigger_name(raw) if found else None
+            info["include_sqs"] = True
+        if not (rules or names or queue or info.get("include_sqs")):
+            return
+        if rules:
+            info["event_rules"] = rules
+        if names:
+            info["sns_topics"] = names
+        if queue:
+            info["sqs_name"] = queue
+        if "function_name" not in info:
+            value, _reason, found = evaluator.input_value("function_name")
+            name = reduce_lambda_name(value) if found else None
+            if name is not None:
+                info["function_name"] = name
 
     def _terragrunt_repo_path(self, value: str, file_path: str, want_dir: bool) -> Optional[str]:
         """The existing in-repository file or directory *value* names, else ``None``.

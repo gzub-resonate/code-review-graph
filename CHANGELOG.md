@@ -4,6 +4,31 @@
 
 ### Added
 
+- Python boto3: `logs`, `cloudwatch`, `application-autoscaling` and `sts` clients are bound
+  (`cwl.get_log_events(logGroupName=...)` gets a `logs` row), ECS service and cluster calls name the
+  service or cluster, Batch queue and job calls and EventBridge rule calls (`put_rule`,
+  `put_targets` ...) name theirs. A call on a bound client that passes arguments but names no resource parameter now
+  keeps a `?` row marked `unresolved_reason: no_resource_param` at confidence 0.3 (filter on it);
+  existing rows are unchanged. Not added: sagemaker, ec2, ses and emr (many resource kinds, mostly
+  dynamic ids). This changes the index fingerprint.
+- Python `requests` / `httpx` calls (module-level verbs, `request`, `Session()`/`Client()` objects)
+  become client `Endpoint` nodes (`client="py_http"`) holding only the host of a literal URL, or
+  the name of the variable it comes from; paths, query strings and credentials are never stored
+  (a webhook URL shows as its host). `cross_repo_requests_tool` `origin="external"` lists them.
+  This changes the index fingerprint.
+- Module-level Python constants that name a resource (an ARN, `s3://` location, or a name like
+  `*_BUCKET`, `*_QUEUE`, `*_STATE_MACHINE_ARN`) are stored as `Variable` nodes with a masked
+  `resource_value` (secret-looking values dropped, account ids replaced by `ACCOUNT`, 200
+  characters). An unresolved boto3 call that names an UPPER_CASE constant of another module
+  (`BUCKET` or `consts.BUCKET`) carries `const_ref` and is resolved at build time into
+  `resolved_names` when the repo has one value for it. `make_client("svc")` / `get_client("svc")`
+  with a literal service binds a low-confidence client (`client_inferred`). This changes the index
+  fingerprint.
+- `cross_repo_requests_tool` `origin="trigger"` reads the triggers a Terragrunt Lambda unit sets in
+  `inputs` (`aws_cloudwatch_event_rules`, `..._ignore_changes`, `existing_sns_topics`,
+  `include_sqs`/`sqs_name`) as rows with `via: terragrunt_inputs`, keyed on the unit's
+  `function_name`; the rule's `input` is never read. Shared-module rows whose firing side is only a
+  Terraform label are marked `template: true`. Units need a rebuild.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
