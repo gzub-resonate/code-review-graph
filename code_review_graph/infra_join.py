@@ -199,6 +199,28 @@ def _code_names(store: GraphStore) -> dict[tuple[str, str], tuple[str, list[str]
     return names
 
 
+def _code_names_of(
+    entry: Mapping[str, Any],
+) -> dict[tuple[str, str], tuple[str, list[str]]]:
+    """:func:`_code_names` of one repo, kept while its graph file is the same one."""
+    failed: list[bool] = []
+
+    def compute() -> dict[tuple[str, str], tuple[str, list[str]]]:
+        store = open_store(dict(entry))
+        if store is None:
+            return {}
+        try:
+            return _code_names(store)
+        except (sqlite3.Error, GraphStoreError, OSError) as exc:
+            logger.warning("Cannot read AWS names of %s: %s", entry["path"], exc)
+            failed.append(True)
+            return {}
+        finally:
+            store.close()
+
+    return MEMO.get("code-names", dict(entry), compute, cacheable=lambda _v: not failed)
+
+
 class _Matcher:
     """Does an infrastructure name belong to one repo, and through which of its names."""
 
@@ -238,6 +260,7 @@ def _item(kind: str, repo: str, name: str, file: str, line: Optional[int], via: 
 def _summarise_repo(
     index: int, repos: Sequence[Mapping[str, Any]], facts: sa.FactsCache,
     decls: _Declarations, rules: sa.AliasRules, lookup: Any,
+    code_names: Optional[dict[tuple[str, str], tuple[str, list[str]]]] = None,
 ) -> dict[str, Any]:
     entry = repos[index]
     label = sa.repo_names(entry)[0]
@@ -259,15 +282,8 @@ def _summarise_repo(
                 _item("ecs_task_definition", label, decl.name, decl.file, decl.line,
                       "declared_in_repo"),
             )
-    code_names: dict[tuple[str, str], tuple[str, list[str]]] = {}
-    store = open_store(dict(entry))
-    if store is not None:
-        try:
-            code_names = _code_names(store)
-        except (sqlite3.Error, GraphStoreError, OSError) as exc:
-            logger.warning("Cannot read AWS names of %s: %s", entry["path"], exc)
-        finally:
-            store.close()
+    if code_names is None:
+        code_names = _code_names_of(entry)
     for other in range(len(repos)):
         other_label = sa.repo_names(repos[other])[0]
         other_facts = facts.get(other)
@@ -288,6 +304,9 @@ def _summarise_repo(
                     items["stack"].append(_item(
                         "stack", other_label, raw, rel_dir, None, via, stack_kind=stack_kind,
                     ))
+        if other != index and not code_names:
+            # A repo whose code names nothing matches no other repo's declaration.
+            continue
         for decl in decls.get(other):
             used = code_names.get((al.decl_key(decl["service"], decl["kind"]), decl["name"]))
             if used is not None:
@@ -359,11 +378,19 @@ def build_infrastructure(
     """
     started = time.monotonic()
     decls = _Declarations(repos)
+    code_names: dict[int, dict[tuple[str, str], tuple[str, list[str]]]] = {}
     if selected:
-        # Every summary looks at every repo, so read them all ahead, on *workers* threads.
+        # Every summary looks at every repo's facts, so read them all ahead, on *workers*
+        # threads. A repo's declarations matter only against the names some selected repo's
+        # code uses (and to the repo itself), so they are read for every repo only then.
         everything = range(len(repos))
         facts.prefetch(everything, workers)
-        decls.prefetch(everything, workers)
+        todo = list(selected[:MAX_REPOS])
+        for index, names in zip(todo, parallel_map(
+            lambda i: _code_names_of(repos[i]), todo, workers,
+        )):
+            code_names[index] = names
+        decls.prefetch(everything if any(code_names.values()) else todo, workers)
     summaries: dict[str, Any] = {}
     checked = 0
     truncated = False
@@ -375,7 +402,9 @@ def build_infrastructure(
             left = [_clean(sa.repo_names(repos[i])[0]) for i in selected[position:]]
             break
         checked += 1
-        summary = _summarise_repo(index, repos, facts, decls, rules, lookup)
+        summary = _summarise_repo(
+            index, repos, facts, decls, rules, lookup, code_names.get(index),
+        )
         if summary["counts"]:
             matched_total += 1
             summaries[_clean(sa.repo_names(repos[index])[0])] = summary
