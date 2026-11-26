@@ -307,7 +307,7 @@ class TestCrossRepoSearch:
                 {"path": str(android_repo), "alias": "android"},
                 {"path": str(ios_repo), "alias": "ios"},
             ]
-            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+            mock_store_cls.side_effect = lambda *a, **k: MagicMock()
 
             result = cross_repo_search_func(query="splash", limit=2, include_fuzzy=True)
 
@@ -368,7 +368,7 @@ class TestCrossRepoSearch:
             mock_registry_cls.return_value.list_repos.return_value = [
                 entry for entry, _ in entries
             ]
-            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+            mock_store_cls.side_effect = lambda *a, **k: MagicMock()
 
             result = cross_repo_search_func(query="splash", repos=["web", "ios"])
 
@@ -399,7 +399,7 @@ class TestCrossRepoSearch:
             mock_registry_cls.return_value.list_repos.return_value = [
                 entry for entry, _ in entries
             ]
-            mock_store_cls.side_effect = [MagicMock()]
+            mock_store_cls.side_effect = lambda *a, **k: MagicMock()
 
             result = cross_repo_search_func(
                 query="splash", repos=["android", "desktop"]
@@ -456,7 +456,7 @@ class TestCrossRepoSearch:
             mock_registry_cls.return_value.list_repos.return_value = [
                 entry for entry, _ in entries
             ]
-            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+            mock_store_cls.side_effect = lambda *a, **k: MagicMock()
 
             result = cross_repo_search_func(
                 query="splash", repos=["ios", "android"], include_fuzzy=True,
@@ -536,7 +536,7 @@ class TestCrossRepoSearchEchoBounds:
             mock_registry_cls.return_value.list_repos.return_value = [
                 {"path": str(repo), "alias": "droid"},
             ]
-            mock_store_cls.side_effect = [MagicMock()]
+            mock_store_cls.side_effect = lambda *a, **k: MagicMock()
 
             result = cross_repo_search_func(
                 query="splash", repos=["droid", "nope"]

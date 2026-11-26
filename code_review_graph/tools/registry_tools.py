@@ -7,10 +7,11 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from pathlib import Path
 from typing import Any, Optional
 
@@ -41,7 +42,13 @@ from ..paging import (
 )
 from ..parser import is_test_file
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
-from ..repo_cache import INFRASTRUCTURE_RESULTS, MEMO, SKIPPED, parallel_map_budget
+from ..repo_cache import (
+    INFRASTRUCTURE_RESULTS,
+    MEMO,
+    SKIPPED,
+    parallel_map_budget,
+    submit_shared,
+)
 from ..search import hybrid_search
 from ._common import _bounded, _validate_positive_int
 
@@ -316,6 +323,39 @@ class _SearchedRows(list[tuple[int, int, int, dict[str, Any]]]):
     more: bool = False
 
 
+def _has_embeddings(store: GraphStore) -> bool:
+    """Whether the graph's database holds embedding vectors (one indexed probe, no writes)."""
+    try:
+        conn = store._conn
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embeddings'"
+        ).fetchone() is None:
+            return False
+        return conn.execute("SELECT 1 FROM embeddings LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return True
+
+
+def _open_for_search(db_path: Path, *, lookup_only: bool = False) -> GraphStore:
+    """Open a repo's graph for a search without the writes a normal open makes.
+
+    A normal open runs the schema and migration statements and, for the embedding search, opens
+    a second connection that creates its table: every one of those takes the write lock, so on
+    a repo the indexer is writing the open itself waits, 100+ times in a row. A read-only open
+    does none of that. The embedding search needs the writable open, so a graph that holds
+    vectors (and any graph a read-only open refuses, such as an older schema) is opened the
+    normal way: the answers are the ones they always were. ``lookup_only`` never needs vectors.
+    """
+    try:
+        store = GraphStore(db_path, read_only=True)
+    except GraphStoreError:
+        return GraphStore(str(db_path))
+    if lookup_only or not _has_embeddings(store):
+        return store
+    store.close()
+    return GraphStore(str(db_path))
+
+
 def _search_one_repo(
     repo_index: int, repo_entry: dict[str, Any], query: str, kind: str | None, limit: int,
 ) -> tuple[str, list[tuple[int, int, int, dict[str, Any]]]] | None:
@@ -330,7 +370,7 @@ def _search_one_repo(
     if not db_path.exists():
         return None
     try:
-        store = GraphStore(str(db_path))
+        store = _open_for_search(db_path)
         try:
             alias = repo_entry.get("alias", repo_path.name)
             rows: list[tuple[int, int, int, dict[str, Any]]] = _SearchedRows()
@@ -376,7 +416,7 @@ def _exact_pass(
         if not db_path.exists():
             continue
         try:
-            store = GraphStore(str(db_path))
+            store = _open_for_search(db_path, lookup_only=True)
             try:
                 found = _lookup_rows(store, query, kind, limit)
             finally:
@@ -408,6 +448,55 @@ def _now() -> float:
 
 def _out_of_budget(deadline: float | None) -> bool:
     return deadline is not None and _now() >= deadline
+
+
+#: ``search key -> repo paths the time budget kept out of that search``, newest last. A repeat of
+#: the same first-page search starts with them, so retrying a call that ran out of time makes
+#: progress on the repos it never reached instead of re-reading the ones it already did.
+_UNSEARCHED: dict[tuple[Any, ...], list[str]] = {}
+_UNSEARCHED_LOCK = threading.Lock()
+_UNSEARCHED_KEYS_MAX = 32
+
+
+def _search_key(
+    selected: list[dict[str, Any]], query: str, kind: str | None, limit: int,
+    repos: list[str] | None,
+) -> tuple[Any, ...]:
+    return (query, kind, limit, tuple(sorted(repos)) if repos else None,
+            tuple(str(e["path"]) for e in selected))
+
+
+def _retry_order(
+    selected: list[dict[str, Any]], query: str, kind: str | None, limit: int,
+    repos: list[str] | None, cursor: str | None,
+) -> list[int]:
+    """Indexes into *selected* in the order they are started: registry order, except that a
+    repeat of a first-page search that skipped repos tries those first. A call with a cursor
+    keeps registry order, so its pages line up with the page that made the cursor."""
+    order = list(range(len(selected)))
+    if cursor:
+        return order
+    with _UNSEARCHED_LOCK:
+        pending = set(_UNSEARCHED.get(_search_key(selected, query, kind, limit, repos), ()))
+    if not pending:
+        return order
+    first = [i for i in order if str(selected[i]["path"]) in pending]
+    return first + [i for i in order if str(selected[i]["path"]) not in pending]
+
+
+def _remember_skipped(
+    selected: list[dict[str, Any]], query: str, kind: str | None, limit: int,
+    repos: list[str] | None, cursor: str | None, left: list[tuple[int, dict[str, Any]]],
+) -> None:
+    if cursor:
+        return
+    key = _search_key(selected, query, kind, limit, repos)
+    with _UNSEARCHED_LOCK:
+        _UNSEARCHED.pop(key, None)
+        if left:
+            _UNSEARCHED[key] = [str(entry["path"]) for _i, entry in left]
+            while len(_UNSEARCHED) > _UNSEARCHED_KEYS_MAX:
+                del _UNSEARCHED[next(iter(_UNSEARCHED))]
 
 
 def cross_repo_search_func(
@@ -561,24 +650,29 @@ def cross_repo_search_func(
                 if outcome is not None:
                     outcomes[index] = outcome
 
-        # Up to ``workers`` repos are searched at once. The budget is checked here, on the
-        # calling thread and in registry order, each time a worker is free to start the next
-        # repo, so what is skipped does not depend on which search finishes first.
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crg-xrepo") as pool:
-            for repo_index, repo_entry in enumerate(selected):
-                while len(in_flight) >= workers:
-                    reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
-                # The first repo always runs, so a call makes progress; after that no
-                # new repo is started once the budget is spent, and each one left is named.
-                if repo_index and _out_of_budget(deadline):
-                    skipped.extend(_repo_label(e) for e in selected[repo_index:])
-                    left = list(enumerate(selected))[repo_index:]
-                    break
-                future = pool.submit(
-                    _search_one_repo, repo_index, repo_entry, query, kind, limit,
-                )
-                in_flight[future] = repo_index
-            reap(wait(in_flight).done)
+        # Up to ``workers`` repos are searched at once, on the pool every cross-repo call shares
+        # (so concurrent calls do not each start their own threads). The budget is checked
+        # here, on the calling thread, each time a worker is free to start the next repo, so
+        # what is skipped does not depend on which search finishes first. A repo left out by a
+        # first-page call that ran out of budget is tried first by the next such call.
+        order = _retry_order(selected, query, kind, limit, repos, cursor)
+        for position, repo_index in enumerate(order):
+            repo_entry = selected[repo_index]
+            while len(in_flight) >= workers:
+                reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
+            # The first repo always runs, so a call makes progress; after that no
+            # new repo is started once the budget is spent, and each one left is named.
+            if position and _out_of_budget(deadline):
+                left_over = sorted(order[position:])
+                skipped.extend(_repo_label(selected[i]) for i in left_over)
+                left = [(i, selected[i]) for i in left_over]
+                break
+            future = submit_shared(
+                _search_one_repo, repo_index, repo_entry, query, kind, limit,
+            )
+            in_flight[future] = repo_index
+        reap(wait(in_flight).done)
+        _remember_skipped(selected, query, kind, limit, repos, cursor, left)
 
         capped: list[str] = []
         # Whatever order the searches finished in, the rows go in registry order.
@@ -671,11 +765,17 @@ def cross_repo_search_func(
                 f"; {capped_total} repo(s) have more matches than limit={limit} "
                 "(see repos_capped; total is a lower bound, raise limit to see them)"
             )
+        searched_of = len(searched_repos)
+        coverage = (
+            f"searched {searched_of} of {len(selected)} repos; "
+            f"{skipped_total} skipped by the time budget"
+        )
         if skipped_total:
             notes += (
-                f"; time budget of {budget:g}s spent, {skipped_total} repo(s) not searched "
-                f"(exact names were still looked up in {len(exact_looked_in)} of them; "
-                "see skipped_repos; raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
+                f"; {coverage} (budget {budget:g}s spent, {skipped_total} repo(s) not searched; "
+                f"exact names were still looked up in {len(exact_looked_in)} of them; "
+                "see skipped_repos; repeat the call to search "
+                "the skipped repos first, raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
             )
 
         response = {
@@ -702,6 +802,10 @@ def cross_repo_search_func(
         }
         if capped_total:
             response["total_is_lower_bound"] = True
+        if skipped_total:
+            response["truncated_reason"] = f"{coverage} (see skipped_repos)"
+            response["repos_total"] = len(selected)
+            response["summary"] = f"INCOMPLETE: {coverage}. " + response["summary"]
         if repos:
             response["unknown"] = unknown_shown
             response["unknown_total"] = unknown_total

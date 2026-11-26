@@ -19,6 +19,21 @@
   `not_declared_in_registry`), the reply adds `counts_by_reason` and a summary clause, and
   `status=<reason>` selects those rows. `status` and `counts` are unchanged. `origin=stepfunction`
   with `service=<indexed state machine>` and no rows adds a `hint` pointing at `origin=awssdk`.
+- Cold cross-repo calls are faster to warm and stay warm. The cache stamp of a repo's graph
+  (`repo_cache.graph_stamp`) no longer uses the mtime and size of the database and its `-wal`: an
+  indexer writing, a checkpoint or any reader opening the database moved those and threw away
+  every cached `awssdk`/`feign`/`js`/`stepfunction` result. It is now the file's inode plus what
+  the graph holds (build time, head sha, highest node and edge ids and counts), re-read only when
+  the file signature moved. New opt-in background warm-up, `CRG_CROSS_REPO_WARMUP=1` (default off;
+  `CRG_CROSS_REPO_WARMUP_ORIGINS`, default `awssdk,feign,js`; `..._MAX_SECONDS` default 1800;
+  `..._INTERVAL_SECONDS` default 60): after start and after the graphs change it makes the
+  unscoped call for each origin in turn on the shared pool, one line per origin in the log.
+  `cross_repo_search_tool` opens each repo's graph read-only (no schema or migration writes, no
+  second embedding connection) unless it holds vectors, runs on the shared pool, tries repos a
+  previous identical first-page call skipped first, and a budget skip now starts the summary with
+  `INCOMPLETE: searched 84 of 122 repos; 38 skipped by the time budget` and adds `truncated_reason`
+  and `repos_total` (`skipped_repos` and `truncated: true` were already set). Query-time only:
+  same index fingerprint.
 - `query_graph_tool` `handlers_of` with a route (`POST /v2/respondents/avmap`) no longer needs
   `repo_root`: omit it on a multi-repo server, or pass `"*"`, and every registered repo with a graph
   is asked. The reply names `repos_matched` and tags rows with `repo`, stays small (default 20
