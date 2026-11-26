@@ -226,3 +226,87 @@ def python_url_constants(
                 file_path=file_path, line=line, extra={"resolution": RESOLUTION},
             ))
     return out_nodes, out_edges
+
+
+# -- Resource-like constants ----------------------------------------------------------------
+
+MAX_RESOURCE_VALUE_CHARS = 200
+_RESOURCE_NAME = re.compile(
+    r"(?:^|_)(?:BUCKET|QUEUE|TOPIC|STREAM|TABLE|STATE_?MACHINE|LAMBDA|FUNCTION|LOG_?GROUP|"
+    r"ARN|RULE|CLUSTER|JOB_?QUEUE|JOB_?DEFINITION)(?:_NAME|_ARN)?(?:$|_)",
+)
+_RESOURCE_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\-]{1,%d}" % MAX_RESOURCE_VALUE_CHARS)
+
+
+def _looks_like_resource(name: str, value: str) -> bool:
+    if value.startswith(("arn:aws", "s3://")):
+        return True
+    return bool(_RESOURCE_NAME.search(name) and _RESOURCE_VALUE.fullmatch(value))
+
+
+def python_resource_constants(
+    path: Path, source: bytes, nodes: list[Any], get_parser: Callable[[str], Any],
+) -> tuple[list[Any], list[Any]]:
+    """``Variable`` nodes (and ``CONTAINS`` edges) of module-level constants that name a resource.
+
+    A constant is kept when its value is an ARN or ``s3://`` location, or its name says it holds
+    a bucket, queue, topic, stream, table, state machine, function, log group or the like and
+    the value is a plain name. The value goes through
+    :func:`~code_review_graph.config_keys.storable_config_value` (secret-looking names and
+    values are dropped, a 12-digit account id becomes ``ACCOUNT``, 200 characters at most) and
+    is stored as ``extra.resource_value``. Nothing else of the file is stored. A name already
+    stored by :func:`python_url_constants` is skipped.
+    """
+    from .config_keys import storable_config_value
+
+    if path.suffix.lower() != ".py":
+        return [], []
+    file_node = next((n for n in nodes if n.kind == "File"), None)
+    parser = get_parser("python")
+    if file_node is None or parser is None or not re.search(rb"[A-Z][A-Z0-9_]{1,}\s*=", source):
+        return [], []
+    from .parser import EdgeInfo, NodeInfo
+
+    root = parser.parse(source).root_node
+    file_path = file_node.file_path
+    taken = {n.name for n in nodes if n.kind == "Variable" and n.file_path == file_path}
+    seen: dict[str, int] = {}
+    found: list[tuple[str, str, bool, int, int]] = []
+    for top in root.children:
+        assignment = top if top.type == "assignment" else next(
+            (c for c in top.children if c.type == "assignment"), None,
+        ) if top.type == "expression_statement" else None
+        if assignment is None:
+            continue
+        left = assignment.child_by_field_name("left")
+        right = assignment.child_by_field_name("right")
+        if left is None or right is None or left.type != "identifier":
+            continue
+        name = _text(left, source)
+        seen[name] = seen.get(name, 0) + 1
+        value = _string_value(right, source) if right.type == "string" else None
+        if value is None or not _CONSTANT_NAME.fullmatch(name):
+            continue
+        value = value.strip()
+        stored = storable_config_value(name, value)
+        if stored is None or not _looks_like_resource(name, stored[0]):
+            continue
+        found.append((name, stored[0], stored[1], top.start_point[0] + 1, top.end_point[0] + 1))
+    out_nodes: list[Any] = []
+    out_edges: list[Any] = []
+    for name, value, truncated, start, end in found:
+        # A name assigned twice in the module has no single value.
+        if seen[name] != 1 or name in taken or len(out_nodes) >= MAX_CONSTANTS:
+            continue
+        extra: dict[str, Any] = {"constant": True, "resource_value": value}
+        if truncated:
+            extra["value_truncated"] = True
+        out_nodes.append(NodeInfo(
+            kind="Variable", name=name, file_path=file_path, line_start=start, line_end=end,
+            language="python", extra=extra,
+        ))
+        out_edges.append(EdgeInfo(
+            kind="CONTAINS", source=file_path, target=f"{file_path}::{name}",
+            file_path=file_path, line=start,
+        ))
+    return out_nodes, out_edges

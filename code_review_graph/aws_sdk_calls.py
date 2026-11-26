@@ -68,7 +68,7 @@ _URI_SUFFIXES = frozenset({
     ".sc", ".kt", ".kts", ".sh", ".bash", ".tf",
 })
 _MARKERS: dict[str, tuple[bytes, ...]] = {
-    "python": (b"boto3", b"botocore"),
+    "python": (b"boto3", b"botocore", b"make_client(", b"get_client("),
     "java": (b"software.amazon.awssdk", b"com.amazonaws"),
     "javascript": (b"@aws-sdk/",),
     "typescript": (b"@aws-sdk/",),
@@ -84,6 +84,9 @@ class Val(NamedTuple):
     #: ``(declared type, property)`` for a bean getter such as ``props.getS3Bucket()``. The
     #: name is not in this file, so the link step looks for the type's configuration prefix.
     getter: Optional[tuple[str, str]] = None
+    #: UPPER_CASE name of a constant that is not in this file (``BUCKET`` or ``consts.BUCKET``).
+    #: Joined at build time with the resource-like module constants of the repo.
+    const_ref: Optional[str] = None
 
 
 class _Svc(NamedTuple):
@@ -536,6 +539,8 @@ class _Out:
             info["unresolved"] = True
             if placeholder:
                 info["placeholder"] = placeholder[:128]
+            if value.const_ref:
+                info["const_ref"] = value.const_ref[:80]
             if value.getter:
                 info["config_getter"] = {"type": value.getter[0][:128],
                                          "property": value.getter[1][:128]}
@@ -579,6 +584,9 @@ def _unique_consts(pairs: list[tuple[str, str]]) -> dict[str, str]:
     return {k: v for k, v in seen.items() if v is not None}
 
 
+_CONST_NAME = re.compile(r"[A-Z][A-Z0-9_]{1,80}")
+#: Names of a function that returns a boto3 client of the literal service it is given.
+_CLIENT_FACTORIES = frozenset({"make_client", "get_client"})
 _ENV_CALL = re.compile(r"^(?:os\.)?(?:environ\.get|getenv)$")
 _FORMAT_FIELD = re.compile(r"\{[^{}]*\}|%[sdr]")
 
@@ -591,6 +599,8 @@ class _Binding(NamedTuple):
     svc: str
     val: Val = Val()
     op: str = ""
+    #: The client came from a factory call (``make_client("sfn")``), not ``boto3.client``.
+    inferred: bool = False
 
 
 class _Python:
@@ -667,8 +677,18 @@ class _Python:
                     return Val(None, key.template)
             return Val()
         if t == "identifier":
-            const = self.consts.get(_text(node, src))
-            return Val(const) if const is not None else Val()
+            name = _text(node, src)
+            const = self.consts.get(name)
+            if const is not None:
+                return Val(const)
+            return Val(const_ref=name) if _CONST_NAME.fullmatch(name) else Val()
+        if t == "attribute":
+            obj = node.child_by_field_name("object")
+            attr = node.child_by_field_name("attribute")
+            if obj is not None and attr is not None and obj.type == "identifier" \
+                    and _CONST_NAME.fullmatch(_text(attr, src)) \
+                    and _text(obj, src) not in ("self", "cls"):
+                return Val(const_ref=_text(attr, src))
         return Val()
 
     @staticmethod
@@ -748,11 +768,16 @@ class _Python:
 
     def value_binding(self, call: Any) -> Optional[_Binding]:
         fn = call.child_by_field_name("function")
+        if fn is not None and fn.type == "identifier" \
+                and _text(fn, self.src) in _CLIENT_FACTORIES:
+            return self._factory_binding(call)
         if fn is None or fn.type != "attribute":
             return None
         attr = _text(fn.child_by_field_name("attribute"), self.src)
         recv = fn.child_by_field_name("object")
         pos, kws, _splat = self._args(call)
+        if attr in _CLIENT_FACTORIES:
+            return self._factory_binding(call)
         if attr in ("client", "resource"):
             arg = pos[0] if pos else kws.get("service_name")
             service = self.val(arg).template if arg is not None else None
@@ -769,8 +794,21 @@ class _Python:
             return _Binding("bucket", "s3", self.val(arg) if arg is not None else Val())
         if attr == "get_paginator" and base.kind in ("client", "resource") and pos:
             op = self.val(pos[0]).template
-            return _Binding("paginator", base.svc, op=op) if op and _DYN not in op else None
+            return _Binding("paginator", base.svc, op=op, inferred=base.inferred) \
+                if op and _DYN not in op else None
         return None
+
+    def _factory_binding(self, call: Any) -> Optional[_Binding]:
+        """A low-confidence client for ``make_client("sfn")`` / ``mod.get_client("sfn")``.
+
+        Only a literal boto3 service name binds. The factory itself is not looked at (it is
+        usually in another file), so every row from this client is marked inferred.
+        """
+        pos, kws, _splat = self._args(call)
+        arg = pos[0] if pos else kws.get("service_name") or kws.get("service")
+        service = self.val(arg).template if arg is not None else None
+        key = _BOTO_SERVICE.get((service or "").lower())
+        return _Binding("client", key, inferred=True) if key else None
 
     def collect_bindings(self) -> None:
         for node in _walk(self.root):
@@ -806,7 +844,14 @@ class _Python:
             base = self.expr_binding(recv)
             if base is None:
                 continue
+            before = len(self.out.edges)
             self._site(node, base, method)
+            if base.inferred:
+                for edge in self.out.edges[before:]:
+                    edge.extra.update(
+                        confidence=min(0.5, edge.extra.get("confidence", 0.5)),
+                        confidence_tier="INFERRED", client_inferred="factory",
+                    )
 
     def _site(self, call: Any, base: _Binding, method: str) -> None:
         line = _line(call)

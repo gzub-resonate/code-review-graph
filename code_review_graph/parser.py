@@ -96,7 +96,7 @@ from .messaging_edges import (
     emit_messaging_edges,
     trigger_edge,
 )
-from .module_constants import python_url_constants
+from .module_constants import python_resource_constants, python_url_constants
 from .npm_alias_resolver import NpmAliasResolver
 from .terragrunt_static import DYNAMIC_REASONS, TerragruntEvaluator
 
@@ -4327,6 +4327,12 @@ class CodeParser:
             )
             nodes.extend(constant_nodes)
             edges.extend(constant_edges)
+            # Constants that name a bucket, queue, state machine, ARN ... (value kept, masked).
+            resource_nodes, resource_edges = python_resource_constants(
+                path, source, nodes, self._get_parser,
+            )
+            nodes.extend(resource_nodes)
+            edges.extend(resource_edges)
         return nodes, edges
 
     def _extract_bytes(
