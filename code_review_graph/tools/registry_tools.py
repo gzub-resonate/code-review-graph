@@ -62,6 +62,9 @@ _INFRASTRUCTURE_FIRST_PAGE_ONLY = (
     "first page only; call again without a cursor to read it"
 )
 
+#: Queue-only names echoed in the ``queues`` section of an AMQP exchange list.
+_MAX_QUEUE_ROWS = 100
+
 _INFRASTRUCTURE_NO_MATCHES = (
     "no rows matched the filter, so there is no infrastructure to describe and the block is "
     "omitted; it describes the repos of the matched rows, never other repos"
@@ -855,11 +858,16 @@ def _amqp_exchange_list(
             store.close()
     counts: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
+    queues: list[dict[str, Any]] = []
     for name in sorted(exchanges):
         entry_data = exchanges[name]
         if routing_key and not ax.has_key_containing(entry_data, routing_key):
             continue
         row = ax.render(name, entry_data)
+        if ax.is_queue(entry_data):
+            # A name only used as a queue is not an exchange: no exchange status, no count.
+            queues.append(row)
+            continue
         counts[row["status"]] = counts.get(row["status"], 0) + 1
         if status and row["status"] != status:
             continue
@@ -880,6 +888,7 @@ def _amqp_exchange_list(
             + (f" with a key containing '{_sanitize_name(routing_key)}'" if routing_key else "")
             + f" across {len(selected)} repo(s)"
             + (f": {ordered}" if ordered else "")
+            + (f"; {len(queues)} queue name(s) listed apart (see queues)" if queues else "")
             + shown_range(page)
         ),
         "origin": "amqp",
@@ -891,6 +900,9 @@ def _amqp_exchange_list(
         "unreadable": unreadable,
         **page.fields(),
     }
+    if queues and not status:
+        result["queues"] = queues[:_MAX_QUEUE_ROWS]
+        result["queues_total"] = len(queues)
     if without_amqp:
         result["repos_without_amqp"] = _bounded(
             without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
@@ -986,6 +998,8 @@ def _amqp_links(
             for key in ("routing_key", "binding_key", "queue"):
                 if isinstance(edge.get(key), str) and edge[key]:
                     row[key] = _sanitize_name(edge[key])
+            if edge.get("kind") == aj.KIND_QUEUE:
+                row["kind"] = aj.KIND_QUEUE
             if how:
                 row["matched_via"] = how
             rows.append(row)

@@ -14,7 +14,7 @@ from .graph import GraphStore
 
 __all__ = [
     "LIST_STATUSES", "MATCHED", "UNLISTENED", "UNPUBLISHED", "Exchange", "exchange_status",
-    "list_exchange_names", "new_exchange", "add_edges", "render",
+    "list_exchange_names", "new_exchange", "add_edges", "render", "is_queue",
 ]
 
 UNLISTENED = "unlistened"
@@ -58,12 +58,15 @@ def new_exchange() -> Exchange:
         "publishers": 0, "listeners": 0,
         "publisher_repos": set(), "listener_repos": set(),
         "routing_keys": set(), "binding_keys": set(),
+        # Edges that name an exchange, and edges that name only a queue.
+        "exchange_edges": 0, "queue_edges": 0,
     }
 
 
 def add_edges(entry: Exchange, repo: str, edges: list[dict[str, Any]]) -> None:
     """Fold one repo's edges of one exchange into *entry* (values must be sanitised by caller)."""
     for edge in edges:
+        entry["queue_edges" if edge.get("kind") == aj.KIND_QUEUE else "exchange_edges"] += 1
         if edge["role"] == "publisher":
             entry["publishers"] += 1
             entry["publisher_repos"].add(repo)
@@ -78,6 +81,12 @@ def add_edges(entry: Exchange, repo: str, edges: list[dict[str, Any]]) -> None:
                 entry["binding_keys"].add(key)
 
 
+def is_queue(entry: Exchange) -> bool:
+    """Whether every edge of the name only names a queue (a listener on a queue, or a publish
+    on the default exchange): such a name is not an exchange and has no exchange status."""
+    return entry["queue_edges"] > 0 and entry["exchange_edges"] == 0
+
+
 def has_key_containing(entry: Exchange, needle: str) -> bool:
     """Whether any routing key or binding key seen on the exchange contains *needle*."""
     return any(needle in k for k in entry["routing_keys"] | entry["binding_keys"])
@@ -85,8 +94,10 @@ def has_key_containing(entry: Exchange, needle: str) -> bool:
 
 def render(name: str, entry: Exchange) -> dict[str, Any]:
     """The row of one exchange; long name lists are cut at ``MAX_LISTED`` with a ``*_total``."""
+    queue = is_queue(entry)
     row: dict[str, Any] = {
-        "exchange": name,
+        ("queue" if queue else "exchange"): name,
+        "kind": aj.KIND_QUEUE if queue else aj.KIND_EXCHANGE,
         "status": exchange_status(entry["publishers"], entry["listeners"]),
         "publisher_count": entry["publishers"],
         "listener_count": entry["listeners"],

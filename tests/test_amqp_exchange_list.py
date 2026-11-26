@@ -107,3 +107,40 @@ def test_exchange_given_behaviour_is_unchanged(world):
     reply = cross_repo_requests_func(origin="amqp", service="orders.exchange")
     assert reply["summary"].startswith("10 AMQP publisher/listener row(s) for exchange")
     assert {r["role"] for r in reply["results"]} == {"publisher", "listener"}
+
+
+@pytest.fixture
+def queue_world(tmp_path, registry):  # noqa: F811
+    repo = _build_repo(tmp_path / "attr", exchange_edges=False)
+    _add_edges(repo, [
+        # Bare queue listeners (@RabbitListener(queues=...)): the name is the target itself.
+        ("HANDLES", "attr.process-permutation", {"queue": "attr.process-permutation"}),
+        ("HANDLES", "attr.refresh-vertical", {"queue": "attr.refresh-vertical"}),
+        # A publish on the default exchange names the queue as its routing key.
+        ("PUBLISHES", "attr.refresh-vertical",
+         {"queue": "attr.refresh-vertical", "routing_key": "attr.refresh-vertical"}),
+        # A real exchange binding: its queue is another name.
+        ("HANDLES", "api.e.topic",
+         {"binding_key": "a.*", "queue": "attr.q", "exchange": "api.e.topic"}),
+    ])
+    registry.register(str(repo), alias="attr")
+    return repo
+
+
+def test_queue_names_are_not_listed_as_exchanges(queue_world):
+    reply = cross_repo_requests_func(origin="amqp")
+    assert [r["exchange"] for r in reply["results"]] == ["api.e.topic"]
+    assert reply["counts"] == {"unpublished": 1}
+    queues = {q["queue"]: q for q in reply["queues"]}
+    assert set(queues) == {"attr.process-permutation", "attr.refresh-vertical"}
+    assert all(q["kind"] == "queue" for q in queues.values())
+    assert queues["attr.process-permutation"]["listener_count"] == 1
+    assert queues["attr.refresh-vertical"]["status"] == "matched"
+    assert reply["queues_total"] == 2 and "queue name(s)" in reply["summary"]
+
+
+def test_a_queue_edge_of_one_exchange_name_is_flagged_in_the_single_exchange_mode(queue_world):
+    reply = cross_repo_requests_func(origin="amqp", service="attr.process-permutation")
+    assert {r["kind"] for r in reply["results"]} == {"queue"}
+    exchange = cross_repo_requests_func(origin="amqp", service="api.e.topic")
+    assert all("kind" not in r for r in exchange["results"])
