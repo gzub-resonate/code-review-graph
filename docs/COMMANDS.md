@@ -1112,7 +1112,11 @@ limit: int = 20              # Results per repo
 max_results: int = 50        # Merged results across searched repos (max 100)
 repos: list[str] | None      # Aliases or folder names; default: every registered repo
 cursor: str | None           # next_cursor of the previous reply (see Paging)
+include_repo_list: bool = False  # Return repos_searched (names) even for more than 10 repos
 ```
+
+`repos_searched_total` is the number of repos searched. `repos_searched` (their names) is returned only
+for 10 repos or fewer, or with `include_repo_list=true`; it was ~2.5 KB on a 122-repo registry.
 
 `repos` limits the search to named registry entries. Matching is exact and
 case-sensitive; paths are not accepted. An alias match wins over a folder-name
@@ -1129,8 +1133,8 @@ return carry `score` 0.
 
 The call has a time budget, `CRG_CROSS_REPO_BUDGET_SECONDS` (default 300, `0` = no limit).
 When it is spent no further repo is started: the ones not searched are listed in
-`skipped_repos` (capped at 20; `skipped_repos_total` and `skipped_repos_truncated` give
-the real count), `truncated` is set and the summary says so. The first repo always runs.
+`skipped_repos` (always listed in full; `skipped_repos_total` is the count and
+`skipped_repos_truncated` is always false), `truncated` is set and the summary says so. The first repo always runs.
 Up to `CRG_CROSS_REPO_WORKERS` repos (default 4, `1` = one at a time, at most 32) are
 searched at once, each on its own graph connection; the rows are ordered the same way
 whichever search finishes first.
@@ -1158,7 +1162,12 @@ max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js | terraform | workflow | stepfunction | awssdk; default: feign and js
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
+include_repo_list: bool = False  # Feign/js: return repos_searched (names) even for more than 10 repos
 ```
+
+For the Feign and JS/TS origins `repos_searched_total` is the number of repos read and `repos_searched`
+(the names) is returned only for 10 repos or fewer, or with `include_repo_list=true`. `skipped_repos` is
+always listed in full.
 
 `origin="terraform"` lists the remote Terraform module sources (`git::...//modules/x`) the repos name and the
 registered repo and folder each one resolves to. `service` filters by module repo name, `route` by module folder

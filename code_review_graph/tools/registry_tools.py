@@ -57,6 +57,9 @@ _MAX_CROSS_REPO_RESULTS = 100
 # response, which caps each entry at 256 characters.
 _MAX_ECHOED_NAMES = 20
 
+#: A searched-repo list at most this long is echoed without being asked for.
+_REPOS_LISTED_MAX = 10
+
 _INFRASTRUCTURE_FIRST_PAGE_ONLY = (
     "infrastructure describes the selected repos, not these rows, and is returned on the "
     "first page only; call again without a cursor to read it"
@@ -157,6 +160,23 @@ def _echoed(names: list[str]) -> tuple[list[str], int, bool]:
     """
     cleaned = [_sanitize_name(name) for name in names]
     return _bounded(cleaned, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES)
+
+
+def _searched_fields(names: list[str], include_repo_list: bool) -> dict[str, Any]:
+    """``repos_searched_total`` always; ``repos_searched`` (the names) only when short or asked.
+
+    A registry of 100+ repos made the name list ~2.5 KB of every reply. The count says how
+    many were searched; ``include_repo_list=True`` returns the names.
+    """
+    fields: dict[str, Any] = {"repos_searched_total": len(names)}
+    if include_repo_list or len(names) <= _REPOS_LISTED_MAX:
+        fields["repos_searched"] = names
+    return fields
+
+
+def _listed(names: list[str]) -> list[str]:
+    """Sanitised names, never cut: used for ``skipped_repos``, which the caller must see whole."""
+    return [_sanitize_name(name) for name in names]
 
 
 #: Match tiers, best first. ``cross_repo_search_tool`` orders its merged rows by
@@ -366,6 +386,7 @@ def cross_repo_search_func(
     repos: list[str] | None = None,
     cursor: str | None = None,
     include_fuzzy: bool = False,
+    include_repo_list: bool = False,
 ) -> dict[str, Any]:
     """Search across registered repositories.
 
@@ -409,6 +430,9 @@ def cross_repo_search_func(
             ``repos``, and only while the merged results are unchanged: the
             cursor holds a digest of them, because the repos are searched
             afresh on every call.
+        include_fuzzy: Keep ``fuzzy`` and ``tokens`` rows when a strong match exists.
+        include_repo_list: Return ``repos_searched`` (the names) even when more than 10
+            repos were searched. ``repos_searched_total`` is always the count.
 
     Returns:
         Combined search results from the searched repos, plus ``total``
@@ -538,7 +562,7 @@ def cross_repo_search_func(
             kept = [r for r in merged if r.get("match") not in _WEAK_TIERS]
             fuzzy_dropped = len(merged) - len(kept)
             merged = kept
-        skipped_shown, skipped_total, skipped_truncated = _echoed(skipped)
+        skipped_shown, skipped_total, skipped_truncated = _listed(skipped), len(skipped), False
         # The rows come from several graph databases and are searched afresh on every
         # call, so the stamp is a digest of the rows themselves, and of the repos left
         # out: a cursor made on a partial answer is only honoured for the same partial one.
@@ -585,7 +609,7 @@ def cross_repo_search_func(
             "total": total,
             "fuzzy_dropped": fuzzy_dropped,
             "truncated": truncated,
-            "repos_searched": searched_repos,
+            **_searched_fields(searched_repos, include_repo_list),
             "skipped_repos": skipped_shown,
             "skipped_repos_total": skipped_total,
             "skipped_repos_truncated": skipped_truncated,
@@ -1462,6 +1486,7 @@ def cross_repo_requests_func(
     max_results: int = 50,
     origin: str | None = None,
     cursor: str | None = None,
+    include_repo_list: bool = False,
 ) -> dict[str, Any]:
     """Join outbound Spring Feign and JavaScript/TypeScript calls to server endpoints.
 
@@ -1496,6 +1521,8 @@ def cross_repo_requests_func(
         max_results: Maximum rows returned overall (default 50, capped at
             100). ``counts`` and ``total`` cover every call that passed the
             filters, not just the rows shown.
+        include_repo_list: Feign/JS only: return ``repos_searched`` (the names) even when more
+            than 10 repos were read. ``repos_searched_total`` is always the count.
         cursor: ``next_cursor`` from the previous reply, to read the next page of
             the same query. Each page takes up to ``limit`` more rows from every
             client repo, then keeps the first ``max_results``. Omit it for the
@@ -1885,7 +1912,7 @@ def cross_repo_requests_func(
         )
         results = page.items
         truncated = page.truncated or bool(skipped)
-        skipped_shown, skipped_total, skipped_truncated = _echoed(skipped)
+        skipped_shown, skipped_total, skipped_truncated = _listed(skipped), len(skipped), False
         shown_unreadable, unreadable_total, unreadable_truncated = _bounded(
             unreadable, _MAX_UNREADABLE, _MAX_UNREADABLE,
         )
@@ -1922,7 +1949,7 @@ def cross_repo_requests_func(
             "total": total,
             "truncated": truncated,
             **page.fields(),
-            "repos_searched": searched,
+            **_searched_fields(searched, include_repo_list),
             "skipped_repos": skipped_shown,
             "skipped_repos_total": skipped_total,
             "skipped_repos_truncated": skipped_truncated,

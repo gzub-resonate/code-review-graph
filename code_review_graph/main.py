@@ -1870,6 +1870,7 @@ async def cross_repo_search_tool(
     cursor: Optional[str] = None,
     detail_level: str = "standard",
     include_fuzzy: bool = False,
+    include_repo_list: bool = False,
 ) -> dict:
     """Search for code entities across registered repositories.
 
@@ -1907,6 +1908,9 @@ async def cross_repo_search_tool(
         include_fuzzy: When an ``exact``, ``exact_ci`` or ``qualified`` match exists,
             ``fuzzy`` and ``tokens`` rows are hidden and counted in ``fuzzy_dropped``.
             Pass True to keep them. Default: False.
+        include_repo_list: ``repos_searched_total`` is always the number of repos searched.
+            ``repos_searched`` (the names) is returned only for 10 repos or fewer, or when this
+            is True. ``skipped_repos`` is always listed in full. Default: False.
 
     Returns:
         Merged results. When more remain the reply carries ``next_cursor``; a
@@ -1917,6 +1921,7 @@ async def cross_repo_search_tool(
         lambda: cross_repo_search_func(
             query=query, kind=kind, limit=limit, max_results=max_results,
             repos=repos, cursor=cursor, include_fuzzy=include_fuzzy,
+            include_repo_list=include_repo_list,
         ),
         None,
         provenance=False,
@@ -1935,6 +1940,7 @@ async def cross_repo_requests_tool(
     cursor: Optional[str] = None,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    include_repo_list: bool = False,
 ) -> dict:
     """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
 
@@ -2058,6 +2064,9 @@ async def cross_repo_requests_tool(
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
+        include_repo_list: Feign/JS: ``repos_searched_total`` is always the count of repos read;
+            ``repos_searched`` (the names) is returned only for 10 repos or fewer, or when this
+            is True. ``skipped_repos`` is always listed in full. Default: False.
     """
     if repo_root and not repos:
         repos = [Path(repo_root).name]
@@ -2066,6 +2075,7 @@ async def cross_repo_requests_tool(
         lambda: cross_repo_requests_func(
             repos=repos, service=service, route=route, status=status,
             limit=limit, max_results=max_results, origin=origin, cursor=cursor,
+            include_repo_list=include_repo_list,
         ),
         None,
         provenance=False,

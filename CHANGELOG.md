@@ -4,6 +4,11 @@
 
 ### Added
 
+- `cross_repo_search_tool` and the Feign/JS origins of `cross_repo_requests_tool` return
+  `repos_searched_total` (a count) on every reply and `repos_searched` (the names) only for 10
+  repos or fewer, or with the new `include_repo_list=True`; the name list was ~2.5 KB of every
+  reply on a 122-repo registry. `skipped_repos` is now listed in full instead of cut at 20
+  (`skipped_repos_truncated` is always false). Query-time only.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
