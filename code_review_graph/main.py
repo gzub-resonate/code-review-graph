@@ -1073,17 +1073,24 @@ async def get_flow_tool(
     max_source_lines: int = 400,
     cursor: Optional[str] = None,
     detail_level: str = "standard",
+    flow_key: Optional[str] = None,
 ) -> dict:
     """Get detailed information about a single execution flow.
 
     Returns the full call path with each step's function name, file, and
     line numbers. Optionally includes source code snippets for each step.
 
-    Provide either flow_id (from list_flows_tool) or flow_name to search by name.
+    Provide flow_id (from list_flows_tool), flow_key or flow_name to search by name.
+    Flow ids are renumbered when the graph is reindexed (flow #323 became #1); every flow
+    in list_flows_tool, get_flow_tool and get_affected_flows_tool also carries ``flow_key``
+    (its entry node's qualified name, relative to the repository) and ``file``, which stay
+    the same across a reindex.
 
     Args:
-        flow_id: Database ID of the flow.
-        flow_name: Name to search for (partial match). Ignored if flow_id given.
+        flow_id: Database ID of the flow. Not stable across a reindex.
+        flow_key: The stable ``flow_key`` of a flow. Used when flow_id is not given and
+            before flow_name; no match is ``not_found``.
+        flow_name: Name to search for (partial match). Ignored if flow_id or flow_key given.
         include_source: Include source code snippets for each step. Default: False.
         repo_root: Repository root path. Auto-detected if omitted.
         max_steps: Maximum steps to return; flow.total_steps reports the
@@ -1107,7 +1114,7 @@ async def get_flow_tool(
             flow_id=flow_id, flow_name=flow_name,
             include_source=include_source, repo_root=root,
             max_steps=max_steps, max_source_lines=max_source_lines,
-            cursor=cursor,
+            cursor=cursor, flow_key=flow_key,
         ),
         root,
     )

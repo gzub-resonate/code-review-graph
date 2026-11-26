@@ -39,9 +39,9 @@ from ..paging import (
     paginate_groups,
     shown_range,
 )
+from ..parser import is_test_file
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
 from ..repo_cache import INFRASTRUCTURE_RESULTS, MEMO, SKIPPED, parallel_map_budget
-from ..parser import is_test_file
 from ..search import hybrid_search
 from ._common import _bounded, _validate_positive_int
 

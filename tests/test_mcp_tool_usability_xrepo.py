@@ -318,3 +318,72 @@ def test_pr_files_limit_is_bounded_and_validated(pull_request):  # noqa: F811
     with pytest.raises(ValueError):
         pr_run(pull_request, files_limit=0)
     assert len(pr_run(pull_request, files_limit=10_000)["files"]) <= 200
+
+
+# ---- E: a flow key that survives a reindex -----------------------------------------------
+
+from .test_affected_flows_limits import _FlowFixture  # noqa: E402
+
+
+class TestFlowKeys(_FlowFixture):
+    def setup_method(self):
+        self.setup_flows(4)
+
+    def listed(self, **args):
+        from code_review_graph.tools.flows_tools import list_flows
+
+        args.setdefault("group_duplicates", False)
+        reply = list_flows(repo_root=str(self.root), **args)
+        assert reply["status"] == "ok", reply
+        return reply["flows"]
+
+    def reindex_in_another_order(self):
+        """Rebuild the flows table so every flow gets another id, as a reindex does."""
+        from code_review_graph.flows import store_flows, trace_flows
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, list(reversed(flows)))
+
+    def test_every_flow_carries_the_entry_nodes_qualified_name_and_file(self):
+        for detail in ("standard", "minimal"):
+            for flow in self.listed(detail_level=detail):
+                n = flow["name"].rsplit("_", 1)[-1]
+                assert flow["flow_key"] == f"entry_{n}.py::entry_point_{n}"
+                assert flow["file"] == f"entry_{n}.py"
+
+    def test_get_affected_flows_has_the_key_in_both_detail_levels(self):
+        for detail in ("standard", "minimal"):
+            rows = self.affected(detail_level=detail)["affected_flows"]
+            assert len(rows) == 4
+            assert all(r["flow_key"].startswith("entry_") and r["file"] for r in rows)
+
+    def test_get_flow_returns_the_key_and_accepts_it(self):
+        from code_review_graph.tools.flows_tools import get_flow
+
+        by_id = get_flow(flow_id=self.listed()[0]["id"], repo_root=str(self.root))
+        key = by_id["flow"]["flow_key"]
+        assert key.startswith("entry_") and by_id["flow"]["file"].startswith("entry_")
+        by_key = get_flow(flow_key=key, repo_root=str(self.root))
+        assert by_key["status"] == "ok" and by_key["flow"]["id"] == by_id["flow"]["id"]
+
+    def test_the_key_finds_the_flow_after_ids_change(self):
+        from code_review_graph.tools.flows_tools import get_flow
+
+        before = {f["flow_key"]: f["id"] for f in self.listed()}
+        self.reindex_in_another_order()
+        after = {f["flow_key"]: f["id"] for f in self.listed()}
+        assert before.keys() == after.keys() and before != after  # ids moved, keys did not
+        key = "entry_2.py::entry_point_2"
+        found = get_flow(flow_key=key, repo_root=str(self.root))
+        assert found["flow"]["id"] == after[key] != before[key]
+
+    def test_unknown_key_is_not_found_and_id_still_wins(self):
+        from code_review_graph.tools.flows_tools import get_flow
+
+        missing = get_flow(flow_key="nope.py::nothing", repo_root=str(self.root))
+        assert missing["status"] == "not_found"
+        first = self.listed()[0]
+        both = get_flow(
+            flow_id=first["id"], flow_key="nope.py::nothing", repo_root=str(self.root),
+        )
+        assert both["status"] == "ok" and both["flow"]["id"] == first["id"]

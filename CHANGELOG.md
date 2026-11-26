@@ -4,6 +4,13 @@
 
 ### Added
 
+- Flows have a key that survives a reindex. Flow ids are row numbers and are renumbered when the
+  flows are rebuilt (`onboard_run_outputs` was #323 and became #1). `list_flows_tool`,
+  `get_flow_tool` and `get_affected_flows_tool` (both detail levels) now give every flow
+  `flow_key` (its entry node's qualified name, relative to the repository) and `file`, and
+  `get_flow_tool` takes `flow_key` as a lookup (`flow_id` still wins, then `flow_key`, then
+  `flow_name`). Read from the entry node at query time: no build change, same index fingerprint.
+  The minimal affected-flow rows (also in `detect_changes_tool`) gain the two fields.
 - `pr_blast_radius_tool` pages its `files`: `files_limit` (default 50, at most 200) and `cursor`.
   Before, a pull request of 196 files showed the first 50 with `files_truncated` and no way to
   read the rest. `files_total` gives the full count and `next_cursor` the next page; the cursor is

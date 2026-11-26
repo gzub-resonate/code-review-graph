@@ -798,6 +798,12 @@ group_duplicates: bool = True # merge flows with the same call tree below the en
 Each flow row carries `qualified_name` and `file` of its entry point (relative to
 the repository root), so two flows with the same name can be told apart.
 
+Flow ids are row numbers: a reindex renumbers them (a flow that was #323 became #1). Every flow in
+`list_flows_tool`, `get_flow_tool` and `get_affected_flows_tool` (both detail levels) therefore also
+carries `flow_key`, its entry node's qualified name relative to the repository
+(`src/Foo.java::Foo.bar`), and `file`; `get_flow_tool(flow_key=...)` finds the flow by it. Both are
+read from the entry node at query time, so they need no rebuild and the index fingerprint is unchanged.
+
 A Java flow is named `Class.method` (`OrderController.list`), not by the bare method name.
 Flow ids are unchanged; `get_flow_tool` still finds a flow by its bare method name. Each flow
 has an `entry_kind`: `http` (a route handler; `route` lists `GET /path`), `scheduler`
@@ -814,7 +820,8 @@ them, and `total` counts groups. Pass `group_duplicates=false` for one row per e
 #### `get_flow_tool`
 ```
 flow_id: int | None          # Database ID from list_flows_tool
-flow_name: str | None        # Name to search (partial match); ignored when flow_id is given
+flow_key: str | None         # Stable key from any flow row (entry node qualified name); used when flow_id is not given
+flow_name: str | None        # Name to search (partial match); ignored when flow_id or flow_key is given
 include_source: bool = False # Source snippet per step
 repo_root: str | None
 max_steps: int = 50          # Steps per page (max 200); flow.total_steps reports the full count

@@ -133,8 +133,9 @@ def test_minimal_flow_rows_tell_same_named_entries_apart(built):
     assert len(runs) == 2
     assert {f["file"] for f in runs} == {"app.py", "other/app.py"}
     assert all(f["qualified_name"] == f"{f['file']}::main" for f in runs)
+    assert all(f["flow_key"] == f["qualified_name"] for f in runs)
     assert set(runs[0]) == {
-        "name", "qualified_name", "file", "criticality", "node_count", "entry_kind",
+        "name", "qualified_name", "file", "flow_key", "criticality", "node_count", "entry_kind",
     }
 
 
