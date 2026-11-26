@@ -847,14 +847,22 @@ def _stepfunction_links(
     machine: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="stepfunction"`` branch: what state machines call, joined to its owner."""
+    from .. import not_found_reasons as nfr
+
     definitions = sl.Definitions()
+
+    def annotate(rows, all_repos, _edges, _context):
+        nfr.annotate_stepfunction(rows, definitions._by_repo, all_repos)
+
     result = _infra_links(
         "stepfunction", "Step Functions target(s)", sl.STATUSES, sl.read_target_edges,
         definitions.defines, sl.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
-        path_prefix=path_prefix, machine=machine,
+        path_prefix=path_prefix, machine=machine, annotate=annotate,
     )
+    if target_name and result["total"] == 0 and not result["counts"]:
+        _machine_hint(result, definitions, target_name)
     for row in result["results"]:
         for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
             if isinstance(row.get(key), str):
@@ -862,6 +870,22 @@ def _stepfunction_links(
         if isinstance(row.get("candidates"), list):
             row["candidates"] = [_sanitize_name(str(name)) for name in row["candidates"]]
     return result
+
+
+def _machine_hint(result: dict[str, Any], definitions: Any, name: str) -> None:
+    """Explain an empty ``service=<state machine>`` answer: this origin lists what states call."""
+    from ..registry import Registry
+
+    all_repos = Registry().list_repos()
+    definitions.prefetch(all_repos, cross_repo_workers())
+    key = ("states", "state-machine", "~" + re.sub(r"[-_]", "", name).lower())
+    if any(key in definitions._by_repo.get(str(Path(e["path"])), {}) for e in all_repos):
+        result["hint"] = (
+            f"{name!r} is an indexed state machine. origin=stepfunction lists what Task "
+            "states CALL (a Lambda, ECS task, topic or another machine), not what SDK code "
+            "starts. For who starts or calls this machine use origin=awssdk route=states/"
+            f"{name} (or the machine's callers)."
+        )
 
 
 def _awssdk_links(
@@ -876,7 +900,13 @@ def _awssdk_links(
     include_tests: bool = True,
 ) -> dict[str, Any]:
     """The ``origin="awssdk"`` branch: AWS resources application code calls, joined to owners."""
+    from .. import not_found_reasons as nfr
+
     definitions = sl.Definitions()
+
+    def annotate(rows, all_repos, edges_by_repo, context):
+        nfr.annotate_awssdk(rows, definitions._by_repo, all_repos, edges_by_repo, context)
+
     result = _infra_links(
         "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges,
         definitions.defines, al.resolve_links, "target_name", "target",
@@ -884,6 +914,7 @@ def _awssdk_links(
         read_context=al.read_declare_edges,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
         path_prefix=path_prefix, source=source, include_tests=include_tests,
+        annotate=annotate,
     )
     for row in result["results"]:
         # Every string here was read from a repository's files: none is passed on as written.
@@ -1459,6 +1490,7 @@ def _infra_links(
     source: str | None = None,
     machine: str | None = None,
     include_tests: bool = True,
+    annotate: Any = None,
 ) -> dict[str, Any]:
     """Shared body of the ``terraform``, ``workflow``, ``stepfunction`` and ``awssdk`` origins.
 
@@ -1479,10 +1511,14 @@ def _infra_links(
     *path_prefix*, *source*, *machine* and *include_tests* filter the rows before ``counts``,
     ``total`` and paging, so a page and its cursor only ever hold rows that passed them.
     """
+    from .. import not_found_reasons as nfr
     from ..registry import Registry
 
-    if status is not None and status not in statuses:
-        raise ValueError(f"status must be one of: {', '.join(statuses)}")
+    reason_values = nfr.REASONS_BY_ORIGIN.get(origin, ())
+    if status is not None and status not in statuses + reason_values:
+        raise ValueError(
+            f"status must be one of: {', '.join(statuses + reason_values)}"
+        )
     all_repos = Registry().list_repos()
     selected: list[dict[str, Any]] = all_repos
     unknown_shown: list[str] = []
@@ -1602,6 +1638,8 @@ def _infra_links(
     if origin == "awssdk":
         for r in rows:
             r["is_test"] = is_test_file(r.get("file") or "")
+    if annotate is not None:
+        annotate(rows, all_repos, edges_by_repo, context)
     if path_prefix:
         wanted_path = path_prefix.strip("/")
         rows = [
@@ -1621,8 +1659,9 @@ def _infra_links(
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    reason_counts = nfr.counts_by_reason(rows)
     if status:
-        rows = [r for r in rows if r["status"] == status]
+        rows = [r for r in rows if r["status"] == status or r.get("not_found_reason") == status]
     page = paginate(
         rows, max_results, 100, cursor,
         scope=make_scope(
@@ -1646,6 +1685,7 @@ def _infra_links(
             f"{total} {noun} across {len(selected)} repo(s)" + shown_range(page)
             + (f"; {tests_hidden} test row(s) hidden (include_tests=True shows them)"
                if tests_hidden else "")
+            + nfr.summary_clause(counts, reason_counts)
         ),
         "origin": origin,
         "results": shown,
@@ -1656,6 +1696,8 @@ def _infra_links(
         "unreadable": unreadable,
         **page.fields(),
     }
+    if reason_counts:
+        result["counts_by_reason"] = reason_counts
     if origin == "awssdk":
         result["tests_hidden"] = tests_hidden
     if skipped:

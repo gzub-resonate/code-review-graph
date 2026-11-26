@@ -25,7 +25,8 @@ QUERY_ONLY = {
     "new_code", "pr_blast_radius", "prompts", "refactor", "uncertainty", "exports",
     "visualization", "memory", "http_access_log", "http_origin_guard",
     # cross-repo link passes, run at query time over finished graphs
-    "aws_sdk_links", "stepfunction_links", "terraform_links", "workflow_links",
+    "aws_sdk_links", "stepfunction_links", "not_found_reasons", "terraform_links",
+    "workflow_links",
     "service_aliases", "infra_join", "amqp_join", "amqp_exchanges", "js_route_leads",
     "repo_cache", "trigger_links", "external_hosts", "consumer_join", "config_values",
     # MCP tool front-ends

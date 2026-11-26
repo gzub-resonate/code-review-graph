@@ -4,6 +4,12 @@
 
 ### Added
 
+- `cross_repo_requests_tool` `origin=awssdk` and `origin=stepfunction`: a `not_found` row now also
+  carries `not_found_reason` (`no_owner_lookup`, `declared_name_dynamic`, `test_double`,
+  `data_source_only`, `declared_via_module`, `source_without_unit`, `environment_cluster`,
+  `not_declared_in_registry`), the reply adds `counts_by_reason` and a summary clause, and
+  `status=<reason>` selects those rows. `status` and `counts` are unchanged. `origin=stepfunction`
+  with `service=<indexed state machine>` and no rows adds a `hint` pointing at `origin=awssdk`.
 - `query_graph_tool` `handlers_of` with a route (`POST /v2/respondents/avmap`) no longer needs
   `repo_root`: omit it on a multi-repo server, or pass `"*"`, and every registered repo with a graph
   is asked. The reply names `repos_matched` and tags rows with `repo`, stays small (default 20

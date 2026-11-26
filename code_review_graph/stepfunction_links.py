@@ -144,6 +144,10 @@ class Definitions:
                 found.setdefault(key, "terragrunt_unit")
         for unit in lambda_units(store):
             found[("lambda", "function", unit["name"])] = "lambda_unit"
+        # Facts that only explain a miss (``not_found_reasons``): they never define a target.
+        from .not_found_reasons import read_facts
+
+        read_facts(store, found)
         return found
 
     def defines(self, store: GraphStore, repo_path: Path, target: Any) -> bool:
