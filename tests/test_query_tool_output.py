@@ -7,6 +7,7 @@ rest, and an ambiguous name never reads as "no callers".
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -131,3 +132,96 @@ class TestCalleesOfDefaultsToDirect:
             max_results=1, cursor=first["next_cursor"],
         )
         assert second["results"][0]["name"] != first["results"][0]["name"]
+
+
+@pytest.fixture()
+def wide(tmp_path: Path) -> dict:
+    """One caller of many distinct callees, each only an ambiguous bare name."""
+    root = tmp_path
+    (root / ".code-review-graph").mkdir()
+    svc = (root / "Wide.java").as_posix()
+    with GraphStore(root / ".code-review-graph" / "graph.db") as store:
+        _file(store, svc)
+        _fn(store, svc, "handle", 10)
+        qn = f"{svc}::handle"
+        for index in range(40):
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS", source=qn, target=f"helper{index}", file_path=svc,
+                line=20 + index,
+                extra={"unresolved_targets": [f"cand{n}.helper{index}" for n in range(20)]},
+            ))
+        store.commit()
+        store.refresh_target_resolution()
+    return {"root": str(root), "qn": qn}
+
+
+class TestOutputSize:
+    def test_minimal_drops_edges(self, wide):
+        result = query_graph(
+            pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+            resolution="all", detail_level="minimal",
+        )
+        assert "edges" not in result
+
+    def test_edges_never_outnumber_the_capped_rows(self, wide):
+        result = query_graph(
+            pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+            resolution="all", max_results=7,
+        )
+        assert len(result["results"]) == 7
+        assert len(result["edges"]) == 7
+
+    def test_edges_do_not_repeat_the_candidate_lists_the_rows_carry(self, wide):
+        result = query_graph(
+            pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+            resolution="all",
+        )
+        assert result["results"][0]["candidates"]
+        for edge in result["edges"]:
+            assert "unresolved_targets" not in edge
+            assert edge["unresolved_target_count"] == 20
+        # 40 call sites with 20 candidates apiece was ~90 KB when both lists were spelled out.
+        assert len(json.dumps(result)) < 60_000
+
+
+class TestMinimalHonoursMaxResults:
+    def test_minimal_without_max_results_caps_at_five_and_says_how_to_read_more(self, wide):
+        result = query_graph(
+            pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+            resolution="all", detail_level="minimal",
+        )
+        assert len(result["results"]) == 5
+        assert result["results_omitted"] == 35
+        assert result["next_cursor"]
+        assert "35 more" in result["paging_hint"]
+        assert "max_results" in result["paging_hint"] and "cursor" in result["paging_hint"]
+
+    def test_minimal_honours_an_explicit_max_results(self, wide):
+        result = query_graph(
+            pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+            resolution="all", detail_level="minimal", max_results=50,
+        )
+        assert len(result["results"]) == 40
+        assert result["results_omitted"] == 0
+
+    def test_minimal_honours_an_explicit_smaller_max_results(self, wide):
+        result = query_graph(
+            pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+            resolution="all", detail_level="minimal", max_results=3,
+        )
+        assert len(result["results"]) == 3
+        assert result["results_omitted"] == 37
+
+    def test_standard_default_is_still_one_hundred(self, wide):
+        result = query_graph(
+            pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+            resolution="all",
+        )
+        assert len(result["results"]) == 40
+
+    def test_zero_is_still_rejected(self, wide):
+        with pytest.raises(ValueError):
+            query_graph(
+                pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
+                max_results=0,
+            )

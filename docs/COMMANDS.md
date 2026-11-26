@@ -571,7 +571,7 @@ target: str     # Node name, qualified name, or file path (handlers_of: also a r
                 # endpoints: an optional substring of "<METHOD> <route>")
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
-max_results: int = 100           # Minimal mode also caps visible results at 5
+max_results: int | None          # Default 100, or 5 in minimal mode; an explicit value is honoured in both
 limit: int | None                # Alias of max_results; wins when both are given
 resolution: str | None           # "all", "direct", or "unresolved"; omitted: callees_of "direct",
                                  # callers_of / references_to "all"
@@ -613,6 +613,12 @@ dotted class name (another source root, a nested or static member import), and `
 Rows carry `import_level` (`class`, or `package_wildcard`), and the reply adds
 `importers_level: "class"`, `java_classes` and a `note`. Same-package users write no import and
 are not importers.
+
+`detail_level="minimal"` drops `edges` and shows 5 rows when `max_results` is omitted; an explicit
+`max_results` is honoured in minimal mode too. Whenever rows are cut, `results_omitted` counts them
+and `paging_hint` says how to read the rest (`next_cursor`, or a larger `max_results`). In standard
+mode `edges` are capped with the rows, and for the call-site patterns they no longer repeat the
+candidate lists a row already spells out (the `*_target_count` fields stay).
 
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the

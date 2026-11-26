@@ -40,6 +40,12 @@
 
 ### Changed
 
+- `query_graph_tool` `detail_level="minimal"` honours an explicit `max_results` (it used to cap at 5
+  whatever was asked); with no `max_results` it still shows 5. A cut answer carries `paging_hint`
+  (rows left, `next_cursor` or a larger `max_results`). The call-site patterns' `edges` no longer
+  repeat each row's candidate list (`ambiguous_targets` / `unresolved_targets`; counts stay), which
+  is what made a `callees_of` answer tens of kilobytes. `max_results` still caps rows and `edges`
+  together and minimal still has no `edges`.
 - `query_graph_tool` `callees_of` answers `resolution="direct"` when `resolution` is omitted (it
   was `"all"`): a callee list was mostly bare-name noise (`map`, `stream`, `get`). The summary and
   `hidden_call_sites` say how many name-matched call sites were hidden and how many of them are

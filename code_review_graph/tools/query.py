@@ -143,6 +143,9 @@ _MAX_BARE_TARGET_CANDIDATES = 20
 #: the answer can be split by how certain that edge's target attribution is.
 _CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
 
+#: Rows ``detail_level="minimal"`` shows when the caller gives no ``max_results``.
+_MINIMAL_DEFAULT_ROWS = 5
+
 #: Bare call names that are the JDK, a stream pipeline or a language builtin
 #: rather than project code. ``callees_of`` counts them apart when it hides
 #: bare-name call sites, so the reader sees how much of the noise they were.
@@ -1107,7 +1110,7 @@ def get_impact_radius(
         ``call_site`` it does so at, and ``unresolved_call_sites`` counts the
         call sites that name a changed symbol but were never bound to it.
     """
-    if isinstance(max_results, bool) or max_results < 1:
+    if max_results is not None and (isinstance(max_results, bool) or max_results < 1):
         raise ValueError("max_results must be an integer greater than or equal to 1")
     if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 1:
         raise ValueError("max_files must be an integer greater than or equal to 1")
@@ -1420,7 +1423,7 @@ def query_graph(
     target: str,
     repo_root: str | None = None,
     detail_level: str = "standard",
-    max_results: int = 100,
+    max_results: int | None = None,
     resolution: str | None = None,
     to: str | None = None,
     cursor: str | None = None,
@@ -1443,8 +1446,9 @@ def query_graph(
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
-        max_results: Maximum results to return. Minimal mode additionally caps
-            visible results at five and reports the exact omitted count.
+        max_results: Maximum results to return. Default: 100, or 5 in minimal mode. An
+            explicit value is honoured in both modes; rows beyond the cap are counted in
+            ``results_omitted`` and read with ``next_cursor``.
         resolution: For callers_of/callees_of/references_to, filter rows by how
             certain the edge's target attribution is. "all" keeps both, "direct"
             keeps only calls bound to an indexed node, and "unresolved" keeps only
@@ -1497,7 +1501,7 @@ def query_graph(
         ``result_count`` tests are traced links and how many carry ``inferred_by`` (guessed
         from a callee's test, an ambiguous call or a naming convention).
     """
-    if isinstance(max_results, bool) or max_results < 1:
+    if max_results is not None and (isinstance(max_results, bool) or max_results < 1):
         raise ValueError("max_results must be an integer greater than or equal to 1")
     if resolution is not None and resolution not in QUERY_RESOLUTIONS:
         raise ValueError(
@@ -1544,7 +1548,11 @@ def query_graph(
                     "error": "path_to needs to: the node or file to reach.",
                 }
             return _query_route(store, root, target, to, minimal)
-        response_limit = min(max_results, 5) if minimal else max_results
+        # Minimal mode is a peek unless the caller sized the page themselves.
+        capped_by_default = minimal and max_results is None
+        response_limit = (
+            max_results if max_results is not None else _MINIMAL_DEFAULT_ROWS if minimal else 100
+        )
         if pattern == "external_targets":
             if cursor:
                 raise ValueError("external_targets has no pages; narrow it with a prefix")
@@ -1589,7 +1597,14 @@ def query_graph(
                 return
             results.append(result)
             if edge is not None:
-                edges_out.append(edge_to_dict(edge))
+                edge_dict = edge_to_dict(edge)
+                if pattern in _CALL_SITE_PATTERNS:
+                    # The row spells the candidates once per target; repeating
+                    # up to twenty names per call site is what made one answer
+                    # tens of kilobytes. The counts stay.
+                    edge_dict.pop("ambiguous_targets", None)
+                    edge_dict.pop("unresolved_targets", None)
+                edges_out.append(edge_dict)
 
         # One row per call site means the same node is looked up once per
         # call, so memoize what used to be deduplicated away.
@@ -2467,6 +2482,16 @@ def query_graph(
             ) + f", {results_omitted} omitted"
         elif results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
+        paging_hint: str | None = None
+        if results_omitted and page.next_cursor is not None:
+            paging_hint = (
+                f"{results_omitted} more row(s): pass cursor=<next_cursor> for the next page "
+                "or a larger max_results"
+                + (
+                    f" (minimal mode shows {_MINIMAL_DEFAULT_ROWS} unless max_results is given)"
+                    if capped_by_default else ""
+                )
+            )
         hidden_total = hidden_sites["unresolved"]
         if hidden_total:
             why = f"{hidden_total} name-matched call site(s) hidden" + (
@@ -2563,6 +2588,8 @@ def query_graph(
                 minimal_response["resolution_split"] = resolution_split
             if hidden_total:
                 minimal_response["hidden_call_sites"] = dict(hidden_sites)
+            if paging_hint:
+                minimal_response["paging_hint"] = paging_hint
             if confidence:
                 minimal_response["confidence"] = confidence
             _attach_resolution_notes(
@@ -2590,6 +2617,8 @@ def query_graph(
             response["resolution_split"] = resolution_split
         if hidden_total:
             response["hidden_call_sites"] = dict(hidden_sites)
+        if paging_hint:
+            response["paging_hint"] = paging_hint
         if confidence:
             response["confidence"] = confidence
         _attach_resolution_notes(response, ambiguity, route_endpoints, java_importers)

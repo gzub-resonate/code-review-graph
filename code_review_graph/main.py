@@ -638,7 +638,7 @@ async def query_graph_tool(
     target: str,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
-    max_results: int = 100,
+    max_results: Optional[int] = None,
     resolution: Optional[str] = None,
     to: Optional[str] = None,
     cursor: Optional[str] = None,
@@ -702,8 +702,11 @@ async def query_graph_tool(
             that one non-test symbol has resolves to it; otherwise the answer
             is "ambiguous" and lists qualified names to choose from.
         repo_root: Repository root path. Auto-detected if omitted.
-        detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
-        max_results: Maximum results to return. Default: 100.
+        detail_level: "standard" for full output, "minimal" for a compact summary: no
+            ``edges``, and 5 rows unless ``max_results`` is given. Default: standard.
+        max_results: Maximum results to return. Default: 100 (5 with detail_level="minimal").
+            An explicit value is honoured in both modes and caps ``edges`` as well; rows beyond
+            it are counted in ``results_omitted`` and read with ``next_cursor``.
         resolution: "all", "direct" for only calls bound to an indexed node, or
             "unresolved" for only the bare-name matches. Omitted: callees_of answers
             "direct" (a callee list is mostly bare-name noise: map, stream, get) and the
