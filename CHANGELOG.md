@@ -4,6 +4,17 @@
 
 ### Added
 
+- The Java SQS/SNS and AWS SDK extractors follow one same-file hop to a configuration getter or `@Value` field: a
+  local variable, a no-argument own-class method that only returns it, a resource-lookup wrapper
+  (`helper.getQueueUrl(props.getQueueName())`), a request variable built earlier in the method, and a chained
+  getter (`props.getDynamo().getTableName()`, a placeholder only when the repo's configuration defines the nested
+  key). Ambiguous cases (reassigned or shadowed locals, overloaded or multi-statement methods, parameters) yield
+  no key. This changes the index fingerprint, so every repo is reindexed once. New module `java_config_hops.py`.
+- `cross_repo_requests_tool` `origin="awssdk"`: a row named per profile at build time (`resolved_names`) now
+  reports `target_source: "config"`, and a key defined only in profile-bound documents with differing values
+  reports `target_source: "config"`, `config_profile: "differs"` and the per-profile names in
+  `config_alternatives` (the name stays unresolved; secret-looking values are filtered as before).
+  Query-time only.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
