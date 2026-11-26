@@ -62,6 +62,11 @@ _INFRASTRUCTURE_FIRST_PAGE_ONLY = (
     "first page only; call again without a cursor to read it"
 )
 
+_INFRASTRUCTURE_NO_MATCHES = (
+    "no rows matched the filter, so there is no infrastructure to describe and the block is "
+    "omitted; it describes the repos of the matched rows, never other repos"
+)
+
 _NO_RESULTS_FOR_CURSOR = (
     "the registry no longer holds a repository this cursor can continue; "
     "call again without a cursor to start over"
@@ -1361,14 +1366,45 @@ def _infra_links(
         result["skipped_repos"] = skipped
     if unknown_shown:
         result["unknown"] = unknown_shown
+    reasons: list[str] = []
+    if page.truncated:
+        reasons.append("rows cut at the page size (see next_cursor)")
+    if skipped:
+        reasons.append(
+            f"time budget spent, {len(skipped)} repo(s) not read (see skipped_repos)"
+        )
     phase = _now()
-    if infrastructure and page.offset == 0:
-        _attach_infrastructure(result, all_repos, selected, budget)
+    # A filter narrows the answer to some repos; the block then describes those, not every
+    # selected repo (which would present unrelated repos as part of the result).
+    scoped = bool(target_repo or target_path or status)
+    if infrastructure and scoped:
+        owners = {
+            r[key] for r in rows for key in ("repo", "target_repo", "module_repo", "client_repo")
+            if isinstance(r.get(key), str)
+        }
+        described = [
+            e for e in all_repos if _sanitize_name(_repo_label(e)) in {
+                _sanitize_name(o) for o in owners
+            }
+        ]
+    else:
+        described = selected
+    if infrastructure and scoped and not described:
+        result["infrastructure_note"] = _INFRASTRUCTURE_NO_MATCHES
+    elif infrastructure and page.offset == 0:
+        _attach_infrastructure(result, all_repos, described, budget)
+        if result["infrastructure"]["truncated"]:
+            reasons.append(
+                "the infrastructure block stopped at its repo cap or the time budget "
+                "(see infrastructure.truncated, repos_not_checked)"
+            )
     elif infrastructure:
         # The block describes the selected repos, not the rows, so a continuation page leaves
         # it out (the first page has it) instead of rebuilding it for every page.
         result["infrastructure_note"] = _INFRASTRUCTURE_FIRST_PAGE_ONLY
     timings["infrastructure"] = _now() - phase
+    if result["truncated"] and reasons:
+        result["truncated_reason"] = "; ".join(reasons)
     elapsed = _now() - started
     # The server does not configure INFO logging, so a slow call is logged as a warning.
     logger.log(
