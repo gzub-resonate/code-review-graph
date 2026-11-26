@@ -1072,8 +1072,8 @@ async def get_flow_tool(
     max_steps: int = 50,
     max_source_lines: int = 400,
     cursor: Optional[str] = None,
-    detail_level: str = "standard",
     flow_key: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Get detailed information about a single execution flow.
 
@@ -2119,9 +2119,9 @@ async def pr_blast_radius_tool(
     depth: int = 3,
     include_external: bool = True,
     repo_root: Optional[str] = None,
-    detail_level: str = "standard",
     files_limit: int = 50,
     cursor: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Blast radius of a pull request, read from its changed files and the base graph.
 
