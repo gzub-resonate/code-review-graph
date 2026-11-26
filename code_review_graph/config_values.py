@@ -30,6 +30,16 @@ from typing import Optional
 
 from .config_keys import is_secret_key, normalize_spring_config_key
 
+# Text from a repository that may appear in the ``via`` trail an MCP client reads: only the
+# characters of a resource name, so free text (an instruction aimed at a model), control
+# characters and bidi marks never reach the reply.
+_SHOWN = re.compile(r"[A-Za-z0-9._:/${}\-]{1,128}")
+
+
+def _shown(text: str) -> str:
+    """*text* when it is name-shaped, else ``<not shown>``."""
+    return text if _SHOWN.fullmatch(text) else "<not shown>"
+
 DEFAULT_PROFILE = "default"
 _PLACEHOLDER = re.compile(r"\$\{([^${}]*)\}")
 _PROFILE_FILE = re.compile(
@@ -183,10 +193,11 @@ class ConfigValues:
                         continue
                     inner = self._expand(got[0], source, root, (*trail, canon), via, env)
                     if inner is not None:
-                        via.append(f"${{{name}}} = property {name} ({source})")
+                        shown = _shown(name)
+                        via.append(f"${{{shown}}} = property {shown} ({_shown(source)})")
                         return inner
         if default is not None and default.strip():
-            via.append(f"${{{name}}} = default {default.strip()!r}")
+            via.append(f"${{{_shown(name)}}} = default {_shown(default.strip())}")
             return default.strip()
         if name and re.fullmatch(r"[A-Za-z0-9_.\-]{1,64}", name) and not env:
             env.append(name)
@@ -216,7 +227,7 @@ class ConfigValues:
             steps: list[str] = []
             value = self._expand(got[0], profile, root, (canonical(key),), steps, env)
             if value is not None and value.strip():
-                expanded[profile] = (value.strip(), [f"{key} = {got[0]}", *steps])
+                expanded[profile] = (value.strip(), [f"{_shown(key)} = {_shown(got[0])}", *steps])
         if not expanded:
             result.reason = "env_placeholder" if env else "no_value"
             result.env_placeholder = env[0] if env else None
