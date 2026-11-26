@@ -437,3 +437,20 @@ def test_one_failing_repo_does_not_stop_the_others(tmp_path, registry, monkeypat
     reply = search(query="getMetricsBatch")
     assert reply["repos_searched"] == ["a", "c"]
     assert {row["repo"] for row in reply["results"]} == {"a", "c"}
+
+
+def test_a_search_cut_by_the_per_repo_limit_says_more_exist(tmp_path, registry):
+    many = [f"loadWidget{i:02d}" for i in range(30)]
+    named_repo(tmp_path, registry, "wide", many)
+    named_repo(tmp_path, registry, "narrow", ["loadWidgetOnly"])
+    capped = search(query="loadWidget", limit=12, max_results=12)
+    assert len(capped["results"]) <= 12
+    # 12 rows is not the number of matches: the reply must not read as complete.
+    assert capped["truncated"] is True
+    assert capped["total_is_lower_bound"] is True
+    assert capped["repos_capped"] == ["wide"] and capped["repos_capped_total"] == 1
+    assert "more matches than limit=12" in capped["summary"]
+    # Raising limit past the matches shows the whole list and drops the markers.
+    whole = search(query="loadWidget", limit=50, max_results=100, repos=["narrow"])
+    assert "total_is_lower_bound" not in whole and whole["repos_capped_total"] == 0
+    assert whole["truncated"] is False

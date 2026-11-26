@@ -1,7 +1,7 @@
 # Documentation Index
 
 - [USAGE.md](USAGE.md): install, configure, and use the CLI and MCP tools
-- [COMMANDS.md](COMMANDS.md): reference for the CLI commands and their exit codes, the 32 MCP tools, 5 MCP prompts, and skills
+- [COMMANDS.md](COMMANDS.md): reference for the CLI commands and their exit codes, the 33 MCP tools, 5 MCP prompts, and skills
 - [FAQ.md](FAQ.md): how it compares to LSP, RAG, grep, and similar tools; when not to use it
 - [FEATURES.md](FEATURES.md): release highlights by version
 - [CHANGELOG.md](../CHANGELOG.md): every change by release, with upgrade notes

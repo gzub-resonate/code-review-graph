@@ -631,6 +631,7 @@ alias = "project-b"
 | `cross_repo_search_tool` | 登録済みのリポジトリを検索。`repos` で対象を絞り込める |
 | `cross_repo_requests_tool` | Spring Feign の呼び出しを、他の登録済みリポジトリ内の対応するエンドポイントに結び付ける。Feign のサービス名は、任意のエイリアスファイルか、リポジトリが宣言する名前（Spring アプリケーション名、ECS サービス、ECR リポジトリ。[docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) を参照）でリポジトリに届く。`origin="awssdk"` は AWS SDK の呼び出しを結び付け、プロファイルごとに Spring 設定から読んだ名前も含む（保存するのはリソース名のみ。[docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration) を参照） |
 | `pr_blast_radius_tool` | プルリクエストの変更ファイル（新規ファイルを含む）を Git から読み、ベースのグラフをたどって影響範囲を求める |
+| `transitions_of_tool` | Step Functions のステートマシン 1 つの全遷移を 1 回の呼び出しで返す（遷移元、遷移先、種別、Choice の条件、行番号） |
 
 **MCP プロンプト**（5 つのワークフローテンプレート）:
 `review_changes`、`architecture_map`、`debug_issue`、`onboard_developer`、`pre_merge_check`

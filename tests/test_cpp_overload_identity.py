@@ -129,7 +129,7 @@ void caller() { process(1); }
     assert exact["status"] == "ok"
     assert exact["results"] == []
 
-    callees = query_graph("callees_of", caller, repo_root=str(tmp_path))
+    callees = query_graph("callees_of", caller, repo_root=str(tmp_path), resolution="all")
     assert callees["status"] == "ok"
     assert callees["results"] == [{
         "kind": "Function",
@@ -372,7 +372,7 @@ def test_cpp_candidate_metadata_is_bounded_and_reports_truncation(tmp_path: Path
     finally:
         store.close()
 
-    callees = query_graph("callees_of", caller, repo_root=str(tmp_path))
+    callees = query_graph("callees_of", caller, repo_root=str(tmp_path), resolution="all")
     assert len(callees["results"][0]["candidates"]) == 20
     assert callees["results"][0]["candidate_count"] == 25
     assert callees["results"][0]["candidates_truncated"] is True
@@ -427,7 +427,7 @@ void caller() { A::unique(); A::overloaded(1); N::helper(); }
     finally:
         store.close()
 
-    callees = query_graph("callees_of", caller, repo_root=str(tmp_path))
+    callees = query_graph("callees_of", caller, repo_root=str(tmp_path), resolution="all")
     ambiguous_result = next(
         result
         for result in callees["results"]
@@ -1223,6 +1223,6 @@ def test_non_cpp_scoped_unresolved_callee_query_behavior_stays_unchanged(
     finally:
         store.close()
 
-    result = query_graph("callees_of", caller, repo_root=str(tmp_path))
+    result = query_graph("callees_of", caller, repo_root=str(tmp_path), resolution="all")
     assert result["status"] == "ok"
     assert result["results"] == []

@@ -571,14 +571,23 @@ target: str     # Node name, qualified name, or file path (handlers_of: also a r
                 # endpoints: an optional substring of "<METHOD> <route>")
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
-max_results: int = 100           # Minimal mode also caps visible results at 5
+max_results: int | None          # Default 100, or 5 in minimal mode; an explicit value is honoured in both
 limit: int | None                # Alias of max_results; wins when both are given
-resolution: str = "all"          # "all", "direct", or "unresolved"
+resolution: str | None           # "all", "direct", or "unresolved"; omitted: callees_of "direct",
+                                 # callers_of / references_to "all"
+hide_unresolved: bool = False    # callees_of: also hide bare-name and JDK/stream/builtin calls
 to: str | None                   # path_to only: the node or file to reach
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 direction: str | None            # endpoints only: "inbound", "outbound" or "simulator"
 strict: bool = False             # handlers_of / references_to: keep the "ambiguous" answer
 ```
+**Step Functions patterns.** `next_states_of` and `previous_states_of` take a state. With
+`detail_level="minimal"` the names come with a compact `edges` list, one `{target, via, condition,
+line}` per state (`conditions` when several Choice rules reach it); `standard` keeps the full edge
+rows. `children_of` on a `*.asl.json` file lists the states of its machine (nested ones too, in
+file order; several machines are listed with `state_count`) and says so in `note`;
+`children_of` on `<file>::<machine>` still lists the top-level states.
+
 **`endpoints`** lists `Endpoint` nodes as one line each,
 `METHOD route owner file:line dir` (space separated, `dir` is `in`, `out` or `sim`), sorted
 by route, with `direction_counts` over everything the `target` substring matches, whatever its
@@ -604,6 +613,29 @@ route: `POST /v1/items`, `/v1/items/{id}`, `GET /items/{itemId}`. Path variables
 `<id>`) are equal, case and a trailing slash do not matter, a route that ends with the given path
 on a segment boundary matches when the full one does not, and the reply lists
 `matched_endpoints`.
+`requesters_of` takes the same route targets and matches Endpoint nodes only (outbound client endpoints
+included), so a route no longer resolves to classes or methods that share its words; with several matching
+endpoints each row names its `endpoint`, and a route no endpoint has is `not_found`.
+
+**`callers_of` on a shared name.** A name several nodes have (two classes called
+`VerticalRefreshMgr`, a method every subclass defines) still answers `ambiguous` with no rows, but
+the answer can no longer be read as "no callers": the summary starts `AMBIGUOUS, not 'no callers'`,
+the summary gives the `direct_callers` of the top candidates (distinct callers bound to it by a call
+edge; bare-name matches are not counted), standard-mode candidates carry `direct_callers` and the
+reply adds `total_direct_callers`. In minimal mode the rows stay two keys, with the counts in the
+summary.
+`file_hint` may also be written inside `target` as `path/File.java::name` when no node has that
+exact qualified name: the part before `::` is used as the file hint when it looks like a path (a
+separator or an extension), so `Foo::bar` is untouched.
+
+**A route needs no `repo_root`.** `handlers_of` with a route (`POST /v2/respondents/avmap`)
+names an endpoint, not a repository. On a `--multi-repo` server `repo_root` may be omitted, and
+anywhere `repo_root="*"` asks every registered repo that has a graph. The reply lists
+`repos_matched` (repo, handler count, `matched_endpoints`), tags each row with its `repo`, caps rows
+at `max_results` (default 20, at most ten per repo; `results_omitted` counts the rest) and counts
+`repos_searched`, `repos_without_graph`, `repos_unreadable` and `repos_skipped` (call budget). It
+has no `edges` and no cursor; pass `repo_root` for one repo's full answer. A name that is not a
+route, and every other pattern, still needs one repo and keeps the `repo_root is required` error.
 
 **Java importers.** Java imports are by class, so `importers_of` on a Java file path reads the
 classes the file declares: importers the build bound to the file, imports that kept the
@@ -612,16 +644,32 @@ Rows carry `import_level` (`class`, or `package_wildcard`), and the reply adds
 `importers_level: "class"`, `java_classes` and a `note`. Same-package users write no import and
 are not importers.
 
+`detail_level="minimal"` drops `edges` and shows 5 rows when `max_results` is omitted; an explicit
+`max_results` is honoured in minimal mode too. Whenever rows are cut, `results_omitted` counts them
+and `paging_hint` says how to read the rest (`next_cursor`, or a larger `max_results`). In standard
+mode `edges` are capped with the rows, and for `callees_of` only the first edge of each target
+keeps its `ambiguous_targets` / `unresolved_targets` list, as its row does (the `*_target_count`
+fields stay on every edge).
+
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the
 call is written outside the row's own `file_path`), and rows whose target was
 matched by bare name alone carry `target_resolution: "unresolved"`. The response
 adds `distinct_nodes` and a `resolution_split` of the whole answer. When some of
 the rows are only name matches and `resolution` is `"all"`, a short `confidence`
-sentence says how many. Call sites
+sentence says how many. `callees_of` answers `"direct"` when `resolution` is omitted, because a
+callee list is mostly bare-name noise (`map`, `stream`, `get`; on Python nearly every call is only
+name-matched). The reply never hides that silently: the summary says how many name-matched call
+sites were hidden (and how many of them are JDK, stream or builtin names), `hidden_call_sites`
+(`unresolved`, `well_known`) carries the counts, and a zero-row answer says it is not "no calls".
+Pass `resolution="all"` for the earlier behaviour. `hide_unresolved=true` hides every bare-name
+call site and every bare call to a well-known name even under `resolution="all"`. Call sites
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller. Within that order, calls bound to a node come
 before bare-name guesses.
+
+`publishers_of` and `listeners_of` rows carry `call_site` (`line`, plus `file` when it differs from the row's
+`file_path`) in every detail level, `minimal` included.
 
 A target written `external:<kind>:<name>`, such as `external:aws-lambda:order-validator`
 or `external:github-actions:actions/checkout`, names code outside the repository. No node
@@ -728,6 +776,11 @@ as `.yml` or `.json`, a dotted key such as `spring.datasource.url`, or one of th
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
 says there may be more.
 
+A `ConfigProperty` hit (standard detail) carries `value`, plus `value_truncated` and `doc_profiles` when present: the
+literal stored at index time, at most 200 characters. Values of secret-looking keys, credentials, tokens and long
+random strings are dropped at parse time and filtered again on the way out, so they never appear. `query_graph_tool`
+`file_summary` rows of a configuration file carry the same fields.
+
 `include_source=True` lets you answer from the reply instead of opening the
 files. All snippets share one budget of 240 lines, or 700 with
 `expand_neighbors=True`, which adds up to four callers and callees for each of
@@ -798,6 +851,12 @@ group_duplicates: bool = True # merge flows with the same call tree below the en
 Each flow row carries `qualified_name` and `file` of its entry point (relative to
 the repository root), so two flows with the same name can be told apart.
 
+Flow ids are row numbers: a reindex renumbers them (a flow that was #323 became #1). Every flow in
+`list_flows_tool`, `get_flow_tool` and `get_affected_flows_tool` (both detail levels) therefore also
+carries `flow_key`, its entry node's qualified name relative to the repository
+(`src/Foo.java::Foo.bar`), and `file`; `get_flow_tool(flow_key=...)` finds the flow by it. Both are
+read from the entry node at query time, so they need no rebuild and the index fingerprint is unchanged.
+
 A Java flow is named `Class.method` (`OrderController.list`), not by the bare method name.
 Flow ids are unchanged; `get_flow_tool` still finds a flow by its bare method name. Each flow
 has an `entry_kind`: `http` (a route handler; `route` lists `GET /path`), `scheduler`
@@ -808,13 +867,16 @@ targets, each with `via`: `listener` or `poll`), `event` (`@EventListener`), `ma
 Flows whose call tree below the entry is the same set of nodes (a public and an admin
 controller calling one service method) are one row: the most critical stands for the group and
 `entry_points` lists every entry (`flow_id`, `name`, `entry_kind`, `route`), `group_size` counts
-them, and `total` counts groups. Pass `group_duplicates=false` for one row per entry.
+them, and `total` counts groups. When merging removed flows, `total_before_grouping` and the summary
+(`329 execution flow(s) (594 before merging duplicates; ...)`) give the unmerged count. Pass
+`group_duplicates=false` for one row per entry.
 `get_flow_tool` lists the other flows with the same call tree under `same_call_tree_as`.
 
 #### `get_flow_tool`
 ```
 flow_id: int | None          # Database ID from list_flows_tool
-flow_name: str | None        # Name to search (partial match); ignored when flow_id is given
+flow_key: str | None         # Stable key from any flow row (entry node qualified name); used when flow_id is not given
+flow_name: str | None        # Name to search (partial match); ignored when flow_id or flow_key is given
 include_source: bool = False # Source snippet per step
 repo_root: str | None
 max_steps: int = 50          # Steps per page (max 200); flow.total_steps reports the full count
@@ -935,6 +997,7 @@ detail_level: str = "standard"   # "minimal" drops file paths
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
 include_non_code: bool = False   # also report docs, lockfiles, tooling as gaps
+exclude_data_types: bool = False # leave enums, records, Lombok/accessor-only classes out of untested_hotspots
 ```
 Documentation sections (`DocSection`), lockfile entries (`package-lock.json`,
 `.terraform.lock.hcl`, `uv.lock` and the like), Dockerfile stages and anything
@@ -958,6 +1021,10 @@ shows no covering test for: no direct test and none reaching it through test
 helpers. A test of something it only calls does not count, so the two tools
 agree. A community made only of JSON or YAML paths is a config document and is
 not reported as `thin_communities` or `single_file_communities`.
+
+`exclude_data_types=true` leaves data carriers (enums, records, Lombok or accessor-only Java classes, dataclasses,
+data-only TS types) out of `untested_hotspots` before ranking, with the same meaning and the same default (`false`) as
+on `get_hub_nodes_tool`; `data_types_excluded` counts them. A cursor made with one value is refused for the other.
 
 An `import_cycles` row is one group of files that import each other: `size` is
 how many files, `name` and `cycle` spell out one loop with its import lines, and
@@ -1112,11 +1179,28 @@ limit: int = 20              # Results per repo
 max_results: int = 50        # Merged results across searched repos (max 100)
 repos: list[str] | None      # Aliases or folder names; default: every registered repo
 cursor: str | None           # next_cursor of the previous reply (see Paging)
+include_repo_list: bool = False  # Return repos_searched (names) even for more than 10 repos
+include_fuzzy: bool = False  # Keep fuzzy/tokens rows (hidden when an exact hit exists; capped when none does)
+match: str = "fuzzy"         # fuzzy | exact (exact: only exact, exact_ci and qualified rows)
 ```
+
+The reply's `exact` is `"found"` or `"none"`, and the summary says `exact: none` when no row has the query as
+its name. With `match="fuzzy"` (default) and no exact hit, `fuzzy` rows that share fewer than half of the
+query's words are dropped and at most 10 are kept (an unmatched hyphenated name returned 600 rows, ~25 KB);
+`fuzzy_dropped` and the summary say how many were hidden, and `include_fuzzy=true` returns them all.
+`match="exact"` returns only exact rows and counts the rest in `fuzzy_dropped`.
+
+`repos_searched_total` is the number of repos searched. `repos_searched` (their names) is returned only
+for 10 repos or fewer, or with `include_repo_list=true`; it was ~2.5 KB on a 122-repo registry.
 
 `repos` limits the search to named registry entries. Matching is exact and
 case-sensitive; paths are not accepted. An alias match wins over a folder-name
 match.
+
+`limit` caps the rows of each repo. A repo that has more matches than `limit` is listed in `repos_capped`
+(`repos_capped_total`); `total` is then a lower bound (`total_is_lower_bound: true`, `Found N+` in the summary) and
+`truncated` is true even when there is no `next_cursor`: raise `limit` to see the rest. `max_results` still caps the
+rows returned.
 
 Scores are not comparable between repos, so results are ordered by match tier first,
 then by each repo's local rank, with registry order as the tie-breaker. Every row has a
@@ -1129,8 +1213,8 @@ return carry `score` 0.
 
 The call has a time budget, `CRG_CROSS_REPO_BUDGET_SECONDS` (default 300, `0` = no limit).
 When it is spent no further repo is started: the ones not searched are listed in
-`skipped_repos` (capped at 20; `skipped_repos_total` and `skipped_repos_truncated` give
-the real count), `truncated` is set and the summary says so. The first repo always runs.
+`skipped_repos` (always listed in full; `skipped_repos_total` is the count and
+`skipped_repos_truncated` is always false), `truncated` is set and the summary says so. The first repo always runs.
 Up to `CRG_CROSS_REPO_WORKERS` repos (default 4, `1` = one at a time, at most 32) are
 searched at once, each on its own graph connection; the rows are ordered the same way
 whichever search finishes first.
@@ -1158,14 +1242,32 @@ max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js | terraform | workflow | stepfunction | awssdk; default: feign and js
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
+include_repo_list: bool = False  # Feign/js: return repos_searched (names) even for more than 10 repos
+path_prefix: str | None      # awssdk, stepfunction: only rows whose file is this repo-relative path or below it
+source: str | None           # awssdk: only rows whose source symbol equals this, ends with it after "." or lies below it
+machine: str | None          # stepfunction: only rows of this state machine (exact name)
+include_tests: bool = True   # awssdk: False hides rows from test files; every row has is_test
 ```
+
+`awssdk` rows carry `is_test` (a test directory or test file name). `include_tests` defaults to True, so counts
+are as before; with `include_tests=false` the reply gives `tests_hidden` and the summary says how many rows were
+hidden. `path_prefix`, `source`, `machine` and `include_tests` filter before `counts`, `total` and paging (they
+reach rows a path-sorted page of 100 never got to) and a cursor is refused for different values. Each is refused
+for an origin it does not apply to.
+
+For the Feign and JS/TS origins `repos_searched_total` is the number of repos read and `repos_searched`
+(the names) is returned only for 10 repos or fewer, or with `include_repo_list=true`. `skipped_repos` is
+always listed in full.
+
+A `matched` row whose `candidates_total` is above 1 also has `multiple_candidates: true` (the status value is
+unchanged); the reply's `multiple_candidates_total` and its summary count those rows.
 
 `origin="terraform"` lists the remote Terraform module sources (`git::...//modules/x`) the repos name and the
 registered repo and folder each one resolves to. `service` filters by module repo name, `route` by module folder
 prefix, and `status` is `matched`, `module_not_found`, `ambiguous` or `repo_not_registered`. Run it with
 `service=<module repo>` to see which stacks use a module.
 
-`origin="terraform"`, `"stepfunction"` and `"awssdk"` also return an `infrastructure` object that relates each
+`origin="terraform"`, `"stepfunction"` and `"awssdk"` also return an `infrastructure` object (first page only; a page reached with `cursor` carries `infrastructure_note` instead) that relates each
 selected repository to the infrastructure declared for it in any registered repository: ECR repositories, ECS
 services and task-definition families, Terragrunt stack and Terraform module directories whose name equals the
 repository's name or alias, and declared queues, buckets, topics and tables its code names (written out or
@@ -1539,6 +1641,24 @@ When the time budget is checked with more than one worker, up to `workers - 1` r
 after it ran out. The server log has one `cross-repo <origin>:` line per call with the seconds each
 phase took (`read`, `context`, `prefetch`, `resolve`, `infrastructure`).
 
+#### `transitions_of_tool`
+```
+machine: str                 # Machine name, <file>::<machine>, or the *.asl.json file
+repo_root: str | None        # Repository root; auto-detected
+detail_level: str = "standard"   # "standard" rows are dicts; "minimal" rows are one string each
+max_results: int = 200       # Rows per page (at most 500)
+cursor: str | None           # next_cursor of the previous reply (see Paging)
+```
+
+Every transition of one Step Functions state machine in one reply, instead of one `next_states_of`
+call per state. Rows follow the file order and cover nested Parallel and Map states. A standard row
+is `{from, to, kind, condition?, line, errors?}`; a minimal row is
+`"from -> to | kind | condition | Lline"`. `kind` is `Next`, `Choice`, `Default`, `Catch`, `Branch`
+or `Map`. A Choice `condition` is read from the file while it is the one that was indexed (the graph
+never stores it); otherwise `note` counts the conditions left out. The reply carries `state_count`
+and `transition_count` for the whole machine, and pages with `next_cursor`. A name that matches
+several machines answers `ambiguous` with their qualified names. Query-time only: no index change.
+
 #### `pr_blast_radius_tool`
 ```
 pr: int | None               # Pull request number; the server fetches refs/pull/<pr>/head from origin
@@ -1547,6 +1667,8 @@ base: str | None             # The branch the PR merges into; default: the remot
 depth: int = 3               # Hops the reach walk follows from a changed symbol (max 6)
 include_external: bool = True  # Join affected endpoints to client calls in the other registered repos
 repo_root: str | None        # Repository root; auto-detected
+files_limit: int = 50        # File rows per page (max 200)
+cursor: str | None           # next_cursor of the previous reply, to read the next page of files
 ```
 
 The graph holds the default branch, so a pull request's new files are not in it. This tool reads only the files the
@@ -1570,7 +1692,11 @@ lists the DDL in migration files the pull request adds or changes. `notes` state
 pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow
 clone without a merge base, Python routes whose router prefix sits in a file the pull request does not touch, and files
 that could not be parsed. At most 300 files are parsed per request; lists are capped, with `files_truncated` and
-`external_callers_total` reporting the real size.
+`external_callers_total` reporting the real size. `files` pages: `files_total` is the full count, and when
+`files_truncated` is true `next_cursor` returns the next `files_limit` rows (a later page has `offset`). A cursor is
+refused for another `pr`, `head`, `base`, `depth` or `include_external`, or when the changed files differ now. Only
+the first page carries `endpoints`, `contract_changes`, `same_file_endpoints`, `config_changes`, `external_callers`
+and `schema_changes`; a later page says so in `continuation_note`.
 
 ## Result Bounds
 

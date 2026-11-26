@@ -361,6 +361,7 @@ class TestCrossRepoAmqp:
 
     def test_repos_left_after_the_budget_are_named(self, two_repos, monkeypatch):
         monkeypatch.setenv("CRG_CROSS_REPO_BUDGET_SECONDS", "1")
+        monkeypatch.setenv("CRG_CROSS_REPO_WORKERS", "1")
         clock = iter([0.0, 0.5, 5.0, 5.0, 5.0])
         monkeypatch.setattr(registry_tools, "_now", lambda: next(clock))
         reply = cross_repo_requests_func(origin="amqp", service="orders.exchange")
@@ -500,3 +501,17 @@ class TestAmqpPages:
                 origin="amqp", service="other.exchange", max_results=3,
                 cursor=first["next_cursor"],
             )
+
+
+class TestMinimalKeepsTheCallSiteLine:
+    @pytest.mark.parametrize("pattern", ["publishers_of", "listeners_of"])
+    def test_minimal_rows_carry_the_call_site_line(self, repo, pattern):
+        edges = {
+            e["source"].rsplit("::", 1)[-1]: e["line"]
+            for e in query_graph(pattern, EXCHANGE, repo_root=str(repo))["edges"]
+        }
+        assert edges
+        reply = query_graph(pattern, EXCHANGE, repo_root=str(repo), detail_level="minimal")
+        assert reply["result_count"] == len(edges)
+        for row in reply["results"]:
+            assert row["call_site"]["line"] == edges[row["name"]], row

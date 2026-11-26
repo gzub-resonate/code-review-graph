@@ -14,7 +14,7 @@ from .graph import GraphStore
 
 __all__ = [
     "LIST_STATUSES", "MATCHED", "UNLISTENED", "UNPUBLISHED", "Exchange", "exchange_status",
-    "list_exchange_names", "new_exchange", "add_edges", "render",
+    "list_exchange_names", "new_exchange", "add_edges", "render", "in_scope_edges", "is_queue",
 ]
 
 UNLISTENED = "unlistened"
@@ -58,12 +58,24 @@ def new_exchange() -> Exchange:
         "publishers": 0, "listeners": 0,
         "publisher_repos": set(), "listener_repos": set(),
         "routing_keys": set(), "binding_keys": set(),
+        # Edges that name an exchange, and edges that name only a queue.
+        "exchange_edges": 0, "queue_edges": 0,
+        "scope_publishers": 0, "scope_listeners": 0,
     }
 
 
-def add_edges(entry: Exchange, repo: str, edges: list[dict[str, Any]]) -> None:
-    """Fold one repo's edges of one exchange into *entry* (values must be sanitised by caller)."""
+def add_edges(
+    entry: Exchange, repo: str, edges: list[dict[str, Any]], in_scope: bool = True,
+) -> None:
+    """Fold one repo's edges of one exchange into *entry* (values must be sanitised by caller).
+
+    *in_scope* says the repo is one the caller selected: the totals always count every repo
+    (a status is about all of them), the ``scope_*`` counts only the selected ones.
+    """
     for edge in edges:
+        if in_scope:
+            entry["scope_publishers" if edge["role"] == "publisher" else "scope_listeners"] += 1
+        entry["queue_edges" if edge.get("kind") == aj.KIND_QUEUE else "exchange_edges"] += 1
         if edge["role"] == "publisher":
             entry["publishers"] += 1
             entry["publisher_repos"].add(repo)
@@ -78,19 +90,35 @@ def add_edges(entry: Exchange, repo: str, edges: list[dict[str, Any]]) -> None:
                 entry["binding_keys"].add(key)
 
 
+def in_scope_edges(entry: Exchange) -> int:
+    """How many edges of the name sit in the repos the caller selected."""
+    return int(entry["scope_publishers"] + entry["scope_listeners"])
+
+
+def is_queue(entry: Exchange) -> bool:
+    """Whether every edge of the name only names a queue (a listener on a queue, or a publish
+    on the default exchange): such a name is not an exchange and has no exchange status."""
+    return entry["queue_edges"] > 0 and entry["exchange_edges"] == 0
+
+
 def has_key_containing(entry: Exchange, needle: str) -> bool:
     """Whether any routing key or binding key seen on the exchange contains *needle*."""
     return any(needle in k for k in entry["routing_keys"] | entry["binding_keys"])
 
 
-def render(name: str, entry: Exchange) -> dict[str, Any]:
+def render(name: str, entry: Exchange, scoped: bool = False) -> dict[str, Any]:
     """The row of one exchange; long name lists are cut at ``MAX_LISTED`` with a ``*_total``."""
+    queue = is_queue(entry)
     row: dict[str, Any] = {
-        "exchange": name,
+        ("queue" if queue else "exchange"): name,
+        "kind": aj.KIND_QUEUE if queue else aj.KIND_EXCHANGE,
         "status": exchange_status(entry["publishers"], entry["listeners"]),
         "publisher_count": entry["publishers"],
         "listener_count": entry["listeners"],
     }
+    if scoped:
+        row["scoped_publisher_count"] = entry["scope_publishers"]
+        row["scoped_listener_count"] = entry["scope_listeners"]
     for field, source in (
         ("publisher_repos", "publisher_repos"), ("listener_repos", "listener_repos"),
         ("routing_keys", "routing_keys"), ("binding_keys", "binding_keys"),

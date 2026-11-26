@@ -101,7 +101,7 @@ class TestAwsSdkPages:
         assert rows == everything["results"]
         assert last["truncated"] is False
 
-    def test_the_infrastructure_block_comes_with_every_page(self, infra_world):  # noqa: F811
+    def test_the_infrastructure_block_comes_with_the_first_page_only(self, infra_world):  # noqa: F811
         first = cross_repo_requests_func(
             origin="awssdk", repos=["inventory-svc"], max_results=1,
         )
@@ -109,7 +109,34 @@ class TestAwsSdkPages:
             origin="awssdk", repos=["inventory-svc"], max_results=1,
             cursor=first["next_cursor"],
         )
-        assert "infrastructure" in first and "infrastructure" in second
+        assert "infrastructure" in first and "infrastructure_note" not in first
+        assert "infrastructure" not in second
+        assert "first page only" in second["infrastructure_note"]
+        # Paging itself is untouched: the cursor chain still reaches the end.
+        assert second["offset"] == 1 and second["results"]
+
+    def test_a_continuation_does_not_build_the_block(self, infra_world, monkeypatch):  # noqa: F811
+        first = cross_repo_requests_func(
+            origin="awssdk", repos=["inventory-svc"], max_results=1,
+        )
+        calls = []
+        monkeypatch.setattr(
+            rt, "_attach_infrastructure", lambda *a, **k: calls.append(1),
+        )
+        cross_repo_requests_func(
+            origin="awssdk", repos=["inventory-svc"], max_results=1,
+            cursor=first["next_cursor"],
+        )
+        assert calls == []
+
+    def test_a_stale_cursor_is_still_refused(self, infra_world):  # noqa: F811
+        first = cross_repo_requests_func(
+            origin="awssdk", repos=["inventory-svc"], max_results=1,
+        )
+        with pytest.raises(CursorError):
+            cross_repo_requests_func(
+                origin="awssdk", repos=["other"], max_results=1, cursor=first["next_cursor"],
+            )
 
 
 class TestSlowCallIsLogged:
@@ -166,3 +193,43 @@ class TestInfrastructureNamesWhatItSkipped:
             origin="stepfunction", repos=block["repos_not_checked"], max_results=100,
         )
         assert again["infrastructure"]["truncated"] is False
+
+
+class TestFilteredInfrastructure:
+    """A target filter scopes the infrastructure block to the repos the rows belong to."""
+
+    def test_no_rows_means_no_unrelated_infrastructure_block(self, infra_world):  # noqa: F811
+        reply = cross_repo_requests_func(
+            origin="stepfunction", service="no-such-target", repos=["inventory-svc"],
+        )
+        assert reply["total"] == 0 and reply["results"] == []
+        assert "infrastructure" not in reply
+        assert "no rows matched" in reply["infrastructure_note"]
+        assert "omitted" in reply["infrastructure_note"]
+        assert reply["truncated"] is False
+
+    def test_a_filter_with_rows_describes_only_the_repos_of_those_rows(self, world):  # noqa: F811
+        everything = cross_repo_requests_func(origin="stepfunction", max_results=100)
+        row = everything["results"][0]
+        reply = cross_repo_requests_func(
+            origin="stepfunction", service=row["target_name"], max_results=100,
+        )
+        assert reply["total"] >= 1
+        owners = {r["repo"] for r in reply["results"]} | {
+            r["target_repo"] for r in reply["results"] if r.get("target_repo")
+        }
+        described = set(reply.get("infrastructure", {}).get("repos", {}))
+        assert described <= owners
+        assert reply["infrastructure"]["repos_checked"] <= len(owners)
+
+    def test_an_unfiltered_call_keeps_the_block_over_the_selected_repos(self, infra_world):  # noqa: F811
+        reply = cross_repo_requests_func(origin="awssdk", repos=["inventory-svc"])
+        assert "inventory-svc" in reply["infrastructure"]["repos"]
+
+    def test_truncated_says_what_was_cut(self, infra_world, monkeypatch):  # noqa: F811
+        monkeypatch.setattr(rt.ij, "MAX_REPOS", 1)
+        reply = cross_repo_requests_func(origin="terraform")
+        assert reply["truncated"] is True
+        assert "infrastructure block" in reply["truncated_reason"]
+        clean = cross_repo_requests_func(origin="awssdk", repos=["inventory-svc"])
+        assert clean["truncated"] is False and "truncated_reason" not in clean

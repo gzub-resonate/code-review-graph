@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -38,8 +39,9 @@ from ..paging import (
     paginate_groups,
     shown_range,
 )
+from ..parser import is_test_file
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
-from ..repo_cache import MEMO, SKIPPED, parallel_map_budget
+from ..repo_cache import INFRASTRUCTURE_RESULTS, MEMO, SKIPPED, parallel_map_budget
 from ..search import hybrid_search
 from ._common import _bounded, _validate_positive_int
 
@@ -55,6 +57,22 @@ _MAX_CROSS_REPO_RESULTS = 100
 # Names are also sanitised on the way out, like every other name in a
 # response, which caps each entry at 256 characters.
 _MAX_ECHOED_NAMES = 20
+
+#: A searched-repo list at most this long is echoed without being asked for.
+_REPOS_LISTED_MAX = 10
+
+_INFRASTRUCTURE_FIRST_PAGE_ONLY = (
+    "infrastructure describes the selected repos, not these rows, and is returned on the "
+    "first page only; call again without a cursor to read it"
+)
+
+#: Queue-only names echoed in the ``queues`` section of an AMQP exchange list.
+_MAX_QUEUE_ROWS = 100
+
+_INFRASTRUCTURE_NO_MATCHES = (
+    "no rows matched the filter, so there is no infrastructure to describe and the block is "
+    "omitted; it describes the repos of the matched rows, never other repos"
+)
 
 _NO_RESULTS_FOR_CURSOR = (
     "the registry no longer holds a repository this cursor can continue; "
@@ -153,6 +171,23 @@ def _echoed(names: list[str]) -> tuple[list[str], int, bool]:
     return _bounded(cleaned, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES)
 
 
+def _searched_fields(names: list[str], include_repo_list: bool) -> dict[str, Any]:
+    """``repos_searched_total`` always; ``repos_searched`` (the names) only when short or asked.
+
+    A registry of 100+ repos made the name list ~2.5 KB of every reply. The count says how
+    many were searched; ``include_repo_list=True`` returns the names.
+    """
+    fields: dict[str, Any] = {"repos_searched_total": len(names)}
+    if include_repo_list or len(names) <= _REPOS_LISTED_MAX:
+        fields["repos_searched"] = names
+    return fields
+
+
+def _listed(names: list[str]) -> list[str]:
+    """Sanitised names, never cut: used for ``skipped_repos``, which the caller must see whole."""
+    return [_sanitize_name(name) for name in names]
+
+
 #: Match tiers, best first. ``cross_repo_search_tool`` orders its merged rows by
 #: tier before anything else, because the scores of different repos are not
 #: comparable and an exact name in one repo must not wait behind another repo's
@@ -160,6 +195,9 @@ def _echoed(names: list[str]) -> tuple[list[str], int, bool]:
 _MATCH_TIERS = ("exact", "exact_ci", "qualified", "prefix", "tokens", "fuzzy")
 _TIER_ORDER = {name: rank for rank, name in enumerate(_MATCH_TIERS)}
 #: Tiers that make weaker rows noise, and the rows hidden then (see ``include_fuzzy``).
+#: With no exact hit, at most this many ``fuzzy`` rows are kept (``include_fuzzy`` lifts it).
+_FUZZY_CAP_NO_EXACT = 10
+_MATCH_MODES = ("fuzzy", "exact")
 _STRONG_TIERS = frozenset({"exact", "exact_ci", "qualified"})
 _WEAK_TIERS = frozenset({"tokens", "fuzzy"})
 _QUALIFIED_SEPARATORS = (".", "::")
@@ -238,6 +276,12 @@ def _lookup_rows(
     ]
 
 
+class _RepoRows(list[tuple[int, str, dict[str, Any]]]):
+    """A repo's search rows, and whether the per-repo ``limit`` left matches out (``more``)."""
+
+    more: bool = False
+
+
 def _search_repo(
     store: GraphStore, query: str, kind: str | None, limit: int,
 ) -> list[tuple[int, str, dict[str, Any]]]:
@@ -249,7 +293,11 @@ def _search_repo(
     so an exact match always survives it. ``local_rank`` is the position the
     row had in the search (lookup-only rows follow the last one).
     """
-    rows = hybrid_search(store, query, kind=kind, limit=limit)
+    # One row more than the limit is asked for, only to learn whether the limit cut anything;
+    # the ranking below sees exactly the rows it always did.
+    fetched = hybrid_search(store, query, kind=kind, limit=limit + 1)
+    more = len(fetched) > limit
+    rows = fetched[:limit]
     seen = {row.get("qualified_name") for row in rows}
     for row in _lookup_rows(store, query, kind, limit):
         if row["qualified_name"] not in seen:
@@ -257,7 +305,15 @@ def _search_repo(
             rows.append(row)
     tiered = [(rank, _match_tier(query, row), row) for rank, row in enumerate(rows)]
     tiered.sort(key=lambda item: (_TIER_ORDER[item[1]], item[0]))
-    return tiered[:limit]
+    kept = _RepoRows(tiered[:limit])
+    kept.more = more or len(tiered) > limit
+    return kept
+
+
+class _SearchedRows(list[tuple[int, int, int, dict[str, Any]]]):
+    """The rows one repo contributed; ``more`` is set when ``limit`` cut matches off."""
+
+    more: bool = False
 
 
 def _search_one_repo(
@@ -277,8 +333,10 @@ def _search_one_repo(
         store = GraphStore(str(db_path))
         try:
             alias = repo_entry.get("alias", repo_path.name)
-            rows: list[tuple[int, int, int, dict[str, Any]]] = []
-            for local_rank, match, row in _search_repo(store, query, kind, limit):
+            rows: list[tuple[int, int, int, dict[str, Any]]] = _SearchedRows()
+            found = _search_repo(store, query, kind, limit)
+            rows.more = bool(getattr(found, "more", False))  # type: ignore[attr-defined]
+            for local_rank, match, row in found:
                 row["repo"] = alias
                 row["repo_path"] = str(repo_path)
                 row["match"] = match
@@ -360,6 +418,8 @@ def cross_repo_search_func(
     repos: list[str] | None = None,
     cursor: str | None = None,
     include_fuzzy: bool = False,
+    include_repo_list: bool = False,
+    match: str = "fuzzy",
 ) -> dict[str, Any]:
     """Search across registered repositories.
 
@@ -403,6 +463,14 @@ def cross_repo_search_func(
             ``repos``, and only while the merged results are unchanged: the
             cursor holds a digest of them, because the repos are searched
             afresh on every call.
+        include_fuzzy: Keep ``fuzzy`` and ``tokens`` rows when a strong match exists.
+        include_repo_list: Return ``repos_searched`` (the names) even when more than 10
+            repos were searched. ``repos_searched_total`` is always the count.
+        match: ``"fuzzy"`` (default) or ``"exact"``. ``"exact"`` returns only ``exact``,
+            ``exact_ci`` and ``qualified`` rows; the rest are counted in ``fuzzy_dropped``.
+            With ``"fuzzy"`` and no exact hit, ``fuzzy`` rows that share fewer than half of the
+            query's words are dropped and at most 10 are kept (``include_fuzzy=True`` keeps
+            all). ``exact`` in the reply is ``"found"`` or ``"none"``.
 
     Returns:
         Combined search results from the searched repos, plus ``total``
@@ -417,6 +485,8 @@ def cross_repo_search_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
+    if match not in _MATCH_MODES:
+        raise ValueError(f"match must be one of: {', '.join(_MATCH_MODES)}")
 
     try:
         registry = Registry()
@@ -510,11 +580,14 @@ def cross_repo_search_func(
                 in_flight[future] = repo_index
             reap(wait(in_flight).done)
 
+        capped: list[str] = []
         # Whatever order the searches finished in, the rows go in registry order.
         for repo_index in sorted(outcomes):
             alias, rows = outcomes[repo_index]
             searched_repos.append(alias)
             ranked_results.extend(rows)
+            if getattr(rows, "more", False):
+                capped.append(alias)
 
         # The repos the budget kept out of the full search still get the cheap exact-name
         # lookup, so an exact match in a late repo is not lost to the time limit.
@@ -528,11 +601,33 @@ def cross_repo_search_func(
         ranked_results.sort(key=lambda item: item[:3])
         merged = [item[3] for item in ranked_results]
         fuzzy_dropped = 0
-        if not include_fuzzy and any(r.get("match") in _STRONG_TIERS for r in merged):
+        has_exact = any(r.get("match") in _STRONG_TIERS for r in merged)
+        if match == "exact":
+            kept = [r for r in merged if r.get("match") in _STRONG_TIERS]
+            fuzzy_dropped = len(merged) - len(kept)
+            merged = kept
+        elif not include_fuzzy and has_exact:
             kept = [r for r in merged if r.get("match") not in _WEAK_TIERS]
             fuzzy_dropped = len(merged) - len(kept)
             merged = kept
-        skipped_shown, skipped_total, skipped_truncated = _echoed(skipped)
+        elif not include_fuzzy:
+            # No exact hit: the weak list is all there is, and an unmatched name returned
+            # hundreds of rows. Keep the ``prefix``/``tokens`` rows and the few ``fuzzy`` rows
+            # that share at least half of the query's words.
+            wanted = _name_tokens(query)
+            need = (len(wanted) + 1) // 2 if len(wanted) > 1 else 0
+            kept = []
+            fuzzy_kept = 0
+            for row in merged:
+                if row.get("match") == "fuzzy":
+                    shared = len(wanted & _name_tokens(str(row.get("name") or "")))
+                    if shared < need or fuzzy_kept >= _FUZZY_CAP_NO_EXACT:
+                        continue
+                    fuzzy_kept += 1
+                kept.append(row)
+            fuzzy_dropped = len(merged) - len(kept)
+            merged = kept
+        skipped_shown, skipped_total, skipped_truncated = _listed(skipped), len(skipped), False
         # The rows come from several graph databases and are searched afresh on every
         # call, so the stamp is a digest of the rows themselves, and of the repos left
         # out: a cursor made on a partial answer is only honoured for the same partial one.
@@ -541,11 +636,13 @@ def cross_repo_search_func(
             scope=make_scope(
                 "cross_repo_search_tool", query=query, kind=kind, limit=limit,
                 repos=sorted(set(repos)) if repos else None, include_fuzzy=include_fuzzy,
+                match=match,
             ),
             stamp=make_scope("cross_repo_search_rows", rows=merged, skipped=skipped),
         )
         all_results, total = page.items, page.total
-        truncated = page.truncated or bool(skipped)
+        truncated = page.truncated or bool(skipped) or bool(capped)
+        capped_shown, capped_total, _capped_truncated = _echoed(capped)
 
         # A dropped or duplicated name reaches the summary too. The
         # all-unknown branch already said so there, and CLAUDE.md trains
@@ -555,10 +652,24 @@ def cross_repo_search_func(
             notes += f"; {unknown_total} name(s) matched no repository"
         if ambiguous_total:
             notes += f"; {ambiguous_total} name(s) matched several"
-        if fuzzy_dropped:
+        if not has_exact:
+            notes += "; exact: none"
+        if fuzzy_dropped and match == "exact":
+            notes += f"; {fuzzy_dropped} non-exact row(s) hidden by match=exact"
+        elif fuzzy_dropped and has_exact:
             notes += (
                 f"; {fuzzy_dropped} fuzzy/tokens row(s) hidden because exact matches exist "
                 "(pass include_fuzzy=True to see them)"
+            )
+        elif fuzzy_dropped:
+            notes += (
+                f"; {fuzzy_dropped} fuzzy row(s) dropped (fewer than half of the query's words, "
+                f"or beyond {_FUZZY_CAP_NO_EXACT}; pass include_fuzzy=True to see them)"
+            )
+        if capped_total:
+            notes += (
+                f"; {capped_total} repo(s) have more matches than limit={limit} "
+                "(see repos_capped; total is a lower bound, raise limit to see them)"
             )
         if skipped_total:
             notes += (
@@ -570,7 +681,7 @@ def cross_repo_search_func(
         response = {
             "status": "ok",
             "summary": (
-                f"Found {total} result(s) across "
+                f"Found {total}{'+' if capped_total else ''} result(s) across "
                 f"{len(searched_repos)} repo(s) for '{query}'"
                 + shown_range(page)
                 + notes
@@ -578,14 +689,19 @@ def cross_repo_search_func(
             "results": all_results,
             "total": total,
             "fuzzy_dropped": fuzzy_dropped,
+            "exact": "found" if has_exact else "none",
             "truncated": truncated,
-            "repos_searched": searched_repos,
+            **_searched_fields(searched_repos, include_repo_list),
             "skipped_repos": skipped_shown,
             "skipped_repos_total": skipped_total,
             "skipped_repos_truncated": skipped_truncated,
             "exact_lookup_repos_total": len(exact_looked_in),
+            "repos_capped": capped_shown,
+            "repos_capped_total": capped_total,
             **page.fields(),
         }
+        if capped_total:
+            response["total_is_lower_bound"] = True
         if repos:
             response["unknown"] = unknown_shown
             response["unknown_total"] = unknown_total
@@ -727,6 +843,8 @@ def _stepfunction_links(
     status: str | None,
     max_results: int,
     cursor: str | None = None,
+    path_prefix: str | None = None,
+    machine: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="stepfunction"`` branch: what state machines call, joined to its owner."""
     definitions = sl.Definitions()
@@ -735,6 +853,7 @@ def _stepfunction_links(
         definitions.defines, sl.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
+        path_prefix=path_prefix, machine=machine,
     )
     for row in result["results"]:
         for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
@@ -752,6 +871,9 @@ def _awssdk_links(
     status: str | None,
     max_results: int,
     cursor: str | None = None,
+    path_prefix: str | None = None,
+    source: str | None = None,
+    include_tests: bool = True,
 ) -> dict[str, Any]:
     """The ``origin="awssdk"`` branch: AWS resources application code calls, joined to owners."""
     definitions = sl.Definitions()
@@ -761,6 +883,7 @@ def _awssdk_links(
         repos, target_name, target, status, max_results, infrastructure=True,
         read_context=al.read_declare_edges,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
+        path_prefix=path_prefix, source=source, include_tests=include_tests,
     )
     for row in result["results"]:
         # Every string here was read from a repository's files: none is passed on as written.
@@ -777,6 +900,127 @@ def _awssdk_links(
     return result
 
 
+def _amqp_repo_map(entry: dict[str, Any]) -> Optional[dict[str, list[dict[str, Any]]]]:
+    """Every exchange or queue name of one repo's graph with its edges; ``{}`` without AMQP.
+
+    ``None`` when the graph cannot be read. Kept while the graph file is unchanged, so a
+    second AMQP call is answered from memory. The values are raw (not sanitised) and shared:
+    callers copy what they change.
+    """
+    def load() -> Optional[dict[str, list[dict[str, Any]]]]:
+        store = tl.open_store(entry)
+        if store is None:
+            return None
+        try:
+            if not aj.has_amqp_edges(store):
+                return {}
+            return {
+                name: list(aj.read_channel_edges(store, name))
+                for name in ax.list_exchange_names(store)
+            }
+        except (sqlite3.Error, GraphStoreError) as exc:
+            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
+            return None
+        finally:
+            store.close()
+
+    return MEMO.get("amqp-edges", entry, load, cacheable=lambda found: found is not None)
+
+
+_HINT_STOP = frozenset({"api", "e", "topic", "exchange", "service", "services", "the", "and"})
+
+
+def _amqp_hint_order(entries: list[dict[str, Any]], channel: str | None) -> list[dict[str, Any]]:
+    """*entries* with the repos whose name shares words with *channel* first (stable)."""
+    if not channel:
+        return entries
+    words = {w for w in re.split(r"[^a-z0-9]+", channel.lower()) if len(w) > 2} - _HINT_STOP
+    if not words:
+        return entries
+
+    def score(entry: dict[str, Any]) -> int:
+        label = {w for w in re.split(r"[^a-z0-9]+", _repo_label(entry).lower()) if w}
+        return -len(words & label)
+
+    return sorted(entries, key=score)
+
+
+class _AmqpScan:
+    """What one read of the AMQP edges of the registry found, and what it could not read."""
+
+    def __init__(self) -> None:
+        self.loaded: list[tuple[str, bool, dict[str, list[dict[str, Any]]]]] = []
+        self.skipped: list[str] = []
+        self.skipped_in_scope: list[str] = []
+        self.unreadable: list[str] = []
+        self.without_amqp: list[str] = []
+        self.total = 0
+
+    @property
+    def searched(self) -> int:
+        return self.total - len(self.skipped)
+
+    @property
+    def incomplete(self) -> bool:
+        """Some repo that could have changed a status was not (fully) read."""
+        return bool(self.skipped or self.unreadable)
+
+    def coverage(self, selected: int, scoped: bool) -> str:
+        """The part of a summary that says which repos the numbers rest on."""
+        where = (
+            f" in {selected} selected repo(s)" if scoped else ""
+        )
+        if self.skipped:
+            return (
+                f"{where}; searched {self.searched} of {self.total} repos, "
+                f"{len(self.skipped)} skipped by the time budget (statuses are incomplete)"
+            )
+        if scoped:
+            return f"{where} (status computed over all {self.total} repo(s))"
+        return f" across {self.total} repo(s)"
+
+
+def _amqp_scan(
+    all_repos: list[dict[str, Any]], selected: list[dict[str, Any]], scoped: bool,
+    channel: str | None = None,
+) -> _AmqpScan:
+    """Read the AMQP edges of the selected repos, then (when *scoped*) of all the others.
+
+    A status is a statement about every repo, so a ``repos`` scope only chooses what is
+    reported. The selected repos are read first, so a spent time budget costs the status
+    before it costs the rows asked for. Repos run on ``CRG_CROSS_REPO_WORKERS`` threads.
+    """
+    chosen = {id(e) for e in selected}
+    rest = [e for e in all_repos if id(e) not in chosen] if scoped else []
+    ordered = _amqp_hint_order(list(selected), channel) + _amqp_hint_order(rest, channel)
+    scan = _AmqpScan()
+    scan.total = len(ordered)
+    budget = cross_repo_budget_seconds()
+    started = _now()
+
+    def out_of_budget() -> bool:
+        return bool(budget) and _now() - started > budget
+
+    for entry, found in zip(
+        ordered, parallel_map_budget(_amqp_repo_map, ordered, cross_repo_workers(), out_of_budget),
+    ):
+        label = _sanitize_name(_repo_label(entry))
+        in_scope = id(entry) in chosen
+        if found is SKIPPED:
+            scan.skipped.append(label)
+            if in_scope:
+                scan.skipped_in_scope.append(label)
+        elif found is None:
+            scan.unreadable.append(label)
+        elif not found:
+            if in_scope:
+                scan.without_amqp.append(label)
+        else:
+            scan.loaded.append((label, in_scope, found))
+    return scan
+
+
+
 def _amqp_exchange_list(
     repos: list[str] | None,
     routing_key: str | None,
@@ -791,8 +1035,14 @@ def _amqp_exchange_list(
     ``binding_keys`` listeners bind with, and a ``status``: ``unlistened`` (publishers, no
     listener), ``unpublished`` (listeners, no publisher) or ``matched`` (both; the keys are not
     compared). ``status`` filters on those values; ``routing_key`` (``route``) keeps the
-    exchanges with a routing or binding key containing it as a substring. ``repos`` limits the
-    repos read, so the roles are those of the selected repos only. Pages like the other origins.
+    exchanges with a routing or binding key containing it as a substring.
+
+    ``repos`` chooses which exchanges are listed (those with an edge in the selected repos),
+    not what a status rests on: counts, repos and ``status`` always cover every repo, and
+    ``scoped_publisher_count`` / ``scoped_listener_count`` give the selected repos' share.
+    A name only ever used as a queue is listed apart, in ``queues``. When the time budget leaves
+    repos unread the summary says so and a status that could change is flagged
+    ``status_confirmed: false``. Pages like the other origins.
     """
     from ..registry import Registry
 
@@ -806,49 +1056,39 @@ def _amqp_exchange_list(
     if repos:
         selected, unknown, _ambiguous = _select_repos(all_repos, repos)
         unknown_shown, _total, _cut = _echoed(unknown)
-    budget = cross_repo_budget_seconds()
-    started = _now()
-    skipped: list[str] = []
-    unreadable: list[str] = []
-    without_amqp: list[str] = []
+    scoped = bool(repos)
+    scan = _amqp_scan(all_repos, selected, scoped)
     exchanges: dict[str, ax.Exchange] = {}
-    for entry in selected:
-        label = _sanitize_name(_repo_label(entry))
-        if budget and _now() - started > budget:
-            skipped.append(label)
-            continue
-        store = tl.open_store(entry)
-        if store is None:
-            unreadable.append(label)
-            continue
-        try:
-            if not aj.has_amqp_edges(store):
-                without_amqp.append(label)
-                continue
-            for name in ax.list_exchange_names(store):
-                edges = [
-                    {**e, "routing_key": _sanitize_name(e["routing_key"])
-                     if isinstance(e.get("routing_key"), str) else None,
-                     "binding_key": _sanitize_name(e["binding_key"])
-                     if isinstance(e.get("binding_key"), str) else None}
-                    for e in aj.read_channel_edges(store, name)
-                ]
-                ax.add_edges(
-                    exchanges.setdefault(_sanitize_name(name), ax.new_exchange()), label, edges,
-                )
-        except (sqlite3.Error, GraphStoreError) as exc:
-            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
-            unreadable.append(label)
-            continue
-        finally:
-            store.close()
+    for label, in_scope, amap in scan.loaded:
+        for name, raw_edges in amap.items():
+            edges = [
+                {**e, "routing_key": _sanitize_name(e["routing_key"])
+                 if isinstance(e.get("routing_key"), str) else None,
+                 "binding_key": _sanitize_name(e["binding_key"])
+                 if isinstance(e.get("binding_key"), str) else None}
+                for e in raw_edges
+            ]
+            ax.add_edges(
+                exchanges.setdefault(_sanitize_name(name), ax.new_exchange()), label, edges,
+                in_scope=in_scope,
+            )
     counts: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
+    queues: list[dict[str, Any]] = []
     for name in sorted(exchanges):
         entry_data = exchanges[name]
+        if scoped and not ax.in_scope_edges(entry_data):
+            continue
         if routing_key and not ax.has_key_containing(entry_data, routing_key):
             continue
-        row = ax.render(name, entry_data)
+        row = ax.render(name, entry_data, scoped=scoped)
+        if scan.incomplete and row["status"] != ax.MATCHED:
+            # A repo that was not read could hold the missing publisher or listener.
+            row["status_confirmed"] = False
+        if ax.is_queue(entry_data):
+            # A name only used as a queue is not an exchange: no exchange status, no count.
+            queues.append(row)
+            continue
         counts[row["status"]] = counts.get(row["status"], 0) + 1
         if status and row["status"] != status:
             continue
@@ -859,7 +1099,7 @@ def _amqp_exchange_list(
             "cross_repo_requests_tool", origin="amqp", mode="exchange_list",
             repos=sorted(repos) if repos else None, routing_key=routing_key, status=status,
         ),
-        stamp=content_stamp([rows, skipped]),
+        stamp=content_stamp([rows, scan.skipped]),
     )
     ordered = ", ".join(f"{counts[s]} {s}" for s in ax.LIST_STATUSES if s in counts)
     result: dict[str, Any] = {
@@ -867,26 +1107,42 @@ def _amqp_exchange_list(
         "summary": (
             f"{sum(counts.values())} AMQP exchange(s)"
             + (f" with a key containing '{_sanitize_name(routing_key)}'" if routing_key else "")
-            + f" across {len(selected)} repo(s)"
+            + scan.coverage(len(selected), scoped)
             + (f": {ordered}" if ordered else "")
+            + (f"; {len(queues)} queue name(s) listed apart (see queues)" if queues else "")
             + shown_range(page)
         ),
         "origin": "amqp",
         "results": page.items,
         "counts": counts,
         "total": page.total,
-        "truncated": page.truncated or bool(skipped),
-        "repos_searched": len(selected) - len(skipped),
-        "unreadable": unreadable,
+        "truncated": page.truncated or bool(scan.skipped),
+        "repos_searched": len(selected) - len(scan.skipped_in_scope),
+        "repos_read": scan.searched,
+        "unreadable": scan.unreadable,
+        "status_basis": "partial" if scan.incomplete else "all_repos",
         **page.fields(),
     }
-    if without_amqp:
-        result["repos_without_amqp"] = _bounded(
-            without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+    if scan.skipped:
+        result["truncated_reason"] = (
+            f"time budget spent, {len(scan.skipped)} of {scan.total} repo(s) not read "
+            "(see skipped_repos); statuses and counts leave them out"
+        )
+    if scoped:
+        result["scoped_to"] = _bounded(
+            [_sanitize_name(_repo_label(e)) for e in selected], _MAX_ECHOED_NAMES,
+            _MAX_ECHOED_NAMES,
         )[0]
-        result["repos_without_amqp_total"] = len(without_amqp)
-    if skipped:
-        result["skipped_repos"] = skipped
+    if queues and not status:
+        result["queues"] = queues[:_MAX_QUEUE_ROWS]
+        result["queues_total"] = len(queues)
+    if scan.without_amqp:
+        result["repos_without_amqp"] = _bounded(
+            scan.without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+        )[0]
+        result["repos_without_amqp_total"] = len(scan.without_amqp)
+    if scan.skipped:
+        result["skipped_repos"] = scan.skipped
     if unknown_shown:
         result["unknown"] = unknown_shown
     return result
@@ -905,9 +1161,12 @@ def _amqp_links(
     ``exchange`` is required (``service``); ``routing_key`` (``route``) keeps the rows linked
     to that key by the rules of :func:`~code_review_graph.amqp_join.link_kind`: a listener's
     ``binding_key`` is the pattern for a publisher's key, and for a publisher row the key given
-    is the pattern. Read-only; the graphs are opened read-only, one at a time, inside the
-    call budget (repos left over are named in ``skipped_repos``). The rows are paged like those
-    of the other origins: ``max_results`` is the page size and ``next_cursor`` the next page.
+    is the pattern. Read-only; the graphs are opened read-only inside the call budget (repos
+    left over are named in ``skipped_repos`` and the summary says how many). The rows are paged
+    like those of the other origins: ``max_results`` is the page size and ``next_cursor`` the
+    next page. ``repos`` chooses whose rows are listed; ``exchange_status`` and
+    ``exchange_counts`` still cover every repo (``scoped_to`` names the scope), and
+    ``exchange_status_confirmed`` is false when unread repos could change it.
     """
     from ..registry import Registry
 
@@ -925,34 +1184,19 @@ def _amqp_links(
     if repos:
         selected, unknown, _ambiguous = _select_repos(all_repos, repos)
         unknown_shown, _total, _cut = _echoed(unknown)
-    budget = cross_repo_budget_seconds()
-    started = _now()
+    scoped = bool(repos)
+    scan = _amqp_scan(all_repos, selected, scoped, channel)
     rows: list[dict[str, Any]] = []
-    skipped: list[str] = []
-    unreadable: list[str] = []
-    without_amqp: list[str] = []
     counts: dict[str, int] = {}
-    for entry in selected:
-        label = _sanitize_name(_repo_label(entry))
-        if budget and _now() - started > budget:
-            skipped.append(label)
+    overall = {"publisher": 0, "listener": 0}
+    paths = {_sanitize_name(_repo_label(e)): Path(e["path"]) for e in all_repos}
+    for label, in_scope, amap in scan.loaded:
+        found = amap.get(channel, [])
+        for edge in found:
+            overall[edge["role"]] += 1
+        if not in_scope:
             continue
-        store = tl.open_store(entry)
-        if store is None:
-            unreadable.append(label)
-            continue
-        try:
-            if not aj.has_amqp_edges(store):
-                without_amqp.append(label)
-                continue
-            found = list(aj.read_channel_edges(store, channel))
-        except (sqlite3.Error, GraphStoreError) as exc:
-            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
-            unreadable.append(label)
-            continue
-        finally:
-            store.close()
-        root = Path(entry["path"])
+        root = paths.get(label, Path("."))
         for edge in found:
             if routing_key:
                 if edge["role"] == "listener":
@@ -975,6 +1219,8 @@ def _amqp_links(
             for key in ("routing_key", "binding_key", "queue"):
                 if isinstance(edge.get(key), str) and edge[key]:
                     row[key] = _sanitize_name(edge[key])
+            if edge.get("kind") == aj.KIND_QUEUE:
+                row["kind"] = aj.KIND_QUEUE
             if how:
                 row["matched_via"] = how
             rows.append(row)
@@ -985,7 +1231,7 @@ def _amqp_links(
             repos=sorted(repos) if repos else None,
             exchange=exchange, routing_key=routing_key, status=status,
         ),
-        stamp=content_stamp([rows, skipped]),
+        stamp=content_stamp([rows, scan.skipped]),
     )
     shown, total = page.items, page.total
     result: dict[str, Any] = {
@@ -994,25 +1240,43 @@ def _amqp_links(
             f"{total} AMQP publisher/listener row(s) for exchange "
             f"'{_sanitize_name(channel)}'"
             + (f" linked to key '{_sanitize_name(routing_key)}'" if routing_key else "")
-            + f" across {len(selected)} repo(s)"
+            + scan.coverage(len(selected), scoped)
             + shown_range(page)
         ),
         "origin": "amqp",
         "results": shown,
         "counts": counts,
         "total": total,
-        "truncated": page.truncated or bool(skipped),
-        "repos_searched": len(selected) - len(skipped),
-        "unreadable": unreadable,
+        "truncated": page.truncated or bool(scan.skipped),
+        "repos_searched": len(selected) - len(scan.skipped_in_scope),
+        "repos_read": scan.searched,
+        "unreadable": scan.unreadable,
         **page.fields(),
     }
-    if without_amqp:
-        result["repos_without_amqp"] = _bounded(
-            without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+    if overall["publisher"] or overall["listener"]:
+        result["exchange_counts"] = overall
+        result["exchange_status"] = ax.exchange_status(overall["publisher"], overall["listener"])
+        result["exchange_status_confirmed"] = (
+            not scan.incomplete or result["exchange_status"] == ax.MATCHED
+        )
+    elif scan.incomplete:
+        result["exchange_status_confirmed"] = False
+    if scoped:
+        result["scoped_to"] = _bounded(
+            [_sanitize_name(_repo_label(e)) for e in selected], _MAX_ECHOED_NAMES,
+            _MAX_ECHOED_NAMES,
         )[0]
-        result["repos_without_amqp_total"] = len(without_amqp)
-    if skipped:
-        result["skipped_repos"] = skipped
+    if scan.skipped:
+        result["truncated_reason"] = (
+            f"time budget spent, {len(scan.skipped)} of {scan.total} repo(s) not read "
+            "(see skipped_repos); rows and exchange_status leave them out"
+        )
+        result["skipped_repos"] = scan.skipped
+    if scan.without_amqp:
+        result["repos_without_amqp"] = _bounded(
+            scan.without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+        )[0]
+        result["repos_without_amqp_total"] = len(scan.without_amqp)
     if unknown_shown:
         result["unknown"] = unknown_shown
     return result
@@ -1163,6 +1427,15 @@ def _edge_target_filter(
     return keep
 
 
+def _source_matches(row_source: str, wanted: str) -> bool:
+    """Whether a row's ``source`` symbol is *wanted*, its last segment, or lies below it."""
+    return (
+        row_source == wanted
+        or row_source.rsplit(".", 1)[-1] == wanted
+        or row_source.startswith(wanted + ".")
+    )
+
+
 def _infra_links(
     origin: str,
     noun: str,
@@ -1182,6 +1455,10 @@ def _infra_links(
     edge_filter: Any = None,
     prefetch: Any = None,
     cursor: str | None = None,
+    path_prefix: str | None = None,
+    source: str | None = None,
+    machine: str | None = None,
+    include_tests: bool = True,
 ) -> dict[str, Any]:
     """Shared body of the ``terraform``, ``workflow``, ``stepfunction`` and ``awssdk`` origins.
 
@@ -1198,6 +1475,9 @@ def _infra_links(
     The rows are paged: *max_results* (at most 100) is the page size, and a cut list carries
     ``next_cursor``, which returns the next page when passed back as *cursor*. A cursor is
     tied to the query and to the rows it was made on, so it is refused when either changed.
+
+    *path_prefix*, *source*, *machine* and *include_tests* filter the rows before ``counts``,
+    ``total`` and paging, so a page and its cursor only ever hold rows that passed them.
     """
     from ..registry import Registry
 
@@ -1319,6 +1599,25 @@ def _infra_links(
             if (r[path_key] or "") == wanted
             or (r[path_key] or "").startswith(wanted + "/")
         ]
+    if origin == "awssdk":
+        for r in rows:
+            r["is_test"] = is_test_file(r.get("file") or "")
+    if path_prefix:
+        wanted_path = path_prefix.strip("/")
+        rows = [
+            r for r in rows
+            if (r.get("file") or "") == wanted_path
+            or (r.get("file") or "").startswith(wanted_path + "/")
+        ]
+    if source:
+        rows = [r for r in rows if _source_matches(str(r.get("source") or ""), source)]
+    if machine:
+        rows = [r for r in rows if r.get("machine") == machine]
+    tests_hidden = 0
+    if not include_tests:
+        kept_rows = [r for r in rows if not r.get("is_test")]
+        tests_hidden = len(rows) - len(kept_rows)
+        rows = kept_rows
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
@@ -1330,6 +1629,8 @@ def _infra_links(
             "cross_repo_requests_tool", origin=origin,
             repos=sorted(repos) if repos else None,
             target_repo=target_repo, target_path=target_path, status=status,
+            path_prefix=path_prefix, source=source, machine=machine,
+            include_tests=include_tests,
         ),
         # The repos left out of a partial answer are part of the stamp, as for Feign.
         stamp=content_stamp([rows, skipped]),
@@ -1341,7 +1642,11 @@ def _infra_links(
                 r[key] = _sanitize_name(r[key])
     result: dict[str, Any] = {
         "status": "ok",
-        "summary": f"{total} {noun} across {len(selected)} repo(s)" + shown_range(page),
+        "summary": (
+            f"{total} {noun} across {len(selected)} repo(s)" + shown_range(page)
+            + (f"; {tests_hidden} test row(s) hidden (include_tests=True shows them)"
+               if tests_hidden else "")
+        ),
         "origin": origin,
         "results": shown,
         "counts": counts,
@@ -1351,14 +1656,51 @@ def _infra_links(
         "unreadable": unreadable,
         **page.fields(),
     }
+    if origin == "awssdk":
+        result["tests_hidden"] = tests_hidden
     if skipped:
         result["skipped_repos"] = skipped
     if unknown_shown:
         result["unknown"] = unknown_shown
+    reasons: list[str] = []
+    if page.truncated:
+        reasons.append("rows cut at the page size (see next_cursor)")
+    if skipped:
+        reasons.append(
+            f"time budget spent, {len(skipped)} repo(s) not read (see skipped_repos)"
+        )
     phase = _now()
-    if infrastructure:
-        _attach_infrastructure(result, all_repos, selected, budget)
+    # A filter narrows the answer to some repos; the block then describes those, not every
+    # selected repo (which would present unrelated repos as part of the result).
+    scoped = bool(target_repo or target_path or status)
+    if infrastructure and scoped:
+        owners = {
+            r[key] for r in rows for key in ("repo", "target_repo", "module_repo", "client_repo")
+            if isinstance(r.get(key), str)
+        }
+        described = [
+            e for e in all_repos if _sanitize_name(_repo_label(e)) in {
+                _sanitize_name(o) for o in owners
+            }
+        ]
+    else:
+        described = selected
+    if infrastructure and scoped and not described:
+        result["infrastructure_note"] = _INFRASTRUCTURE_NO_MATCHES
+    elif infrastructure and page.offset == 0:
+        _attach_infrastructure(result, all_repos, described, budget)
+        if result["infrastructure"]["truncated"]:
+            reasons.append(
+                "the infrastructure block stopped at its repo cap or the time budget "
+                "(see infrastructure.truncated, repos_not_checked)"
+            )
+    elif infrastructure:
+        # The block describes the selected repos, not the rows, so a continuation page leaves
+        # it out (the first page has it) instead of rebuilding it for every page.
+        result["infrastructure_note"] = _INFRASTRUCTURE_FIRST_PAGE_ONLY
     timings["infrastructure"] = _now() - phase
+    if result["truncated"] and reasons:
+        result["truncated_reason"] = "; ".join(reasons)
     elapsed = _now() - started
     # The server does not configure INFO logging, so a slow call is logged as a warning.
     logger.log(
@@ -1371,18 +1713,68 @@ def _infra_links(
     return result
 
 
+def _file_signature(path: Optional[Path]) -> Any:
+    """What a small input file looks like now, for a cache key (``None`` when it is absent)."""
+    if path is None:
+        return None
+    try:
+        info = path.expanduser().stat()
+    except OSError:
+        return (str(path), None)
+    return (str(path), info.st_mtime_ns, info.st_size)
+
+
+def _infrastructure_key(
+    all_repos: list[dict[str, Any]], chosen: list[int],
+) -> Optional[tuple[Any, ...]]:
+    """Everything the ``infrastructure`` block depends on, or ``None`` if it cannot be known.
+
+    That is the registry (path and alias of every repo), each repo's graph stamp, which repos
+    were selected, both alias files and the repo cap. The time budget is left out because only
+    a block that was not cut short is kept.
+    """
+    from ..repo_aliases import repo_aliases_path
+    from ..repo_cache import graph_stamp
+
+    stamps = []
+    for entry in all_repos:
+        stamp = graph_stamp(entry)
+        if stamp is None:
+            return None
+        stamps.append((str(entry["path"]), entry.get("alias"), stamp))
+    service_file = os.environ.get(sa.ALIASES_FILE_ENV, "").strip()
+    return (
+        tuple(stamps), tuple(chosen),
+        _file_signature(Path(service_file) if service_file else None),
+        _file_signature(repo_aliases_path()), ij.MAX_REPOS,
+    )
+
+
 def _attach_infrastructure(
     result: dict[str, Any], all_repos: list[dict[str, Any]], selected: list[dict[str, Any]],
     budget: float,
 ) -> None:
     """Add the per-repo ``infrastructure`` summary (see ``infra_join``) to a reply."""
-    rules = sa.load_alias_rules()
-    resolver = RepoNameResolver(all_repos)
     by_id = {id(e): i for i, e in enumerate(all_repos)}
-    block = ij.build_infrastructure(
-        all_repos, [by_id[id(e)] for e in selected], sa.FactsCache(all_repos), rules,
-        resolver.lookup, budget, cross_repo_workers(),
-    )
+    chosen = [by_id[id(e)] for e in selected]
+
+    def compute() -> dict[str, Any]:
+        rules = sa.load_alias_rules()
+        resolver = RepoNameResolver(all_repos)
+        return ij.build_infrastructure(
+            all_repos, chosen, sa.FactsCache(all_repos), rules,
+            resolver.lookup, budget, cross_repo_workers(),
+        )
+
+    key = _infrastructure_key(all_repos, chosen)
+    if key is None:
+        block = compute()
+    else:
+        # Concurrent calls for the same repos at the same graph versions build it once, and a
+        # complete block is reused until a graph or an alias file changes.
+        block = copy.deepcopy(INFRASTRUCTURE_RESULTS.get(
+            key, compute, cacheable=lambda found: not found["truncated"],
+        ))
     result["infrastructure"] = block
     if block["repos_total"]:
         result["summary"] += (
@@ -1402,6 +1794,11 @@ def cross_repo_requests_func(
     max_results: int = 50,
     origin: str | None = None,
     cursor: str | None = None,
+    include_repo_list: bool = False,
+    path_prefix: str | None = None,
+    source: str | None = None,
+    machine: str | None = None,
+    include_tests: bool = True,
 ) -> dict[str, Any]:
     """Join outbound Spring Feign and JavaScript/TypeScript calls to server endpoints.
 
@@ -1436,6 +1833,17 @@ def cross_repo_requests_func(
         max_results: Maximum rows returned overall (default 50, capped at
             100). ``counts`` and ``total`` cover every call that passed the
             filters, not just the rows shown.
+        include_repo_list: Feign/JS only: return ``repos_searched`` (the names) even when more
+            than 10 repos were read. ``repos_searched_total`` is always the count.
+        path_prefix: ``awssdk`` and ``stepfunction`` only: keep rows whose ``file`` is this
+            path or lies below it (repo-relative, e.g. ``mcp/``).
+        source: ``awssdk`` only: keep rows whose ``source`` symbol equals this, ends with it
+            after a ``.``, or lies below it.
+        machine: ``stepfunction`` only: keep rows of this state machine (exact name).
+        include_tests: ``awssdk`` only. Every row has ``is_test``. Default True keeps test
+            rows (counts are unchanged); False hides them and ``tests_hidden`` says how many.
+            All four filters apply before ``counts``, ``total`` and paging, and a cursor is
+            refused for different values.
         cursor: ``next_cursor`` from the previous reply, to read the next page of
             the same query. Each page takes up to ``limit`` more rows from every
             client repo, then keeps the first ``max_results``. Omit it for the
@@ -1490,7 +1898,8 @@ def cross_repo_requests_func(
     rows carry ``matched_via``, and a name reaching several repos is ``ambiguous`` with
     ``candidate_repos``. The ``terraform``, ``stepfunction`` and ``awssdk`` origins also return
     an ``infrastructure`` object relating each selected repo to the ECR, ECS, stack and declared
-    resources that belong to it (see ``docs/SERVICE_ALIASES.md``).
+    resources that belong to it (see ``docs/SERVICE_ALIASES.md``), on the first page only; a
+    page reached with ``cursor`` says so in ``infrastructure_note`` instead.
 
     ``external`` groups the HTTP calls that reach no registered service by host, to show which
     third-party vendors each repo depends on: one row per (host, repo) with ``vendor`` (a small
@@ -1542,6 +1951,14 @@ def cross_repo_requests_func(
             "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp, "
             "trigger, external, consumers"
         )
+    for name, given, allowed in (
+        ("path_prefix", path_prefix, ("awssdk", "stepfunction")),
+        ("source", source, ("awssdk",)),
+        ("machine", machine, ("stepfunction",)),
+        ("include_tests", None if include_tests else False, ("awssdk",)),
+    ):
+        if given is not None and origin not in allowed:
+            raise ValueError(f"{name} applies only to origin={' or '.join(allowed)}")
     if origin == "trigger":
         return _trigger_links(repos, service, route, status, max_results, cursor)
     if origin in ("external", "consumers"):
@@ -1553,9 +1970,15 @@ def cross_repo_requests_func(
     if origin == "amqp":
         return _amqp_links(repos, service, route, status, max_results, cursor)
     if origin == "awssdk":
-        return _awssdk_links(repos, service, route, status, max_results, cursor)
+        return _awssdk_links(
+            repos, service, route, status, max_results, cursor,
+            path_prefix=path_prefix, source=source, include_tests=include_tests,
+        )
     if origin == "stepfunction":
-        return _stepfunction_links(repos, service, route, status, max_results, cursor)
+        return _stepfunction_links(
+            repos, service, route, status, max_results, cursor,
+            path_prefix=path_prefix, machine=machine,
+        )
     if origin == "terraform":
         return _terraform_links(repos, service, route, status, max_results, cursor)
     if origin == "workflow":
@@ -1687,6 +2110,7 @@ def cross_repo_requests_func(
         wanted_route = fl.normalize_route(route) if route else None
         counts: dict[str, int] = {}
         origin_counts: dict[str, int] = {}
+        multiple_total = 0
         rows_by_repo: list[list[dict[str, Any]]] = []
         searched: list[str] = []
         skipped: list[str] = []
@@ -1809,6 +2233,10 @@ def cross_repo_requests_func(
                         _candidate_row(c) for c in result.candidates[:_MAX_CANDIDATES_PER_ROW]
                     ]
                     row["candidates_total"] = len(result.candidates)
+                    if result.status == fl.MATCHED and len(result.candidates) > 1:
+                        # "matched" stays as is; this says the match is not a unique one.
+                        row["multiple_candidates"] = True
+                        multiple_total += 1
                 repo_rows.append(row)
             rows_by_repo.append(repo_rows)
 
@@ -1824,7 +2252,7 @@ def cross_repo_requests_func(
         )
         results = page.items
         truncated = page.truncated or bool(skipped)
-        skipped_shown, skipped_total, skipped_truncated = _echoed(skipped)
+        skipped_shown, skipped_total, skipped_truncated = _listed(skipped), len(skipped), False
         shown_unreadable, unreadable_total, unreadable_truncated = _bounded(
             unreadable, _MAX_UNREADABLE, _MAX_UNREADABLE,
         )
@@ -1847,21 +2275,29 @@ def cross_repo_requests_func(
             "status": "ok",
             "summary": (
                 (
-                    f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
+                    # A filtered request names its origin, also when nothing matched.
+                    f"{total} JS/TS call(s) (origin=js) in {len(searched)} repo(s)"
+                    if origin == "js"
+                    else f"{total} Feign call(s) (origin=feign) in {len(searched)} repo(s)"
+                    if origin == "feign"
+                    else f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
                     f"{origin_counts.get('js', 0)} JS/TS) in {len(searched)} repo(s)"
                     if origin_counts.get("js")
                     else f"{total} Feign call(s) in {len(searched)} repo(s)"
                 )
                 + (f": {ordered}" if ordered else "")
+                + (f"; {multiple_total} matched with several candidates" if multiple_total else "")
                 + shown_range(page)
                 + notes
             ),
+            "origin": origin or "all",
             "results": results,
             "counts": counts,
+            "multiple_candidates_total": multiple_total,
             "total": total,
             "truncated": truncated,
             **page.fields(),
-            "repos_searched": searched,
+            **_searched_fields(searched, include_repo_list),
             "skipped_repos": skipped_shown,
             "skipped_repos_total": skipped_total,
             "skipped_repos_truncated": skipped_truncated,
@@ -1883,3 +2319,112 @@ def cross_repo_requests_func(
         return response
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return {"status": "error", "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# handlers_of on a route, across every registered repository
+# ---------------------------------------------------------------------------
+
+#: Handler rows kept per matching repo: a route is normally served by one place.
+_ROUTE_ROWS_PER_REPO = 10
+
+
+def handlers_of_route_across_repos(
+    target: str,
+    detail_level: str = "standard",
+    max_results: int | None = None,
+) -> dict[str, Any]:
+    """Answer ``handlers_of <route>`` from whichever registered repos serve the route.
+
+    [REGISTRY] A route such as ``POST /v2/respondents/avmap`` names an endpoint, not a
+    repository, so a caller should not have to know which repo serves it. Every registered
+    repo with a graph is asked; the reply lists the repos that matched (``repos_matched``,
+    each with its handler count and matched endpoints) and tags every row with its ``repo``.
+    Rows are capped (``max_results``, default 20; at most ten per repo) and
+    ``results_omitted`` counts the rest; ``repos_without_graph`` and ``repos_unreadable`` count
+    registered repos that could not be asked, and ``repos_skipped`` those left when the call
+    budget (``CRG_CROSS_REPO_BUDGET_SECONDS``) ran out.
+    """
+    from ..registry import Registry
+    from .query import query_graph
+
+    cap = max_results if max_results is not None else 20
+    deadline = None
+    budget = cross_repo_budget_seconds()
+    if budget > 0:
+        deadline = _now() + budget
+    entries = Registry().list_repos()
+    matched: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    total_rows = 0
+    searched = without_graph = unreadable = skipped = 0
+    for entry in entries:
+        if _out_of_budget(deadline):
+            skipped += 1
+            continue
+        repo_path = Path(str(entry.get("path") or ""))
+        if not repo_path.is_dir() or not get_db_path(repo_path).exists():
+            without_graph += 1
+            continue
+        try:
+            reply = query_graph(
+                pattern="handlers_of", target=target, repo_root=str(repo_path),
+                detail_level=detail_level, max_results=min(cap, _ROUTE_ROWS_PER_REPO),
+            )
+        except Exception as exc:  # one broken graph must not hide the others
+            logger.warning("handlers_of route lookup failed in %s: %s", repo_path, exc)
+            unreadable += 1
+            continue
+        searched += 1
+        if reply.get("status") != "ok":
+            continue
+        label = _repo_label(entry)
+        handlers = int(reply.get("result_count", len(reply.get("results", []))))
+        matched.append({
+            "repo": label,
+            "handlers": handlers,
+            "matched_endpoints": list(reply.get("matched_endpoints", [])),
+        })
+        total_rows += handlers
+        for row in reply.get("results", []):
+            if len(rows) < cap:
+                rows.append({**row, "repo": label})
+    scope = {
+        "repos_searched": searched,
+        "repos_without_graph": without_graph,
+        "repos_unreadable": unreadable,
+        "repos_skipped": skipped,
+    }
+    note = "".join(
+        f", {n} {why}" for n, why in (
+            (without_graph, "without a graph"), (unreadable, "unreadable"),
+            (skipped, "skipped (call budget spent)"),
+        ) if n
+    )
+    if not matched:
+        return {
+            "status": "not_found",
+            "pattern": "handlers_of",
+            "target": _sanitize_name(target),
+            "summary": (
+                f"No endpoint matches route '{_sanitize_name(target)}' in {searched} "
+                f"registered repo(s) searched{note}."
+            ),
+            **scope,
+        }
+    names = ", ".join(f"{m['repo']} ({m['handlers']})" for m in matched[:10])
+    return {
+        "status": "ok",
+        "pattern": "handlers_of",
+        "target": _sanitize_name(target),
+        "summary": (
+            f"Route '{_sanitize_name(target)}' is handled in {len(matched)} of {searched} "
+            f"registered repo(s) searched{note}: {names}"
+            f"{' ...' if len(matched) > 10 else ''}. Pass repo_root for one repo's full answer."
+        ),
+        "repos_matched": matched[:20],
+        **scope,
+        "result_count": total_rows,
+        "results_omitted": max(0, total_rows - len(rows)),
+        "results": rows,
+    }

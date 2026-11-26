@@ -153,7 +153,7 @@ _MAX_DETECT_FLOWS = 200
 # step detail should use get_affected_flows_tool, so the embedded copy keeps
 # per-flow metadata only.
 _DETECT_FLOW_FIELDS = (
-    "id", "name", "criticality", "depth", "node_count", "file_count",
+    "id", "name", "flow_key", "file", "criticality", "depth", "node_count", "file_count",
 )
 
 
@@ -1007,6 +1007,9 @@ def get_affected_flows_func(
         limit = ceiling if max_flows <= 0 else min(max_flows, ceiling)
         truncated = total > limit
         flows = flows[:limit]
+        from .flows_tools import attach_flow_keys
+
+        attach_flow_keys(store, root, flows)
         if detail_level == "minimal":
             flows = _project(flows, _DETECT_FLOW_FIELDS)
         else:

@@ -4,6 +4,59 @@
 
 ### Added
 
+- `query_graph_tool` `handlers_of` with a route (`POST /v2/respondents/avmap`) no longer needs
+  `repo_root`: omit it on a multi-repo server, or pass `"*"`, and every registered repo with a graph
+  is asked. The reply names `repos_matched` and tags rows with `repo`, stays small (default 20
+  rows, ten per repo) and counts the repos it could not ask. Other patterns and non-route targets
+  keep the `repo_root is required` error. Query-time only.
+- `query_graph_tool` `callers_of` on a name several nodes share (`ambiguous`) now reports
+  `direct_callers` per candidate (standard mode; the summary names them in minimal) and `total_direct_callers`, and its summary starts `AMBIGUOUS, not
+  'no callers'`, so a candidate with no callers is not read as the answer. `target` may carry the
+  file hint as `path/File.java::name` (the same hint as the `file_hint` parameter). Query-time only.
+- Flows have a key that survives a reindex. Flow ids are row numbers and are renumbered when the
+  flows are rebuilt (`onboard_run_outputs` was #323 and became #1). `list_flows_tool`,
+  `get_flow_tool` and `get_affected_flows_tool` (both detail levels) now give every flow
+  `flow_key` (its entry node's qualified name, relative to the repository) and `file`, and
+  `get_flow_tool` takes `flow_key` as a lookup (`flow_id` still wins, then `flow_key`, then
+  `flow_name`). Read from the entry node at query time: no build change, same index fingerprint.
+  The minimal affected-flow rows (also in `detect_changes_tool`) gain the two fields.
+- `pr_blast_radius_tool` pages its `files`: `files_limit` (default 50, at most 200) and `cursor`.
+  Before, a pull request of 196 files showed the first 50 with `files_truncated` and no way to
+  read the rest. `files_total` gives the full count and `next_cursor` the next page; the cursor is
+  refused for another `pr`, `head`, `base`, `depth` or `include_external`, or if the changed files
+  differ. Later pages leave out the endpoint, config, caller and schema lists (first page only).
+  The first page is unchanged apart from `files_total`.
+- `cross_repo_requests_tool` `origin="awssdk"` rows carry `is_test`, and there are new filters
+  that apply before counts and paging (a cursor is refused for different values): `path_prefix`
+  (awssdk, stepfunction), `source` (awssdk), `machine` (stepfunction, exact state machine name)
+  and `include_tests` (awssdk; default True so counts do not change; False hides test rows and
+  reports `tests_hidden`). Agents could not reach rows under a late directory because the list is
+  path-sorted in pages of 100. Query-time only.
+- `cross_repo_search_tool` takes `match="exact"` (only `exact`, `exact_ci` and `qualified` rows) and
+  its reply carries `exact: "found"|"none"`; the summary says `exact: none` when no row is an exact
+  name. With the default `match="fuzzy"` and no exact hit, `fuzzy` rows that share fewer than half
+  of the query's words are dropped and at most 10 are kept, with `fuzzy_dropped` giving the count
+  (an unmatched hyphenated name returned 600 rows). `include_fuzzy=True` returns everything as
+  before. The cursor is tied to `match`. Query-time only.
+- `cross_repo_search_tool` and the Feign/JS origins of `cross_repo_requests_tool` return
+  `repos_searched_total` (a count) on every reply and `repos_searched` (the names) only for 10
+  repos or fewer, or with the new `include_repo_list=True`; the name list was ~2.5 KB of every
+  reply on a 122-repo registry. `skipped_repos` is now listed in full instead of cut at 20
+  (`skipped_repos_truncated` is always false). Query-time only.
+- `transitions_of_tool`: every transition of one Step Functions state machine (name, `<file>::<machine>`
+  or `*.asl.json` file) in a single call, with `from`, `to`, `kind` (Next, Choice, Default, Catch,
+  Branch, Map), the Choice `condition`, `line` and, for Catch, `errors`. It pages like the other
+  tools; `detail_level="minimal"` returns one string per transition. It replaces a
+  `next_states_of` call per state. Query-time only; the index fingerprint is unchanged.
+- `query_graph_tool` `children_of` on a Step Functions definition file (`*.asl.json`) now lists the
+  states of its machine, nested Parallel and Map states included, with a `note` saying so; it used
+  to return only the machine node, whose qualified name (`<file>::<machine>`) had to be guessed. A
+  file with several machines lists them with `state_count`. Other files and `<file>::<machine>`
+  are unchanged. Query-time only.
+- `query_graph_tool` `next_states_of` and `previous_states_of` with `detail_level="minimal"` now
+  return a compact `edges` list (`target`, `via`, `condition`, `line`) beside the names, so a
+  Choice branch's test is no longer lost; it stays about a third of the standard reply.
+  Query-time only; the index fingerprint is unchanged.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
@@ -37,9 +90,34 @@
   another property of the same repo are expanded, per profile (default preferred; `config_profile` and
   `config_alternatives` say which), with Spring relaxed binding. Rows carry `target_source` (`config` or
   `config_key_unresolved`) and `via`. New module `config_values.py`.
+- `cross_repo_requests_tool` marks a `matched` row that has several `candidates` with
+  `multiple_candidates: true` and counts them in `multiple_candidates_total` and the summary. `status`
+  and `counts` are unchanged. Query-time only.
+- `list_flows_tool` reports the count before merging when `group_duplicates` (default true)
+  removed flows: `total_before_grouping` and the summary ("329 execution flow(s) (594 before
+  merging duplicates; ...)"). The default and `total` are unchanged.
+- `semantic_search_nodes_tool` hits and `query_graph_tool` `file_summary` rows of a `ConfigProperty`
+  now carry `value` (at most 200 characters), `value_truncated` and `doc_profiles` where present.
+  Values of secret-looking keys and credential-looking values stay hidden (the parse-time filter is
+  applied again on output); `detail_level="minimal"` is unchanged. Query-time only.
+- `get_knowledge_gaps_tool` takes `exclude_data_types` (default false, as on `get_hub_nodes_tool`):
+  enums, records, Lombok or accessor-only classes and other data carriers leave `untested_hotspots`
+  before ranking, and `data_types_excluded` counts them.
 
 ### Changed
 
+- `query_graph_tool` `detail_level="minimal"` honours an explicit `max_results` (it used to cap at 5
+  whatever was asked); with no `max_results` it still shows 5. A cut answer carries `paging_hint`
+  (rows left, `next_cursor` or a larger `max_results`). In `callees_of`, only the first edge of a target keeps its candidate list
+  (`ambiguous_targets` / `unresolved_targets`; counts stay on every edge), which
+  is what made a `callees_of` answer tens of kilobytes. `max_results` still caps rows and `edges`
+  together and minimal still has no `edges`.
+- `query_graph_tool` `callees_of` answers `resolution="direct"` when `resolution` is omitted (it
+  was `"all"`): a callee list was mostly bare-name noise (`map`, `stream`, `get`). The summary and
+  `hidden_call_sites` say how many name-matched call sites were hidden and how many of them are
+  JDK, stream or builtin names; `resolution="all"` returns the earlier answer. New
+  `hide_unresolved` flag hides bare-name call sites and well-known names under any resolution.
+  `callers_of` and `references_to` are unchanged. Query-time only.
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or
   `amqp` now pages. A list cut at `max_results` carries `next_cursor`; passing it back as `cursor`
   returns the next page, until the last page has none. Before, those origins ended at
@@ -906,6 +984,16 @@
   hostile-input bounds) and `test_ember_resolver.py`, over the synthetic apps in
   `tests/fixtures/ember/`. `ember_resolved` is a resolver-bound key in
   `graph.py`, so Ember edges are `INFERRED`.
+- `query_graph_tool` `publishers_of` and `listeners_of` rows now carry `call_site` (the call-site
+  `line`, and `file` when it differs), so `detail_level="minimal"` keeps the line the exchange
+  form of `cross_repo_requests_tool` returns. Additive.
+- `query_graph_tool` `requesters_of` with a route target (`GET /v2/attributevalues`) matches Endpoint
+  nodes only, like `handlers_of`, instead of an `ambiguous` list that mixed in classes. Several
+  matching endpoints are all answered (each row names its `endpoint`); no match is `not_found`.
+- `cross_repo_search_tool` no longer reads as complete when the per-repo `limit` cut matches off:
+  the repo is named in `repos_capped`, `total` is flagged `total_is_lower_bound` (`Found N+` in the
+  summary) and `truncated` is set. The row caps are unchanged; one row more than `limit` is fetched
+  per repo only to detect the cut.
 
 ## [2.4.0] - 2026-11-10
 

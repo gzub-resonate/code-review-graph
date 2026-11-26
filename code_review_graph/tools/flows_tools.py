@@ -58,12 +58,17 @@ def list_flows(
         cursor: ``next_cursor`` from the previous reply, to read the next page
                 of the same list. Omit it for the first page. A cursor is opaque
                 and only valid for the same arguments on the same graph.
+                Every flow has ``flow_key`` (its entry node's qualified name, relative to
+                the repository) and ``file``; unlike ``id`` they survive a reindex, and
+                ``get_flow(flow_key=...)`` finds the flow by them.
         entry_kind: Optional filter by how the flow starts: ``http``, ``scheduler``,
                 ``queue_listener``, ``event``, ``main`` or ``other``.
         group_duplicates: When true (default), flows whose call tree below the entry is
                 the same set of nodes (a public and an admin controller calling one
                 service method) are one flow: the most critical stands for the group and
-                lists every entry point under ``entry_points``. ``total`` counts groups.
+                lists every entry point under ``entry_points``. ``total`` counts groups. When
+                merging removed flows, ``total_before_grouping`` and the summary give the
+                count without it; ``group_duplicates=false`` lists one row per entry point.
 
     Returns:
         Flows with criticality scores, plus ``total`` and ``truncated``. When more
@@ -87,18 +92,25 @@ def list_flows(
         )
         if entry_kind:
             flows = [f for f in flows if f.get("entry_kind") == entry_kind]
-        if group_duplicates:
-            flows = group_duplicate_flows(flows)
-
-        if kind:
+        def _of_kind(items: list[dict]) -> list[dict]:
+            if not kind:
+                return items
             filtered = []
-            for f in flows:
+            for f in items:
                 ep_id = f.get("entry_point_id")
                 if ep_id is not None:
                     node_kind = store.get_node_kind_by_id(ep_id)
                     if node_kind == kind:
                         filtered.append(f)
-            flows = filtered
+            return filtered
+
+        raw_total: int | None = None
+        if group_duplicates:
+            ungrouped = flows
+            flows = group_duplicate_flows(flows)
+            if len(flows) != len(ungrouped):
+                raw_total = len(_of_kind(ungrouped))
+        flows = _of_kind(flows)
 
         page = paginate(
             flows, limit, _MAX_FLOWS, cursor,
@@ -120,24 +132,32 @@ def list_flows(
             if entry is not None:
                 f["qualified_name"] = _relative_to_root(entry.qualified_name, root)
                 f["file"] = _relative_to_root(entry.file_path, root)
+                f["flow_key"] = f["qualified_name"]
 
         if detail_level == "minimal":
             flows = [
                 {
                     k: f[k]
                     for k in (
-                        "name", "qualified_name", "file", "criticality", "node_count",
-                        "entry_kind", "group_size",
+                        "name", "qualified_name", "file", "flow_key", "criticality",
+                        "node_count", "entry_kind", "group_size",
                     )
                     if k in f
                 }
                 for f in flows
             ]
 
+        merged_note = ""
+        if raw_total is not None and raw_total != total:
+            merged_note = (
+                f" ({raw_total} before merging duplicates; "
+                "group_duplicates=false lists one per entry point)"
+            )
         result: dict[str, object] = {
             "status": "ok",
             "summary": (
                 f"Found {total} execution flow(s)"
+                + merged_note
                 + shown_range(page)
             ),
             "flows": flows,
@@ -145,6 +165,8 @@ def list_flows(
             "truncated": page.truncated,
             **page.fields(),
         }
+        if raw_total is not None and raw_total != total:
+            result["total_before_grouping"] = raw_total
         result["_hints"] = generate_hints(
             "list_flows_tool", result, get_session()
         )
@@ -160,6 +182,37 @@ def list_flows(
 # ---------------------------------------------------------------------------
 
 
+def attach_flow_keys(store: Any, root: Path | None, flows: list[dict[str, Any]]) -> None:
+    """Give each flow ``flow_key`` (its entry node's qualified name) and ``file`` (its entry file).
+
+    A flow's ``id`` is a row number that changes when the flows are rebuilt, so a reindex turns
+    flow #323 into flow #1. The entry node's qualified name does not change, and the ids of
+    the nodes behind it are read at query time, so nothing is stored. Both values are relative
+    to *root* like the other flow rows. A flow whose entry node is gone gets neither.
+    """
+    for flow in flows:
+        entry_id = flow.get("entry_point_id")
+        entry = store.get_node_by_id(entry_id) if entry_id is not None else None
+        if entry is None:
+            continue
+        flow["flow_key"] = _relative_to_root(entry.qualified_name, root)
+        flow.setdefault("file", _relative_to_root(entry.file_path, root))
+
+
+def _flow_id_for_key(store: Any, root: Path, key: str) -> int | None:
+    """The id of the flow whose entry node has this qualified name (relative or absolute)."""
+    from ..parser import normalize_file_path
+
+    names = {key, f"{normalize_file_path(root)}/{key}"}
+    row = store._conn.execute(
+        "SELECT f.id FROM flows f JOIN nodes n ON n.id = f.entry_point_id "
+        f"WHERE n.qualified_name IN ({','.join('?' * len(names))}) "  # nosec B608
+        "ORDER BY f.criticality DESC, f.id LIMIT 1",
+        sorted(names),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
 def get_flow(
     flow_id: int | None = None,
     flow_name: str | None = None,
@@ -168,6 +221,7 @@ def get_flow(
     max_steps: int = 50,
     max_source_lines: int = 400,
     cursor: str | None = None,
+    flow_key: str | None = None,
 ) -> dict[str, Any]:
     """Get details of a single execution flow.
 
@@ -176,7 +230,12 @@ def get_flow(
     snippets for every step in the path.
 
     Args:
-        flow_id: Database ID of the flow (from list_flows).
+        flow_id: Database ID of the flow (from list_flows). Ids are renumbered when the
+            flows are rebuilt (a reindex), so use ``flow_key`` to keep a reference.
+        flow_key: The flow's stable key, as ``list_flows`` returns it: its entry node's
+            qualified name, relative to the repository (``path/File.java::Class.method``).
+            Used when ``flow_id`` is not given; takes precedence over ``flow_name``. No match
+            is ``not_found``.
         flow_name: Name to search for: exact name, then qualified-name
                    segment/suffix, then partial match. Ignored if flow_id
                    given.
@@ -209,6 +268,9 @@ def get_flow(
 
         if flow_id is not None:
             flow = get_flow_by_id(store, flow_id)
+        elif flow_key is not None:
+            found_id = _flow_id_for_key(store, root, flow_key)
+            flow = get_flow_by_id(store, found_id) if found_id is not None else None
         elif flow_name is not None:
             # Exact name, then qualified-name segment/suffix, then partial.
             # Highest criticality wins within a tier (list is sorted by it).
@@ -259,6 +321,7 @@ def get_flow(
             stamp=graph_stamp(store),
         )
         steps, total_steps = page.items, page.total
+        attach_flow_keys(store, root, [flow])
         flow["steps"] = steps
         flow["total_steps"] = total_steps
         flow["truncated"] = page.truncated

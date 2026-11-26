@@ -2537,7 +2537,7 @@ class TestUnevidencedCallsToDuplicates:
             assert result["results"] == []
         callees = query_graph(
             "callees_of", f"{(tmp_path / 'Shapes.java').as_posix()}::Shapes.rect",
-            str(tmp_path),
+            str(tmp_path), resolution="all",
         )
         [row] = callees["results"]
         assert row["resolution"] == "ambiguous"

@@ -27,8 +27,9 @@ from typing import Any
 from .graph import GraphStore
 
 __all__ = [
-    "EXCHANGE_PREFIX", "MATCH_EXACT", "MATCH_PATTERN", "MATCH_UNKNOWN",
-    "has_amqp_edges", "has_wildcard", "link_kind", "read_channel_edges", "topic_matches",
+    "EXCHANGE_PREFIX", "KIND_EXCHANGE", "KIND_QUEUE", "MATCH_EXACT", "MATCH_PATTERN",
+    "MATCH_UNKNOWN", "edge_kind", "has_amqp_edges", "has_wildcard", "link_kind",
+    "read_channel_edges", "topic_matches",
 ]
 
 EXCHANGE_PREFIX = "external:rabbitmq:"
@@ -110,6 +111,25 @@ def link_kind(binding_key: Any, routing_key: Any) -> str | None:
 PUBLISH_KINDS = ("PUBLISHES", "PRODUCES")
 
 
+#: ``kind`` of a row whose target is a queue name, not an exchange.
+KIND_QUEUE = "queue"
+KIND_EXCHANGE = "exchange"
+
+
+def edge_kind(target: str, info: dict[str, Any]) -> str:
+    """Whether an edge to ``external:rabbitmq:<name>`` names an exchange or a queue.
+
+    The parsers write a bare queue (``@RabbitListener(queues=...)``, ``basic_consume``, a
+    publish on the default exchange) as an edge whose only name field is ``queue`` and whose
+    value is the target's own name. A binding to an exchange carries ``exchange`` and/or a
+    ``binding_key``, and its ``queue`` is a different name (the queue bound to the exchange).
+    """
+    name = target[len(EXCHANGE_PREFIX):] if target.startswith(EXCHANGE_PREFIX) else target
+    if "exchange" not in info and "binding_key" not in info and info.get("queue") == name:
+        return KIND_QUEUE
+    return KIND_EXCHANGE
+
+
 def has_amqp_edges(store: GraphStore) -> bool:
     """Whether the graph has any edge that ends at an AMQP exchange or queue."""
     row = store._conn.execute(
@@ -149,6 +169,7 @@ def read_channel_edges(
         row: dict[str, Any] = {
             "role": role, "source": source, "file_path": file_path, "line": line,
         }
+        row_kind = edge_kind(target, info)
         if role == "publisher":
             row["routing_key"] = info.get("routing_key")
         else:
@@ -156,6 +177,8 @@ def read_channel_edges(
             row["queue"] = info.get("queue")
         # ``CONSUMES`` and its ``HANDLES`` twin are one listener.
         key = tuple(str(v) for v in row.values())
+        if row_kind == KIND_QUEUE:
+            row["kind"] = KIND_QUEUE
         if key in seen:
             continue
         seen.add(key)

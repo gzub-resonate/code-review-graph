@@ -308,7 +308,9 @@ class TestCrossRepoSearch:
             str(ios_repo),
         ]
         assert result["summary"] == "Found 4 result(s) across 2 repo(s) for 'splash'"
-        assert [call.kwargs["limit"] for call in mock_search.call_args_list] == [2, 2]
+        # One row more than ``limit`` is fetched, only to learn whether the limit cut anything.
+        assert [call.kwargs["limit"] for call in mock_search.call_args_list] == [3, 3]
+        assert result["repos_capped_total"] == 0 and "total_is_lower_bound" not in result
         assert "unknown" not in result
 
     def _three_repo_registry(self, tmp_path):
