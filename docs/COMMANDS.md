@@ -833,6 +833,12 @@ group_duplicates: bool = True # merge flows with the same call tree below the en
 Each flow row carries `qualified_name` and `file` of its entry point (relative to
 the repository root), so two flows with the same name can be told apart.
 
+Flow ids are row numbers: a reindex renumbers them (a flow that was #323 became #1). Every flow in
+`list_flows_tool`, `get_flow_tool` and `get_affected_flows_tool` (both detail levels) therefore also
+carries `flow_key`, its entry node's qualified name relative to the repository
+(`src/Foo.java::Foo.bar`), and `file`; `get_flow_tool(flow_key=...)` finds the flow by it. Both are
+read from the entry node at query time, so they need no rebuild and the index fingerprint is unchanged.
+
 A Java flow is named `Class.method` (`OrderController.list`), not by the bare method name.
 Flow ids are unchanged; `get_flow_tool` still finds a flow by its bare method name. Each flow
 has an `entry_kind`: `http` (a route handler; `route` lists `GET /path`), `scheduler`
@@ -849,7 +855,8 @@ them, and `total` counts groups. Pass `group_duplicates=false` for one row per e
 #### `get_flow_tool`
 ```
 flow_id: int | None          # Database ID from list_flows_tool
-flow_name: str | None        # Name to search (partial match); ignored when flow_id is given
+flow_key: str | None         # Stable key from any flow row (entry node qualified name); used when flow_id is not given
+flow_name: str | None        # Name to search (partial match); ignored when flow_id or flow_key is given
 include_source: bool = False # Source snippet per step
 repo_root: str | None
 max_steps: int = 50          # Steps per page (max 200); flow.total_steps reports the full count
@@ -1147,7 +1154,19 @@ limit: int = 20              # Results per repo
 max_results: int = 50        # Merged results across searched repos (max 100)
 repos: list[str] | None      # Aliases or folder names; default: every registered repo
 cursor: str | None           # next_cursor of the previous reply (see Paging)
+include_repo_list: bool = False  # Return repos_searched (names) even for more than 10 repos
+include_fuzzy: bool = False  # Keep fuzzy/tokens rows (hidden when an exact hit exists; capped when none does)
+match: str = "fuzzy"         # fuzzy | exact (exact: only exact, exact_ci and qualified rows)
 ```
+
+The reply's `exact` is `"found"` or `"none"`, and the summary says `exact: none` when no row has the query as
+its name. With `match="fuzzy"` (default) and no exact hit, `fuzzy` rows that share fewer than half of the
+query's words are dropped and at most 10 are kept (an unmatched hyphenated name returned 600 rows, ~25 KB);
+`fuzzy_dropped` and the summary say how many were hidden, and `include_fuzzy=true` returns them all.
+`match="exact"` returns only exact rows and counts the rest in `fuzzy_dropped`.
+
+`repos_searched_total` is the number of repos searched. `repos_searched` (their names) is returned only
+for 10 repos or fewer, or with `include_repo_list=true`; it was ~2.5 KB on a 122-repo registry.
 
 `repos` limits the search to named registry entries. Matching is exact and
 case-sensitive; paths are not accepted. An alias match wins over a folder-name
@@ -1164,8 +1183,8 @@ return carry `score` 0.
 
 The call has a time budget, `CRG_CROSS_REPO_BUDGET_SECONDS` (default 300, `0` = no limit).
 When it is spent no further repo is started: the ones not searched are listed in
-`skipped_repos` (capped at 20; `skipped_repos_total` and `skipped_repos_truncated` give
-the real count), `truncated` is set and the summary says so. The first repo always runs.
+`skipped_repos` (always listed in full; `skipped_repos_total` is the count and
+`skipped_repos_truncated` is always false), `truncated` is set and the summary says so. The first repo always runs.
 Up to `CRG_CROSS_REPO_WORKERS` repos (default 4, `1` = one at a time, at most 32) are
 searched at once, each on its own graph connection; the rows are ordered the same way
 whichever search finishes first.
@@ -1193,7 +1212,22 @@ max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js | terraform | workflow | stepfunction | awssdk; default: feign and js
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
+include_repo_list: bool = False  # Feign/js: return repos_searched (names) even for more than 10 repos
+path_prefix: str | None      # awssdk, stepfunction: only rows whose file is this repo-relative path or below it
+source: str | None           # awssdk: only rows whose source symbol equals this, ends with it after "." or lies below it
+machine: str | None          # stepfunction: only rows of this state machine (exact name)
+include_tests: bool = True   # awssdk: False hides rows from test files; every row has is_test
 ```
+
+`awssdk` rows carry `is_test` (a test directory or test file name). `include_tests` defaults to True, so counts
+are as before; with `include_tests=false` the reply gives `tests_hidden` and the summary says how many rows were
+hidden. `path_prefix`, `source`, `machine` and `include_tests` filter before `counts`, `total` and paging (they
+reach rows a path-sorted page of 100 never got to) and a cursor is refused for different values. Each is refused
+for an origin it does not apply to.
+
+For the Feign and JS/TS origins `repos_searched_total` is the number of repos read and `repos_searched`
+(the names) is returned only for 10 repos or fewer, or with `include_repo_list=true`. `skipped_repos` is
+always listed in full.
 
 `origin="terraform"` lists the remote Terraform module sources (`git::...//modules/x`) the repos name and the
 registered repo and folder each one resolves to. `service` filters by module repo name, `route` by module folder
@@ -1582,6 +1616,8 @@ base: str | None             # The branch the PR merges into; default: the remot
 depth: int = 3               # Hops the reach walk follows from a changed symbol (max 6)
 include_external: bool = True  # Join affected endpoints to client calls in the other registered repos
 repo_root: str | None        # Repository root; auto-detected
+files_limit: int = 50        # File rows per page (max 200)
+cursor: str | None           # next_cursor of the previous reply, to read the next page of files
 ```
 
 The graph holds the default branch, so a pull request's new files are not in it. This tool reads only the files the
@@ -1605,7 +1641,11 @@ lists the DDL in migration files the pull request adds or changes. `notes` state
 pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow
 clone without a merge base, Python routes whose router prefix sits in a file the pull request does not touch, and files
 that could not be parsed. At most 300 files are parsed per request; lists are capped, with `files_truncated` and
-`external_callers_total` reporting the real size.
+`external_callers_total` reporting the real size. `files` pages: `files_total` is the full count, and when
+`files_truncated` is true `next_cursor` returns the next `files_limit` rows (a later page has `offset`). A cursor is
+refused for another `pr`, `head`, `base`, `depth` or `include_external`, or when the changed files differ now. Only
+the first page carries `endpoints`, `contract_changes`, `same_file_endpoints`, `config_changes`, `external_callers`
+and `schema_changes`; a later page says so in `continuation_note`.
 
 ## Result Bounds
 

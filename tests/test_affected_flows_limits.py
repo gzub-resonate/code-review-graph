@@ -15,7 +15,9 @@ from unittest.mock import MagicMock
 from code_review_graph.graph import EdgeInfo, GraphStore, NodeInfo
 from code_review_graph.tools.review import get_affected_flows_func
 
-MINIMAL_KEYS = {"id", "name", "criticality", "depth", "node_count", "file_count"}
+MINIMAL_KEYS = {
+    "id", "name", "flow_key", "file", "criticality", "depth", "node_count", "file_count",
+}
 
 
 class _FlowFixture:

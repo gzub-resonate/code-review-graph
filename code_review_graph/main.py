@@ -1122,6 +1122,7 @@ async def get_flow_tool(
     max_steps: int = 50,
     max_source_lines: int = 400,
     cursor: Optional[str] = None,
+    flow_key: Optional[str] = None,
     detail_level: str = "standard",
 ) -> dict:
     """Get detailed information about a single execution flow.
@@ -1129,11 +1130,17 @@ async def get_flow_tool(
     Returns the full call path with each step's function name, file, and
     line numbers. Optionally includes source code snippets for each step.
 
-    Provide either flow_id (from list_flows_tool) or flow_name to search by name.
+    Provide flow_id (from list_flows_tool), flow_key or flow_name to search by name.
+    Flow ids are renumbered when the graph is reindexed (flow #323 became #1); every flow
+    in list_flows_tool, get_flow_tool and get_affected_flows_tool also carries ``flow_key``
+    (its entry node's qualified name, relative to the repository) and ``file``, which stay
+    the same across a reindex.
 
     Args:
-        flow_id: Database ID of the flow.
-        flow_name: Name to search for (partial match). Ignored if flow_id given.
+        flow_id: Database ID of the flow. Not stable across a reindex.
+        flow_key: The stable ``flow_key`` of a flow. Used when flow_id is not given and
+            before flow_name; no match is ``not_found``.
+        flow_name: Name to search for (partial match). Ignored if flow_id or flow_key given.
         include_source: Include source code snippets for each step. Default: False.
         repo_root: Repository root path. Auto-detected if omitted.
         max_steps: Maximum steps to return; flow.total_steps reports the
@@ -1157,7 +1164,7 @@ async def get_flow_tool(
             flow_id=flow_id, flow_name=flow_name,
             include_source=include_source, repo_root=root,
             max_steps=max_steps, max_source_lines=max_source_lines,
-            cursor=cursor,
+            cursor=cursor, flow_key=flow_key,
         ),
         root,
     )
@@ -1920,6 +1927,8 @@ async def cross_repo_search_tool(
     cursor: Optional[str] = None,
     detail_level: str = "standard",
     include_fuzzy: bool = False,
+    include_repo_list: bool = False,
+    match: str = "fuzzy",
 ) -> dict:
     """Search for code entities across registered repositories.
 
@@ -1957,6 +1966,15 @@ async def cross_repo_search_tool(
         include_fuzzy: When an ``exact``, ``exact_ci`` or ``qualified`` match exists,
             ``fuzzy`` and ``tokens`` rows are hidden and counted in ``fuzzy_dropped``.
             Pass True to keep them. Default: False.
+        include_repo_list: ``repos_searched_total`` is always the number of repos searched.
+            ``repos_searched`` (the names) is returned only for 10 repos or fewer, or when this
+            is True. ``skipped_repos`` is always listed in full. Default: False.
+        match: ``"fuzzy"`` (default, as before) or ``"exact"`` (only ``exact``, ``exact_ci``
+            and ``qualified`` rows). The reply's ``exact`` is ``"found"`` or ``"none"`` and
+            the summary says ``exact: none``. With ``"fuzzy"`` and no exact hit, ``fuzzy``
+            rows sharing fewer than half of the query's words are dropped and at most 10 are
+            kept; ``fuzzy_dropped`` counts what was hidden and ``include_fuzzy=True``
+            returns everything.
 
     Returns:
         Merged results. When more remain the reply carries ``next_cursor``; a
@@ -1967,6 +1985,7 @@ async def cross_repo_search_tool(
         lambda: cross_repo_search_func(
             query=query, kind=kind, limit=limit, max_results=max_results,
             repos=repos, cursor=cursor, include_fuzzy=include_fuzzy,
+            include_repo_list=include_repo_list, match=match,
         ),
         None,
         provenance=False,
@@ -1985,6 +2004,11 @@ async def cross_repo_requests_tool(
     cursor: Optional[str] = None,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    include_repo_list: bool = False,
+    path_prefix: Optional[str] = None,
+    source: Optional[str] = None,
+    machine: Optional[str] = None,
+    include_tests: bool = True,
 ) -> dict:
     """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
 
@@ -2108,6 +2132,19 @@ async def cross_repo_requests_tool(
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
+        include_repo_list: Feign/JS: ``repos_searched_total`` is always the count of repos read;
+            ``repos_searched`` (the names) is returned only for 10 repos or fewer, or when this
+            is True. ``skipped_repos`` is always listed in full. Default: False.
+        path_prefix: ``awssdk`` and ``stepfunction`` only. Keep rows whose ``file`` is this
+            repo-relative path or lies below it (``mcp/``). Applied before paging.
+        source: ``awssdk`` only. Keep rows whose ``source`` symbol equals this, ends with it
+            after a ``.``, or lies below it. Applied before paging.
+        machine: ``stepfunction`` only. Keep rows of this state machine (exact name), applied
+            before paging.
+        include_tests: ``awssdk`` only. Every row has ``is_test`` (a test directory or file
+            name). Default True keeps them and changes no count; False hides them and the
+            reply's ``tests_hidden`` and summary say how many. A cursor is tied to all four
+            filters. The four are refused for other origins.
     """
     if repo_root and not repos:
         repos = [Path(repo_root).name]
@@ -2116,6 +2153,8 @@ async def cross_repo_requests_tool(
         lambda: cross_repo_requests_func(
             repos=repos, service=service, route=route, status=status,
             limit=limit, max_results=max_results, origin=origin, cursor=cursor,
+            include_repo_list=include_repo_list, path_prefix=path_prefix, source=source,
+            machine=machine, include_tests=include_tests,
         ),
         None,
         provenance=False,
@@ -2130,6 +2169,8 @@ async def pr_blast_radius_tool(
     depth: int = 3,
     include_external: bool = True,
     repo_root: Optional[str] = None,
+    files_limit: int = 50,
+    cursor: Optional[str] = None,
     detail_level: str = "standard",
 ) -> dict:
     """Blast radius of a pull request, read from its changed files and the base graph.
@@ -2164,6 +2205,14 @@ async def pr_blast_radius_tool(
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
+        files_limit: File rows per page. Default: 50, at most 200. ``files_total`` is the
+            full count and ``files_truncated`` says whether more remain.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of ``files``
+            (``offset`` is set after the first page). Refused for other ``pr``, ``head``,
+            ``base``, ``depth`` or ``include_external``, or if the changed files differ now.
+            Only the first page carries ``endpoints``, ``contract_changes``,
+            ``same_file_endpoints``, ``config_changes``, ``external_callers`` and
+            ``schema_changes``; a later page says so in ``continuation_note``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -2171,6 +2220,7 @@ async def pr_blast_radius_tool(
         lambda: pr_blast_radius_func(
             pr=pr, head=head, base=base, depth=depth,
             include_external=include_external, repo_root=root,
+            files_limit=files_limit, cursor=cursor,
         ),
         root,
     )

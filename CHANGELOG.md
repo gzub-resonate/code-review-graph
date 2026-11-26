@@ -13,6 +13,36 @@
   `direct_callers` per candidate (standard mode; the summary names them in minimal) and `total_direct_callers`, and its summary starts `AMBIGUOUS, not
   'no callers'`, so a candidate with no callers is not read as the answer. `target` may carry the
   file hint as `path/File.java::name` (the same hint as the `file_hint` parameter). Query-time only.
+- Flows have a key that survives a reindex. Flow ids are row numbers and are renumbered when the
+  flows are rebuilt (`onboard_run_outputs` was #323 and became #1). `list_flows_tool`,
+  `get_flow_tool` and `get_affected_flows_tool` (both detail levels) now give every flow
+  `flow_key` (its entry node's qualified name, relative to the repository) and `file`, and
+  `get_flow_tool` takes `flow_key` as a lookup (`flow_id` still wins, then `flow_key`, then
+  `flow_name`). Read from the entry node at query time: no build change, same index fingerprint.
+  The minimal affected-flow rows (also in `detect_changes_tool`) gain the two fields.
+- `pr_blast_radius_tool` pages its `files`: `files_limit` (default 50, at most 200) and `cursor`.
+  Before, a pull request of 196 files showed the first 50 with `files_truncated` and no way to
+  read the rest. `files_total` gives the full count and `next_cursor` the next page; the cursor is
+  refused for another `pr`, `head`, `base`, `depth` or `include_external`, or if the changed files
+  differ. Later pages leave out the endpoint, config, caller and schema lists (first page only).
+  The first page is unchanged apart from `files_total`.
+- `cross_repo_requests_tool` `origin="awssdk"` rows carry `is_test`, and there are new filters
+  that apply before counts and paging (a cursor is refused for different values): `path_prefix`
+  (awssdk, stepfunction), `source` (awssdk), `machine` (stepfunction, exact state machine name)
+  and `include_tests` (awssdk; default True so counts do not change; False hides test rows and
+  reports `tests_hidden`). Agents could not reach rows under a late directory because the list is
+  path-sorted in pages of 100. Query-time only.
+- `cross_repo_search_tool` takes `match="exact"` (only `exact`, `exact_ci` and `qualified` rows) and
+  its reply carries `exact: "found"|"none"`; the summary says `exact: none` when no row is an exact
+  name. With the default `match="fuzzy"` and no exact hit, `fuzzy` rows that share fewer than half
+  of the query's words are dropped and at most 10 are kept, with `fuzzy_dropped` giving the count
+  (an unmatched hyphenated name returned 600 rows). `include_fuzzy=True` returns everything as
+  before. The cursor is tied to `match`. Query-time only.
+- `cross_repo_search_tool` and the Feign/JS origins of `cross_repo_requests_tool` return
+  `repos_searched_total` (a count) on every reply and `repos_searched` (the names) only for 10
+  repos or fewer, or with the new `include_repo_list=True`; the name list was ~2.5 KB of every
+  reply on a 122-repo registry. `skipped_repos` is now listed in full instead of cut at 20
+  (`skipped_repos_truncated` is always false). Query-time only.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
