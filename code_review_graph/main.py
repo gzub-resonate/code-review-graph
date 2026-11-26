@@ -1677,6 +1677,7 @@ async def get_knowledge_gaps_tool(
     include_tests: bool = False,
     include_non_code: bool = False,
     include_generated: bool = False,
+    exclude_data_types: bool = False,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1709,6 +1710,11 @@ async def get_knowledge_gaps_tool(
             Default: false, so generated files are left out before ranking, totals
             and paging; ``generated_excluded`` says how many that removed. A cursor
             made with one value is refused for the other.
+        exclude_data_types: Leave data carriers (enums, records, Lombok or accessor-only
+            Java classes, dataclasses, data-only TS types) out of the untested hotspots,
+            as ``get_hub_nodes_tool`` does; ``data_types_excluded`` counts them.
+            Default: false (the same default as ``get_hub_nodes_tool``). A cursor made
+            with one value is refused for the other.
 
     Returns:
         Gaps by category. When any category has more rows the reply carries
@@ -1721,7 +1727,7 @@ async def get_knowledge_gaps_tool(
             repo_root=root, max_per_category=max_per_category,
             detail_level=detail_level, cursor=cursor,
             include_tests=include_tests, include_non_code=include_non_code,
-            include_generated=include_generated,
+            include_generated=include_generated, exclude_data_types=exclude_data_types,
         ),
         root,
     )

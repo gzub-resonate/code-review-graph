@@ -47,6 +47,9 @@
   now carry `value` (at most 200 characters), `value_truncated` and `doc_profiles` where present.
   Values of secret-looking keys and credential-looking values stay hidden (the parse-time filter is
   applied again on output); `detail_level="minimal"` is unchanged. Query-time only.
+- `get_knowledge_gaps_tool` takes `exclude_data_types` (default false, as on `get_hub_nodes_tool`):
+  enums, records, Lombok or accessor-only classes and other data carriers leave `untested_hotspots`
+  before ranking, and `data_types_excluded` counts them.
 
 ### Changed
 

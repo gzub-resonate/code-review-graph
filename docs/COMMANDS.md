@@ -948,6 +948,7 @@ detail_level: str = "standard"   # "minimal" drops file paths
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
 include_non_code: bool = False   # also report docs, lockfiles, tooling as gaps
+exclude_data_types: bool = False # leave enums, records, Lombok/accessor-only classes out of untested_hotspots
 ```
 Documentation sections (`DocSection`), lockfile entries (`package-lock.json`,
 `.terraform.lock.hcl`, `uv.lock` and the like), Dockerfile stages and anything
@@ -971,6 +972,10 @@ shows no covering test for: no direct test and none reaching it through test
 helpers. A test of something it only calls does not count, so the two tools
 agree. A community made only of JSON or YAML paths is a config document and is
 not reported as `thin_communities` or `single_file_communities`.
+
+`exclude_data_types=true` leaves data carriers (enums, records, Lombok or accessor-only Java classes, dataclasses,
+data-only TS types) out of `untested_hotspots` before ranking, with the same meaning and the same default (`false`) as
+on `get_hub_nodes_tool`; `data_types_excluded` counts them. A cursor made with one value is refused for the other.
 
 An `import_cycles` row is one group of files that import each other: `size` is
 how many files, `name` and `cycle` spell out one loop with its import lines, and
