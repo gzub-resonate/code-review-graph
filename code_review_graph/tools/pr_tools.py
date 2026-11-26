@@ -12,6 +12,7 @@ from ..endpoint_index import attach as attach_endpoints
 from ..errors import ChangeDiscoveryError
 from ..graph import _sanitize_name
 from ..incremental import get_changed_files
+from ..paging import CursorError, content_stamp, make_scope, paginate, shown_range
 from ._common import _error_response, _get_store, _validate_positive_int
 from .change_scope import (
     KIND_LAST_COMMIT,
@@ -26,6 +27,12 @@ from .change_scope import (
 logger = logging.getLogger(__name__)
 
 _MAX_FILES_SHOWN = 50
+#: Most file rows one page may hold, whatever ``files_limit`` asks for.
+_MAX_FILES_PER_PAGE = 200
+_CONTINUATION_NOTE = (
+    "later page of the file list: endpoints, contract_changes, same_file_endpoints, "
+    "config_changes, external_callers and schema_changes are on the first page only"
+)
 _MAX_ENDPOINTS_SHOWN = 50
 _MAX_CALLERS_SHOWN = 50
 _MAX_NAMES_PER_FILE = 12
@@ -156,6 +163,8 @@ def pr_blast_radius_func(
     depth: int = pbr.DEFAULT_DEPTH,
     include_external: bool = True,
     repo_root: str | None = None,
+    files_limit: int = _MAX_FILES_SHOWN,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Blast radius of a pull request from its changed files, reached through the base graph.
 
@@ -180,9 +189,19 @@ def pr_blast_radius_func(
         include_external: Join the affected endpoints to the client calls of the other
             registered repos (default True).
         repo_root: Repository root path. Auto-detected if omitted.
+        files_limit: File rows per page (default 50, at most 200).
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of ``files``.
+            Refused for other ``pr``, ``head``, ``base``, ``depth`` or ``include_external``
+            values, or when the changed files differ now. A later page leaves out the other
+            lists (see ``continuation_note``).
     """
     _validate_positive_int(depth, "depth")
+    _validate_positive_int(files_limit, "files_limit")
     depth = min(depth, _MAX_DEPTH)
+    scope = make_scope(
+        "pr_blast_radius_tool", pr=pr, head=head, base=base, depth=depth,
+        include_external=include_external,
+    )
     store, root = _get_store(repo_root)
     head_given = bool(head)
     try:
@@ -190,6 +209,11 @@ def pr_blast_radius_func(
             # No pull request named: review the last commit, as every change tool does.
             parent, head, scope_notes = resolve_last_commit(root)
             if base is None and scope_notes:
+                if cursor:
+                    raise CursorError(
+                        "cursor was made for a different query (nothing to compare now); "
+                        "call again without a cursor to start over"
+                    )
                 # No parent commit to compare with, so there is no base to read the old
                 # files from; say so instead of guessing.
                 files = get_changed_files(root, parent, require_vcs=True)
@@ -231,6 +255,11 @@ def pr_blast_radius_func(
                 reason=LAST_COMMIT_REASON + "; reviewing the last commit",
             ))
         if loaded["found"] is None:
+            if cursor:
+                raise CursorError(
+                    "cursor was made for a different query (no files differ now); "
+                    "call again without a cursor to start over"
+                )
             return {
                 "status": "ok",
                 "summary": no_change_summary(
@@ -241,6 +270,7 @@ def pr_blast_radius_func(
             }
         return _build_result(
             root, loaded["found"], loaded["changes"], loaded["notes"], include_external, depth,
+            files_limit=files_limit, cursor=cursor, scope=scope,
         )
     except pbr.PullRequestError as exc:
         return {"status": "error", "error": _sanitize_name(str(exc))}
@@ -355,6 +385,7 @@ def _stacked_note(repo: str, base_ref: str, head: str, base_given: Optional[str]
 def _build_result(
     root: Path, found: dict[str, Any], changes: list[pbr.FileChange], notes: list[str],
     include_external: bool, depth: int,
+    files_limit: int = _MAX_FILES_SHOWN, cursor: str | None = None, scope: str = "",
 ) -> dict[str, Any]:
     reports = found["files"]
     head_servers = attach_endpoints(root.name, root, ([], found["endpoints_head"]))[1]
@@ -449,7 +480,13 @@ def _build_result(
         "external_callers": len(external),
         "config_paths_changed": len(config_rows),
     }
-    return {
+    # The rows are rebuilt on every call, so the stamp is a digest of the rows themselves: a
+    # cursor is only honoured while every file row is still the same.
+    page = paginate(
+        files, files_limit, _MAX_FILES_PER_PAGE, cursor,
+        scope=scope, stamp=content_stamp(files),
+    )
+    result: dict[str, Any] = {
         "status": "ok",
         "summary": (
             f"{totals['files']} files: {totals['symbols_changed']} symbols changed, "
@@ -462,11 +499,20 @@ def _build_result(
                 "(see same_file_endpoints)."
                 if same_file else ""
             )
+            + (f" Files{shown_range(page).lstrip(',')}." if page.truncated or page.offset else "")
         ),
         "depth": depth,
         "totals": totals,
-        "files": files[:_MAX_FILES_SHOWN],
-        "files_truncated": len(files) > _MAX_FILES_SHOWN,
+        "files": page.items,
+        "files_total": page.total,
+        "files_truncated": page.truncated,
+        **page.fields(),
+        "notes": notes,
+    }
+    if page.offset:
+        result["continuation_note"] = _CONTINUATION_NOTE
+        return result
+    result.update({
         "contract_changes": contract[:_MAX_ENDPOINTS_SHOWN],
         "endpoints": endpoints[:_MAX_ENDPOINTS_SHOWN],
         "same_file_endpoints": same_file[:_MAX_ENDPOINTS_SHOWN],
@@ -482,5 +528,5 @@ def _build_result(
             {key: _sanitize_name(value) for key, value in row.items()}
             for row in found["schema"][:_MAX_ENDPOINTS_SHOWN]
         ],
-        "notes": notes,
-    }
+    })
+    return result

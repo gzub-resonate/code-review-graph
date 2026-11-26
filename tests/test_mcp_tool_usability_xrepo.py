@@ -267,3 +267,54 @@ def test_stepfunction_machine_filter(tmp_path, registry):
         cross_repo_requests_func(
             origin="stepfunction", machine="nope", max_results=1, cursor=first["next_cursor"],
         )
+
+
+# ---- C: pr_blast_radius_tool pages its files ---------------------------------------------
+
+from code_review_graph.paging import CursorError  # noqa: E402
+
+from .test_pr_blast_radius import pull_request  # noqa: E402,F401
+from .test_pr_blast_radius import run as pr_run  # noqa: E402
+
+
+def test_pr_files_page_with_a_cursor_and_nothing_is_lost(pull_request):  # noqa: F811
+    whole = pr_run(pull_request)
+    names = [f["file"] for f in whole["files"]]
+    assert len(names) >= 3 and whole["files_truncated"] is False
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        page = pr_run(pull_request, files_limit=1, cursor=cursor)
+        pages += 1
+        seen += [f["file"] for f in page["files"]]
+        assert page["files_total"] == len(names)
+        assert page["totals"]["files"] == whole["totals"]["files"]
+        if cursor:
+            assert page["offset"] == pages - 1
+            # the heavy lists are on the first page only
+            assert "endpoints" not in page and "continuation_note" in page
+        else:
+            assert page["endpoints"] == whole["endpoints"]
+        cursor = page.get("next_cursor")
+        assert page["files_truncated"] is bool(cursor)
+        if not cursor:
+            break
+    assert seen == names and pages == len(names)
+
+
+def test_pr_cursor_is_refused_for_other_arguments(pull_request):  # noqa: F811
+    first = pr_run(pull_request, files_limit=1)
+    cursor = first["next_cursor"]
+    with pytest.raises(CursorError, match="different query"):
+        pr_run(pull_request, files_limit=1, depth=2, cursor=cursor)
+    with pytest.raises(CursorError, match="different query"):
+        pr_run(pull_request, files_limit=1, include_external=False, cursor=cursor)
+    with pytest.raises(CursorError):
+        pr_run(pull_request, files_limit=1, cursor="not-a-cursor")
+
+
+def test_pr_files_limit_is_bounded_and_validated(pull_request):  # noqa: F811
+    with pytest.raises(ValueError):
+        pr_run(pull_request, files_limit=0)
+    assert len(pr_run(pull_request, files_limit=10_000)["files"]) <= 200

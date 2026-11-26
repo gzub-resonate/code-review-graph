@@ -1574,6 +1574,8 @@ base: str | None             # The branch the PR merges into; default: the remot
 depth: int = 3               # Hops the reach walk follows from a changed symbol (max 6)
 include_external: bool = True  # Join affected endpoints to client calls in the other registered repos
 repo_root: str | None        # Repository root; auto-detected
+files_limit: int = 50        # File rows per page (max 200)
+cursor: str | None           # next_cursor of the previous reply, to read the next page of files
 ```
 
 The graph holds the default branch, so a pull request's new files are not in it. This tool reads only the files the
@@ -1597,7 +1599,11 @@ lists the DDL in migration files the pull request adds or changes. `notes` state
 pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow
 clone without a merge base, Python routes whose router prefix sits in a file the pull request does not touch, and files
 that could not be parsed. At most 300 files are parsed per request; lists are capped, with `files_truncated` and
-`external_callers_total` reporting the real size.
+`external_callers_total` reporting the real size. `files` pages: `files_total` is the full count, and when
+`files_truncated` is true `next_cursor` returns the next `files_limit` rows (a later page has `offset`). A cursor is
+refused for another `pr`, `head`, `base`, `depth` or `include_external`, or when the changed files differ now. Only
+the first page carries `endpoints`, `contract_changes`, `same_file_endpoints`, `config_changes`, `external_callers`
+and `schema_changes`; a later page says so in `continuation_note`.
 
 ## Result Bounds
 

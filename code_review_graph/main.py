@@ -2113,6 +2113,8 @@ async def pr_blast_radius_tool(
     include_external: bool = True,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    files_limit: int = 50,
+    cursor: Optional[str] = None,
 ) -> dict:
     """Blast radius of a pull request, read from its changed files and the base graph.
 
@@ -2146,6 +2148,14 @@ async def pr_blast_radius_tool(
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
+        files_limit: File rows per page. Default: 50, at most 200. ``files_total`` is the
+            full count and ``files_truncated`` says whether more remain.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page of ``files``
+            (``offset`` is set after the first page). Refused for other ``pr``, ``head``,
+            ``base``, ``depth`` or ``include_external``, or if the changed files differ now.
+            Only the first page carries ``endpoints``, ``contract_changes``,
+            ``same_file_endpoints``, ``config_changes``, ``external_callers`` and
+            ``schema_changes``; a later page says so in ``continuation_note``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -2153,6 +2163,7 @@ async def pr_blast_radius_tool(
         lambda: pr_blast_radius_func(
             pr=pr, head=head, base=base, depth=depth,
             include_external=include_external, repo_root=root,
+            files_limit=files_limit, cursor=cursor,
         ),
         root,
     )

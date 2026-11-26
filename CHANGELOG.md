@@ -4,6 +4,12 @@
 
 ### Added
 
+- `pr_blast_radius_tool` pages its `files`: `files_limit` (default 50, at most 200) and `cursor`.
+  Before, a pull request of 196 files showed the first 50 with `files_truncated` and no way to
+  read the rest. `files_total` gives the full count and `next_cursor` the next page; the cursor is
+  refused for another `pr`, `head`, `base`, `depth` or `include_external`, or if the changed files
+  differ. Later pages leave out the endpoint, config, caller and schema lists (first page only).
+  The first page is unchanged apart from `files_total`.
 - `cross_repo_requests_tool` `origin="awssdk"` rows carry `is_test`, and there are new filters
   that apply before counts and paging (a cursor is refused for different values): `path_prefix`
   (awssdk, stepfunction), `source` (awssdk), `machine` (stepfunction, exact state machine name)
