@@ -143,6 +143,72 @@ _MAX_BARE_TARGET_CANDIDATES = 20
 #: the answer can be split by how certain that edge's target attribution is.
 _CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
 
+#: Rows ``detail_level="minimal"`` shows when the caller gives no ``max_results``.
+_MINIMAL_DEFAULT_ROWS = 5
+
+#: Bare call names that are the JDK, a stream pipeline or a language builtin
+#: rather than project code. ``callees_of`` counts them apart when it hides
+#: bare-name call sites, so the reader sees how much of the noise they were.
+_WELL_KNOWN_CALL_NAMES = frozenset(_BUILTIN_CALL_NAMES | {
+    # java.util.stream / Optional / collections / String
+    "stream", "parallelStream", "toList", "collect", "mapToInt", "mapToLong",
+    "mapToObj", "mapToDouble", "sorted", "distinct", "limit", "skip", "peek",
+    "anyMatch", "allMatch", "noneMatch", "findAny", "joining", "toSet", "toMap",
+    "groupingBy", "counting", "summingInt", "asList", "singletonList", "emptyList",
+    "emptyMap", "ofNullable", "orElse", "orElseGet", "orElseThrow", "ifPresent",
+    "isPresent", "isEmpty", "size", "length", "add", "addAll", "put", "putAll",
+    "putIfAbsent", "containsKey", "contains", "remove", "removeIf", "iterator",
+    "hasNext", "getKey", "getValue", "entrySet", "keySet", "equals", "hashCode",
+    "getClass", "append", "format", "valueOf", "compareTo", "isBlank",
+    "equalsIgnoreCase", "requireNonNull", "println", "print", "builder", "build",
+    "getOrDefault", "computeIfAbsent", "merge", "copyOf", "unmodifiableList",
+    # Python builtins and common container methods
+    "len", "str", "int", "float", "bool", "list", "dict", "tuple", "range",
+    "enumerate", "zip", "isinstance", "getattr", "setattr", "hasattr",
+    "sum", "open", "super", "extend", "items", "lower", "upper", "strip",
+    "lstrip", "rstrip", "isoformat", "dumps", "loads", "getLogger",
+})
+
+
+#: A ``path::name`` target whose left side reads as a file (a separator or an extension).
+_FILE_HINT_PREFIX = re.compile(r"[\\/]|\.[A-Za-z0-9]{1,8}$")
+
+
+def _direct_caller_counts(
+    store: GraphStore, candidates: list[GraphNode],
+) -> dict[str, int]:
+    """Distinct callers bound to each candidate by a CALLS edge (bare-name matches excluded)."""
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.qualified_name] = len({
+            edge.source_qualified
+            for edge in store.iter_edges_by_target(candidate.qualified_name)
+            if edge.kind == "CALLS"
+        })
+    return counts
+
+
+def _ambiguous_callers_summary(
+    target: str, candidate_count: int, counts: dict[str, int], ranked: list[dict[str, Any]],
+) -> str:
+    """One sentence that cannot be read as "no callers" when the name is shared."""
+    shown = ", ".join(
+        f"{_sanitize_name(str(row.get('qualified_name')))}: "
+        f"{counts.get(str(row.get('qualified_name')), 0)}"
+        for row in ranked[:5]
+    )
+    return (
+        f"AMBIGUOUS, not 'no callers': '{_sanitize_name(target)}' matches {candidate_count} "
+        f"node(s) and no rows are returned until one is chosen. Direct callers per candidate: "
+        f"{shown}{' ...' if len(ranked) > 5 else ''}. Re-run with a qualified_name from "
+        "candidates (or file_hint)."
+    )
+
+
+def _is_well_known_call(name: str) -> bool:
+    """Whether a bare call target is a JDK, stream or builtin name."""
+    return "::" not in name and name.rsplit(".", 1)[-1] in _WELL_KNOWN_CALL_NAMES
+
 #: Patterns that can ask who points at something outside the repository.
 _EXTERNAL_TARGET_PATTERNS = frozenset(
     {"callers_of", "references_to", "importers_of", "listeners_of", "publishers_of"}
@@ -1079,7 +1145,7 @@ def get_impact_radius(
         ``call_site`` it does so at, and ``unresolved_call_sites`` counts the
         call sites that name a changed symbol but were never bound to it.
     """
-    if isinstance(max_results, bool) or max_results < 1:
+    if max_results is not None and (isinstance(max_results, bool) or max_results < 1):
         raise ValueError("max_results must be an integer greater than or equal to 1")
     if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 1:
         raise ValueError("max_files must be an integer greater than or equal to 1")
@@ -1392,14 +1458,15 @@ def query_graph(
     target: str,
     repo_root: str | None = None,
     detail_level: str = "standard",
-    max_results: int = 100,
-    resolution: str = RESOLUTION_ALL,
+    max_results: int | None = None,
+    resolution: str | None = None,
     to: str | None = None,
     cursor: str | None = None,
     file_hint: str | None = None,
     direction: str | None = None,
     strict: bool = False,
     routing_key: str | None = None,
+    hide_unresolved: bool = False,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1414,12 +1481,19 @@ def query_graph(
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
-        max_results: Maximum results to return. Minimal mode additionally caps
-            visible results at five and reports the exact omitted count.
+        max_results: Maximum results to return. Default: 100, or 5 in minimal mode. An
+            explicit value is honoured in both modes; rows beyond the cap are counted in
+            ``results_omitted`` and read with ``next_cursor``.
         resolution: For callers_of/callees_of/references_to, filter rows by how
-            certain the edge's target attribution is. "all" (default) keeps
-            both, "direct" keeps only calls bound to an indexed node, and
-            "unresolved" keeps only the bare-name matches.
+            certain the edge's target attribution is. "all" keeps both, "direct"
+            keeps only calls bound to an indexed node, and "unresolved" keeps only
+            the bare-name matches. Omitted, callees_of answers "direct" (a callee
+            list is mostly bare-name noise otherwise) and the reply says how many
+            call sites that hid; callers_of and references_to answer "all".
+        hide_unresolved: For callees_of: also hide every call site that is only a
+            bare-name match, and every bare call to a well-known JDK, stream or
+            builtin name (``map``, ``stream``, ``get``, ``len``...). The reply
+            counts what was hidden in ``hidden_call_sites``.
         to: For path_to, the node, qualified name or file to reach. A route is one
             answer, so max_results and the minimal cap do not cut it.
         cursor: ``next_cursor`` from the previous reply, to read the next page of
@@ -1462,12 +1536,17 @@ def query_graph(
         ``result_count`` tests are traced links and how many carry ``inferred_by`` (guessed
         from a callee's test, an ambiguous call or a naming convention).
     """
-    if isinstance(max_results, bool) or max_results < 1:
+    if max_results is not None and (isinstance(max_results, bool) or max_results < 1):
         raise ValueError("max_results must be an integer greater than or equal to 1")
-    if resolution not in QUERY_RESOLUTIONS:
+    if resolution is not None and resolution not in QUERY_RESOLUTIONS:
         raise ValueError(
             f"resolution must be one of {list(QUERY_RESOLUTIONS)}, got {resolution!r}"
         )
+    # A callee list is mostly bare-name noise (``map``, ``get``, ``stream``), so
+    # an unstated resolution means "direct" there; every other pattern keeps "all".
+    resolution_defaulted = resolution is None and pattern == "callees_of"
+    if resolution is None:
+        resolution = RESOLUTION_DIRECT if resolution_defaulted else RESOLUTION_ALL
     if direction is not None and direction not in (*ENDPOINT_DIRECTIONS, "all"):
         raise ValueError(
             f"direction must be one of {[*ENDPOINT_DIRECTIONS, 'all']}, got {direction!r}"
@@ -1504,7 +1583,11 @@ def query_graph(
                     "error": "path_to needs to: the node or file to reach.",
                 }
             return _query_route(store, root, target, to, minimal)
-        response_limit = min(max_results, 5) if minimal else max_results
+        # Minimal mode is a peek unless the caller sized the page themselves.
+        capped_by_default = minimal and max_results is None
+        response_limit = (
+            max_results if max_results is not None else _MINIMAL_DEFAULT_ROWS if minimal else 100
+        )
         if pattern == "external_targets":
             if cursor:
                 raise ValueError("external_targets has no pages; narrow it with a prefix")
@@ -1524,6 +1607,8 @@ def query_graph(
             scope_args["file_hint"] = file_hint
         if routing_key is not None:
             scope_args["routing_key"] = routing_key
+        if hide_unresolved:
+            scope_args["hide_unresolved"] = True
         page_scope = make_scope("query_graph_tool", **scope_args)
         page_stamp = graph_stamp(store)
         page_offset = _cursor_offset(cursor, page_scope, page_stamp)
@@ -1547,7 +1632,15 @@ def query_graph(
                 return
             results.append(result)
             if edge is not None:
-                edges_out.append(edge_to_dict(edge))
+                edge_dict = edge_to_dict(edge)
+                if pattern == "callees_of" and "candidates" not in result:
+                    # The first row of a target spells its candidates; every
+                    # repeat call site used to carry up to twenty names again,
+                    # which is what made one answer tens of kilobytes. The
+                    # counts stay on every edge.
+                    edge_dict.pop("ambiguous_targets", None)
+                    edge_dict.pop("unresolved_targets", None)
+                edges_out.append(edge_dict)
 
         # One row per call site means the same node is looked up once per
         # call, so memoize what used to be deduplicated away.
@@ -1558,13 +1651,24 @@ def query_graph(
                 node_cache[qualified] = store.get_node(qualified)
             return node_cache[qualified]
 
+        # Call sites kept out of the answer, counted so the reply can say so.
+        hidden_sites = {"unresolved": 0, "well_known": 0}
+
         def add_call_site(
             key: str, result: dict[str, Any], edge: GraphEdge, certain: bool,
         ) -> None:
             """Stage one call site, marking the uncertain ones."""
             if not certain:
                 result["target_resolution"] = RESOLUTION_UNRESOLVED
-            if resolution == RESOLUTION_DIRECT and not certain:
+            if not certain and (
+                resolution == RESOLUTION_DIRECT
+                or (hide_unresolved and pattern == "callees_of")
+            ):
+                hidden_sites["unresolved"] += 1
+                if pattern == "callees_of" and _is_well_known_call(
+                    str(edge.target_qualified),
+                ):
+                    hidden_sites["well_known"] += 1
                 return
             if resolution == RESOLUTION_UNRESOLVED and certain:
                 return
@@ -1617,6 +1721,12 @@ def query_graph(
                         }
                     route_endpoints = matched
                     node = matched[0]
+            if not node and not file_hint and "::" in target:
+                # ``path/File.java::name`` is the symbol written with its file: the
+                # path is the same hint the file_hint parameter takes.
+                hint_path, _, hint_symbol = target.partition("::")
+                if hint_symbol and _FILE_HINT_PREFIX.search(hint_path):
+                    file_hint, target = hint_path, hint_symbol
             if not node:
                 exact_candidates: list[GraphNode] = []
                 qualified_tail_candidates = []
@@ -1716,12 +1826,21 @@ def query_graph(
                             for row in ranked[:response_limit]
                         ]
                         truncated = candidate_count > len(shortlist)
+                        caller_fields: dict[str, Any] = {}
+                        summary_text = (
+                            f"'{target}' matches {candidate_count} node(s). "
+                            "Re-run with a qualified_name from candidates."
+                        )
+                        if pattern == "callers_of":
+                            counts = _direct_caller_counts(store, candidates)
+                            caller_fields["total_direct_callers"] = sum(counts.values())
+                            summary_text = _ambiguous_callers_summary(
+                                target, candidate_count, counts, ranked,
+                            )
                         return {
                             "status": "ambiguous",
-                            "summary": (
-                                f"'{target}' matches {candidate_count} node(s). "
-                                "Re-run with a qualified_name from candidates."
-                            ),
+                            "summary": summary_text,
+                            **caller_fields,
                             "candidates": shortlist,
                             "candidate_count": candidate_count,
                             "candidates_truncated": truncated,
@@ -1736,12 +1855,25 @@ def query_graph(
                             ),
                         }
                     if node is None:
+                        caller_fields = {}
+                        summary_text = (
+                            f"'{target}' matches {candidate_count} node(s). "
+                            "Re-run with a qualified_name from disambiguation."
+                        )
+                        if pattern == "callers_of":
+                            counts = _direct_caller_counts(store, candidates)
+                            for ranked_row in ranked:
+                                ranked_row["direct_callers"] = counts.get(
+                                    str(ranked_row.get("qualified_name")), 0,
+                                )
+                            caller_fields["total_direct_callers"] = sum(counts.values())
+                            summary_text = _ambiguous_callers_summary(
+                                target, candidate_count, counts, ranked,
+                            )
                         return {
                             "status": "ambiguous",
-                            "summary": (
-                                f"'{target}' matches {candidate_count} node(s). "
-                                "Re-run with a qualified_name from disambiguation."
-                            ),
+                            "summary": summary_text,
+                            **caller_fields,
                             # Preserve the established key while adding the clearer
                             # agent-facing name introduced by #458.
                             "candidates": ranked,
@@ -2414,6 +2546,24 @@ def query_graph(
             ) + f", {results_omitted} omitted"
         elif results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
+        paging_hint: str | None = None
+        if results_omitted and page.next_cursor is not None:
+            paging_hint = (
+                f"{results_omitted} more row(s): pass cursor=<next_cursor> for the next page "
+                "or a larger max_results"
+                + (
+                    f" (minimal mode shows {_MINIMAL_DEFAULT_ROWS} unless max_results is given)"
+                    if capped_by_default else ""
+                )
+            )
+        hidden_total = hidden_sites["unresolved"]
+        if hidden_total:
+            why = f"{hidden_total} name-matched call site(s) hidden" + (
+                " by default" if resolution_defaulted else ""
+            )
+            if hidden_sites["well_known"]:
+                why += f", {hidden_sites['well_known']} JDK/stream/builtin names among them"
+            summary += f" ({why}; pass resolution='all' to see them)"
         if routing_key is not None:
             summary += f" linked to routing key '{_sanitize_name(routing_key)}'"
         if same_name_tests:
@@ -2433,7 +2583,12 @@ def query_graph(
         # a reader when part of a non-empty answer is only name matches, unless
         # they filtered by resolution and so already know.
         confidence: str | None = None
-        if total_results == 0:
+        if total_results == 0 and hidden_total:
+            confidence = (
+                f"0 shown, but {hidden_total} name-matched call site(s) were hidden, so "
+                "this is not 'no calls': pass resolution='all' to see them"
+            )
+        elif total_results == 0:
             confidence = empty_query_confidence(store, root, pattern, target, node)
         elif handler_as_target:
             confidence = (
@@ -2495,6 +2650,10 @@ def query_graph(
             if resolution_split is not None:
                 minimal_response["distinct_nodes"] = distinct_nodes
                 minimal_response["resolution_split"] = resolution_split
+            if hidden_total:
+                minimal_response["hidden_call_sites"] = dict(hidden_sites)
+            if paging_hint:
+                minimal_response["paging_hint"] = paging_hint
             if confidence:
                 minimal_response["confidence"] = confidence
             _attach_resolution_notes(
@@ -2520,6 +2679,10 @@ def query_graph(
         if resolution_split is not None:
             response["distinct_nodes"] = distinct_nodes
             response["resolution_split"] = resolution_split
+        if hidden_total:
+            response["hidden_call_sites"] = dict(hidden_sites)
+        if paging_hint:
+            response["paging_hint"] = paging_hint
         if confidence:
             response["confidence"] = confidence
         _attach_resolution_notes(response, ambiguity, route_endpoints, java_importers)

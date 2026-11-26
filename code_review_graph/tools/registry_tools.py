@@ -2130,3 +2130,112 @@ def cross_repo_requests_func(
         return response
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return {"status": "error", "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# handlers_of on a route, across every registered repository
+# ---------------------------------------------------------------------------
+
+#: Handler rows kept per matching repo: a route is normally served by one place.
+_ROUTE_ROWS_PER_REPO = 10
+
+
+def handlers_of_route_across_repos(
+    target: str,
+    detail_level: str = "standard",
+    max_results: int | None = None,
+) -> dict[str, Any]:
+    """Answer ``handlers_of <route>`` from whichever registered repos serve the route.
+
+    [REGISTRY] A route such as ``POST /v2/respondents/avmap`` names an endpoint, not a
+    repository, so a caller should not have to know which repo serves it. Every registered
+    repo with a graph is asked; the reply lists the repos that matched (``repos_matched``,
+    each with its handler count and matched endpoints) and tags every row with its ``repo``.
+    Rows are capped (``max_results``, default 20; at most ten per repo) and
+    ``results_omitted`` counts the rest; ``repos_without_graph`` and ``repos_unreadable`` count
+    registered repos that could not be asked, and ``repos_skipped`` those left when the call
+    budget (``CRG_CROSS_REPO_BUDGET_SECONDS``) ran out.
+    """
+    from ..registry import Registry
+    from .query import query_graph
+
+    cap = max_results if max_results is not None else 20
+    deadline = None
+    budget = cross_repo_budget_seconds()
+    if budget > 0:
+        deadline = _now() + budget
+    entries = Registry().list_repos()
+    matched: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    total_rows = 0
+    searched = without_graph = unreadable = skipped = 0
+    for entry in entries:
+        if _out_of_budget(deadline):
+            skipped += 1
+            continue
+        repo_path = Path(str(entry.get("path") or ""))
+        if not repo_path.is_dir() or not get_db_path(repo_path).exists():
+            without_graph += 1
+            continue
+        try:
+            reply = query_graph(
+                pattern="handlers_of", target=target, repo_root=str(repo_path),
+                detail_level=detail_level, max_results=min(cap, _ROUTE_ROWS_PER_REPO),
+            )
+        except Exception as exc:  # one broken graph must not hide the others
+            logger.warning("handlers_of route lookup failed in %s: %s", repo_path, exc)
+            unreadable += 1
+            continue
+        searched += 1
+        if reply.get("status") != "ok":
+            continue
+        label = _repo_label(entry)
+        handlers = int(reply.get("result_count", len(reply.get("results", []))))
+        matched.append({
+            "repo": label,
+            "handlers": handlers,
+            "matched_endpoints": list(reply.get("matched_endpoints", [])),
+        })
+        total_rows += handlers
+        for row in reply.get("results", []):
+            if len(rows) < cap:
+                rows.append({**row, "repo": label})
+    scope = {
+        "repos_searched": searched,
+        "repos_without_graph": without_graph,
+        "repos_unreadable": unreadable,
+        "repos_skipped": skipped,
+    }
+    note = "".join(
+        f", {n} {why}" for n, why in (
+            (without_graph, "without a graph"), (unreadable, "unreadable"),
+            (skipped, "skipped (call budget spent)"),
+        ) if n
+    )
+    if not matched:
+        return {
+            "status": "not_found",
+            "pattern": "handlers_of",
+            "target": _sanitize_name(target),
+            "summary": (
+                f"No endpoint matches route '{_sanitize_name(target)}' in {searched} "
+                f"registered repo(s) searched{note}."
+            ),
+            **scope,
+        }
+    names = ", ".join(f"{m['repo']} ({m['handlers']})" for m in matched[:10])
+    return {
+        "status": "ok",
+        "pattern": "handlers_of",
+        "target": _sanitize_name(target),
+        "summary": (
+            f"Route '{_sanitize_name(target)}' is handled in {len(matched)} of {searched} "
+            f"registered repo(s) searched{note}: {names}"
+            f"{' ...' if len(matched) > 10 else ''}. Pass repo_root for one repo's full answer."
+        ),
+        "repos_matched": matched[:20],
+        **scope,
+        "result_count": total_rows,
+        "results_omitted": max(0, total_rows - len(rows)),
+        "results": rows,
+    }

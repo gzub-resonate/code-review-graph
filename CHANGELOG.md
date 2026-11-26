@@ -4,6 +4,15 @@
 
 ### Added
 
+- `query_graph_tool` `handlers_of` with a route (`POST /v2/respondents/avmap`) no longer needs
+  `repo_root`: omit it on a multi-repo server, or pass `"*"`, and every registered repo with a graph
+  is asked. The reply names `repos_matched` and tags rows with `repo`, stays small (default 20
+  rows, ten per repo) and counts the repos it could not ask. Other patterns and non-route targets
+  keep the `repo_root is required` error. Query-time only.
+- `query_graph_tool` `callers_of` on a name several nodes share (`ambiguous`) now reports
+  `direct_callers` per candidate (standard mode; the summary names them in minimal) and `total_direct_callers`, and its summary starts `AMBIGUOUS, not
+  'no callers'`, so a candidate with no callers is not read as the answer. `target` may carry the
+  file hint as `path/File.java::name` (the same hint as the `file_hint` parameter). Query-time only.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
@@ -40,6 +49,18 @@
 
 ### Changed
 
+- `query_graph_tool` `detail_level="minimal"` honours an explicit `max_results` (it used to cap at 5
+  whatever was asked); with no `max_results` it still shows 5. A cut answer carries `paging_hint`
+  (rows left, `next_cursor` or a larger `max_results`). In `callees_of`, only the first edge of a target keeps its candidate list
+  (`ambiguous_targets` / `unresolved_targets`; counts stay on every edge), which
+  is what made a `callees_of` answer tens of kilobytes. `max_results` still caps rows and `edges`
+  together and minimal still has no `edges`.
+- `query_graph_tool` `callees_of` answers `resolution="direct"` when `resolution` is omitted (it
+  was `"all"`): a callee list was mostly bare-name noise (`map`, `stream`, `get`). The summary and
+  `hidden_call_sites` say how many name-matched call sites were hidden and how many of them are
+  JDK, stream or builtin names; `resolution="all"` returns the earlier answer. New
+  `hide_unresolved` flag hides bare-name call sites and well-known names under any resolution.
+  `callers_of` and `references_to` are unchanged. Query-time only.
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or
   `amqp` now pages. A list cut at `max_results` carries `next_cursor`; passing it back as `cursor`
   returns the next page, until the last page has none. Before, those origins ended at

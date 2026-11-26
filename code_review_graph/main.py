@@ -632,14 +632,32 @@ async def get_impact_radius_tool(
     )
 
 
+async def _route_across_repos(
+    target: str, cursor: Optional[str], detail_level: str, max_results: Optional[int],
+) -> dict:
+    """``handlers_of`` on a route, asked of every registered repo (no single graph's provenance)."""
+    if cursor:
+        raise ToolError("a route lookup across repos has no pages; pass repo_root for one repo")
+    from .tools.registry_tools import handlers_of_route_across_repos
+
+    return await _offload(
+        "query_graph_tool",
+        lambda: handlers_of_route_across_repos(
+            target, detail_level=detail_level, max_results=max_results,
+        ),
+        None,
+        provenance=False,
+    )
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 async def query_graph_tool(
     pattern: str,
     target: str,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
-    max_results: int = 100,
-    resolution: str = "all",
+    max_results: Optional[int] = None,
+    resolution: Optional[str] = None,
     to: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: Optional[int] = None,
@@ -647,6 +665,7 @@ async def query_graph_tool(
     direction: Optional[str] = None,
     strict: bool = False,
     routing_key: Optional[str] = None,
+    hide_unresolved: bool = False,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -699,12 +718,27 @@ async def query_graph_tool(
         pattern: Query pattern name (see above).
         target: Node name, qualified name, or file path to query. A full name
             that one non-test symbol has resolves to it; otherwise the answer
-            is "ambiguous" and lists qualified names to choose from.
-        repo_root: Repository root path. Auto-detected if omitted.
-        detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
-        max_results: Maximum results to return. Default: 100.
-        resolution: "all" (default), "direct" for only calls bound to an indexed
-            node, or "unresolved" for only the bare-name matches.
+            is "ambiguous" and lists qualified names to choose from (for callers_of the summary
+            starts "AMBIGUOUS, not 'no callers'" and gives each candidate's direct callers).
+            ``path/File.java::name`` also works: when no node has that exact qualified name,
+            the path before ``::`` is used as ``file_hint``.
+        repo_root: Repository root path. Auto-detected if omitted. For handlers_of with a route
+            (``POST /v1/items``) it may be omitted on a multi-repo server, or ``"*"``: every
+            registered repo is asked and the reply lists ``repos_matched`` (rows carry ``repo``).
+            Any other query still needs one repo.
+        detail_level: "standard" for full output, "minimal" for a compact summary: no
+            ``edges``, and 5 rows unless ``max_results`` is given. Default: standard.
+        max_results: Maximum results to return. Default: 100 (5 with detail_level="minimal").
+            An explicit value is honoured in both modes and caps ``edges`` as well; rows beyond
+            it are counted in ``results_omitted`` and read with ``next_cursor``.
+        resolution: "all", "direct" for only calls bound to an indexed node, or
+            "unresolved" for only the bare-name matches. Omitted: callees_of answers
+            "direct" (a callee list is mostly bare-name noise: map, stream, get) and the
+            reply's summary/``hidden_call_sites`` say how many name-matched call sites that
+            hid; pass "all" for the old behaviour. callers_of and references_to default to "all".
+        hide_unresolved: For callees_of: also hide every bare-name call site and every bare call
+            to a well-known JDK, stream or builtin name. ``hidden_call_sites`` counts what was
+            hidden (``unresolved``, and ``well_known`` among them); the summary says why.
         to: For path_to, the node name, qualified name, or file path to reach.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             rows. Omit it for the first page. Not available for path_to.
@@ -731,6 +765,21 @@ async def query_graph_tool(
 
     Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
+    if repo_root == "*" or (not repo_root and _multi_repo):
+        from .tools.query_extras import parse_route_target
+
+        is_route = pattern == "handlers_of" and parse_route_target(target) is not None
+        if is_route:
+            return await _route_across_repos(
+                target, cursor, detail_level,
+                limit if limit is not None else max_results,
+            )
+        if repo_root == "*":
+            raise ToolError(
+                "repo_root='*' (every registered repo) is only supported for handlers_of "
+                "with a route such as 'POST /v1/items'; pass one repo's absolute path "
+                "for any other query."
+            )
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "query_graph_tool",
@@ -740,6 +789,7 @@ async def query_graph_tool(
             max_results=limit if limit is not None else max_results,
             resolution=resolution, to=to, cursor=cursor, file_hint=file_hint,
             direction=direction, strict=strict, routing_key=routing_key,
+            hide_unresolved=hide_unresolved,
         ),
         root,
     )

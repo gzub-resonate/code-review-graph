@@ -270,10 +270,22 @@ def test_query_graph_first_page_keeps_its_summary(repo):
 
 def test_query_graph_minimal_pages_by_five(repo):
     root, _ = repo
-    rows, replies = read_all(
-        query(root), lambda r: r["results"], "max_results", 500, detail_level="minimal",
-    )
+    # No max_results: minimal shows five rows a page and reads on with the cursor.
+    call = query(root)
+    rows: list = []
+    replies: list = []
+    cursor = None
+    while True:
+        reply = call(detail_level="minimal", cursor=cursor)
+        replies.append(reply)
+        rows.extend(reply["results"])
+        cursor = reply.get("next_cursor")
+        if cursor is None:
+            break
     assert len(rows) == COUNT and all(len(r["results"]) <= 5 for r in replies)
+    # An explicit max_results is honoured in minimal mode too.
+    everything = call(detail_level="minimal", max_results=500)
+    assert len(everything["results"]) == COUNT and "next_cursor" not in everything
 
 
 def test_query_graph_other_patterns_page_too(repo):

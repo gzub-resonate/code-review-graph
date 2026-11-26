@@ -203,7 +203,7 @@ class TestCallSitesOnRows:
         result = query_graph(
             pattern="callees_of",
             target=f"{repo['svc']}::handler",
-            repo_root=repo["root"],
+            repo_root=repo["root"], resolution="all",
         )
         sites = sorted(
             (r["name"], r["call_site"]["line"]) for r in result["results"]
