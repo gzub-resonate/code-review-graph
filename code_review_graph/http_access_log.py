@@ -15,6 +15,11 @@ bodies are never read. Set ``CRG_HTTP_CLIENT_LOG=0`` (or ``false``/``off``) to
 disable. Set ``CRG_TRUSTED_PROXIES`` to comma-separated CIDRs to trust
 ``X-Forwarded-For`` only from those proxies (default: any private or loopback
 peer); the raw peer and header are always logged beside the resolved address.
+
+Health probes are not client calls and would bury them: ``GET /health`` and a ``GET /mcp``
+answered 406 (a probe without the streaming ``Accept`` header) are logged at DEBUG, and counted
+in one INFO line (``mcp_probe_summary``) at most every ``CRG_PROBE_SUMMARY_SECONDS`` (default
+300). A POST, and any GET that gets another status, is logged as before.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import threading
+import time
 
 from starlette.middleware import Middleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -36,6 +43,41 @@ _MAX_UA = 200
 _MAX_XFF = 200
 _MAX_PATH = 200
 _HEALTH_CHECK_PREFIX = "elb-healthchecker"
+PROBE_SUMMARY_ENV = "CRG_PROBE_SUMMARY_SECONDS"
+_DEFAULT_PROBE_SUMMARY_SECONDS = 300.0
+_NOT_ACCEPTABLE = 406
+
+
+def _summary_interval() -> float:
+    try:
+        value = float(os.environ.get(PROBE_SUMMARY_ENV, ""))
+    except ValueError:
+        return _DEFAULT_PROBE_SUMMARY_SECONDS
+    return value if value >= 0 else _DEFAULT_PROBE_SUMMARY_SECONDS
+
+
+class _ProbeCounter:
+    """Count quiet probe requests and say how many came in, at most once per interval."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+        self._since = time.monotonic()
+
+    def record(self) -> None:
+        interval = _summary_interval()
+        now = time.monotonic()
+        with self._lock:
+            self._count += 1
+            if now - self._since < interval:
+                return
+            count, seconds = self._count, now - self._since
+            self._count, self._since = 0, now
+        logger.info(
+            "mcp_probe_summary probes=%d window_seconds=%d "
+            "(GET /health and GET /mcp answered 406; shown individually at DEBUG)",
+            count, int(seconds),
+        )
 
 
 def is_enabled() -> bool:
@@ -118,6 +160,20 @@ class ClientAccessLog:
         self.app = app
         self.enabled = is_enabled()
         self.trusted = trusted_proxy_networks()
+        self.probes = _ProbeCounter()
+
+    def _is_probe(self, scope: Scope, status: object, peer: str) -> bool:
+        """A ``GET /health``, or a ``GET /mcp`` a proxy peer got 406 for (no streaming Accept)."""
+        if scope.get("method") != "GET":
+            return False
+        path = str(scope.get("path", ""))
+        if path == "/health":
+            return True
+        return (
+            status == _NOT_ACCEPTABLE
+            and path.rstrip("/") == "/mcp"
+            and _is_trusted_proxy(_parse_ip(peer), self.trusted)
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if not self.enabled or scope["type"] != "http":
@@ -149,7 +205,12 @@ class ClientAccessLog:
                 client = scope.get("client")
                 peer = str(client[0]) if client else "-"
                 xff = headers.get("x-forwarded-for", "")
-                logger.info(
+                level = logging.INFO
+                if self._is_probe(scope, status, peer):
+                    self.probes.record()
+                    level = logging.DEBUG
+                logger.log(
+                    level,
                     'mcp_client peer=%s client=%s method=%s path="%s" status=%s ua="%s" xff="%s"',
                     sanitize(peer, 64),
                     sanitize(resolve_client(peer, xff, self.trusted), 64),
