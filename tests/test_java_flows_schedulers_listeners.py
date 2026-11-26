@@ -593,3 +593,21 @@ def test_repo_derived_flow_fields_are_sanitised(tmp_path: Path) -> None:
         assert tick["schedule"][0]["attributes"]
     finally:
         store.close()
+
+
+def test_list_flows_reports_the_count_before_merging_duplicates(tmp_path: Path) -> None:
+    repo, store = _build(tmp_path, ALL)
+    store.close()
+    grouped = list_flows(repo_root=str(repo), limit=100)
+    raw = list_flows(repo_root=str(repo), limit=100, group_duplicates=False)
+    assert raw["total"] > grouped["total"]
+    assert grouped["total_before_grouping"] == raw["total"]
+    assert f"{grouped['total']} execution flow(s)" in grouped["summary"]
+    assert f"{raw['total']} before merging duplicates" in grouped["summary"]
+    assert "group_duplicates=false" in grouped["summary"]
+    # Nothing merged, or merging off: no extra field and the summary is as before.
+    assert "total_before_grouping" not in raw
+    assert "before merging" not in raw["summary"]
+    # The raw count follows the same filters as the grouped one.
+    sched = list_flows(repo_root=str(repo), limit=100, entry_kind="scheduler")
+    assert "total_before_grouping" not in sched or sched["total_before_grouping"] >= sched["total"]

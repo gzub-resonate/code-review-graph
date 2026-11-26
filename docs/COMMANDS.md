@@ -811,7 +811,9 @@ targets, each with `via`: `listener` or `poll`), `event` (`@EventListener`), `ma
 Flows whose call tree below the entry is the same set of nodes (a public and an admin
 controller calling one service method) are one row: the most critical stands for the group and
 `entry_points` lists every entry (`flow_id`, `name`, `entry_kind`, `route`), `group_size` counts
-them, and `total` counts groups. Pass `group_duplicates=false` for one row per entry.
+them, and `total` counts groups. When merging removed flows, `total_before_grouping` and the summary
+(`329 execution flow(s) (594 before merging duplicates; ...)`) give the unmerged count. Pass
+`group_duplicates=false` for one row per entry.
 `get_flow_tool` lists the other flows with the same call tree under `same_call_tree_as`.
 
 #### `get_flow_tool`

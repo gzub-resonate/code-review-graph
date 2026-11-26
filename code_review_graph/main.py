@@ -1050,7 +1050,9 @@ async def list_flows_tool(
             queue_listener, event, main or other.
         group_duplicates: Merge flows with the same call tree below the entry
             (a public and an admin controller calling one service method) into
-            one flow that lists every entry point. Default: True.
+            one flow that lists every entry point. Default: True. When merging removed
+            flows, ``total_before_grouping`` and the summary give the count without it;
+            False lists one row per entry point.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(

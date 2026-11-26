@@ -40,6 +40,9 @@
 - `cross_repo_requests_tool` marks a `matched` row that has several `candidates` with
   `multiple_candidates: true` and counts them in `multiple_candidates_total` and the summary. `status`
   and `counts` are unchanged. Query-time only.
+- `list_flows_tool` reports the count before merging when `group_duplicates` (default true)
+  removed flows: `total_before_grouping` and the summary ("329 execution flow(s) (594 before
+  merging duplicates; ...)"). The default and `total` are unchanged.
 
 ### Changed
 
