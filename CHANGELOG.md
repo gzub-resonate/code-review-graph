@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ConfigProperty` nodes of Spring `application*`/`bootstrap*` files now carry the literal value
+  (`extra.value`, cut at 200 characters with `value_truncated`; a YAML document bound by
+  `spring.config.activate.on-profile` carries `doc_profiles`). The value of a key that looks like a secret
+  (password, secret, token, key, credential ...) is never stored, nor is a private key, JWT, access token,
+  URL with credentials, hex or long random string; a 12-digit AWS account id is replaced by `ACCOUNT`.
+  This changes the index fingerprint, so every repo is reindexed once.
+- `cross_repo_requests_tool` with `origin="awssdk"` names a call whose queue, bucket, topic or table comes from a
+  configuration key by reading that value at query time: `${KEY:default}` and `${ENV_VAR}` placeholders that refer to
+  another property of the same repo are expanded, per profile (default preferred; `config_profile` and
+  `config_alternatives` say which), with Spring relaxed binding. Rows carry `target_source` (`config` or
+  `config_key_unresolved`) and `via`. New module `config_values.py`.
+
 ### Changed
 
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or

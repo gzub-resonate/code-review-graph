@@ -29,7 +29,11 @@ read as calls too.
 Other services have no owner lookup: their rows are ``not_found``, which says "no registered repo
 defines it by a name this join knows", not that the resource does not exist. A name that could not
 be worked out is ``unresolved``. A Terraform declaration, notification or policy row is
-``declared``. The join is computed on every call; nothing is stored, and no value is read.
+``declared``. The join is computed on every call; nothing is stored. A call whose target is a
+configuration key is named from the ``ConfigProperty`` value on the graph
+(:mod:`~code_review_graph.config_values`: relaxed binding, profiles, ``${...}`` expansion) and
+says so in ``target_source: config`` and
+``via``; otherwise it is ``target_source: config_key_unresolved``.
 """
 
 from __future__ import annotations
@@ -38,9 +42,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .aws_config_names import config_key_for_getter, config_prefixes
+from .aws_config_names import (
+    ALLOWED_KINDS,
+    config_key_for_getter,
+    config_prefixes,
+    sanitize_name,
+)
 from .aws_sdk_calls import DATA_STORE_SERVICES, RESOLUTION, UNRESOLVED_NAME
 from .aws_terraform_wiring import REF_TYPES, WIRING_OPS
+from .config_values import ConfigValues, module_root
 from .graph import GraphStore
 
 STATUSES = ("matched", "not_found", "ambiguous", "unresolved", "declared")
@@ -48,7 +58,7 @@ _TERRAFORM_OPS = frozenset({"declare", "notification", "policy"}) | WIRING_OPS
 #: Extra fields a Terraform edge carries through to its row.
 _ROW_EXTRA = (
     "schedule", "event_sources", "wiring", "route", "protocol", "dead_letter_target",
-    "arn_getter", "via",
+    "arn_getter", "via", "target_source", "config_profile", "config_alternatives",
 )
 #: What a client connection names besides the resource: never a user, password or query.
 _CONNECTION_FIELDS = (
@@ -62,19 +72,17 @@ def decl_key(service: str, kind: str) -> str:
 
 
 def _config_key(
-    store: GraphStore, prefixes: dict[str, set[str]], getter: Any,
+    values: ConfigValues, prefixes: dict[str, set[str]], getter: Any, root: str,
 ) -> tuple[str | None, bool]:
     """The property key a bean getter reads, and whether the repo's config files define it.
 
     Only a type with exactly one prefix is used, so the key is never a guess between two.
+    Definition is looked up with Spring's relaxed binding.
     """
     key = config_key_for_getter(prefixes, getter)
     if key is None:
         return None, False
-    defined = store._conn.execute(
-        "SELECT 1 FROM nodes WHERE kind = 'ConfigProperty' AND name = ? LIMIT 1", (key,),
-    ).fetchone() is not None
-    return key, defined
+    return key, values.defines(key, root)
 
 
 #: Messaging edges (SQS and SNS from Java and Python) are AWS calls too; they carry no
@@ -136,6 +144,7 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
     ).fetchall()
     out: list[dict[str, Any]] = []
     prefixes = config_prefixes(store._conn)
+    values = _LazyValues(store)
     for source, file_path, line, target, raw, edge_kind in rows:
         try:
             info = json.loads(raw or "{}")
@@ -168,13 +177,80 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
             info.get("unresolved") and not out[-1]["placeholder"]
             and isinstance(info.get("config_getter"), dict)
         ):
-            key, defined = _config_key(store, prefixes, info["config_getter"])
+            key, defined = _config_key(
+                values.get(), prefixes, info["config_getter"], module_root(file_path),
+            )
             if key:
                 out[-1]["placeholder"] = key
                 out[-1]["extra"]["config_defined"] = defined
+    _resolve_config_values(out, values)
     _resolve_terraform_refs(out)
     _resolve_arn_getters(out)
     return out
+
+
+class _LazyValues:
+    """``ConfigValues`` of one graph, built on first use (most graphs never need it)."""
+
+    def __init__(self, store: GraphStore) -> None:
+        self._store = store
+        self._values: ConfigValues | None = None
+
+    def get(self) -> ConfigValues:
+        if self._values is None:
+            self._values = ConfigValues(self._store._conn)
+        return self._values
+
+
+def _resolve_config_values(edges: list[dict[str, Any]], values: _LazyValues) -> None:
+    """Name a call whose target is a configuration key, from the value in the repo's YAML.
+
+    Only a queue, bucket, topic, table, rule, function or stream name is taken, and only when
+    the expanded value passes the same name policy as the build-time pass. An edge the
+    build already resolved per profile (``resolved_names``) is left to that join. What cannot
+    be named says why: ``target_source: config_key_unresolved`` with the key in ``placeholder``,
+    ``config_defined`` and, when known, ``unresolved_reason`` / ``config_alternatives``.
+    """
+    for edge in edges:
+        key = edge["placeholder"]
+        extra = edge["extra"]
+        if not (
+            edge["unresolved"] and isinstance(key, str) and key
+            and edge["kind"] in ALLOWED_KINDS and not extra.get("resolved_names")
+            and edge["sdk"] != "terraform"
+        ):
+            continue
+        cv = values.get()
+        got = cv.resolve(key, module_root(edge["file_path"]))
+        extra["config_defined"] = got.defined
+        name = None
+        if got.value is not None:
+            name, _, _ = sanitize_name(edge["kind"], key, got.value)
+        if name:
+            edge["name"], edge["unresolved"] = name, False
+            extra["target_source"] = "config"
+            extra["config_profile"] = got.profile
+            extra["via"] = "; ".join(got.via)[:300]
+            alternatives = {}
+            for profile, alt in got.alternatives.items():
+                alt_name, _, _ = sanitize_name(edge["kind"], key, alt)
+                if alt_name and alt_name != name:
+                    alternatives[profile] = alt_name
+            if alternatives:
+                extra["config_alternatives"] = alternatives
+            continue
+        extra["target_source"] = "config_key_unresolved"
+        if got.reason:
+            extra["unresolved_reason"] = got.reason
+        if got.env_placeholder and not extra.get("env_placeholder"):
+            extra["env_placeholder"] = got.env_placeholder
+        alternatives = {}
+        for profile, alt in got.alternatives.items():
+            alt_name, _, _ = sanitize_name(edge["kind"], key, alt)
+            if alt_name:
+                alternatives[profile] = alt_name
+        if alternatives:
+            extra["config_alternatives"] = alternatives
 
 
 def _resolve_arn_getters(edges: list[dict[str, Any]]) -> None:

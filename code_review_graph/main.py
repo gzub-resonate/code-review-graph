@@ -1995,6 +1995,9 @@ async def cross_repo_requests_tool(
             ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
             (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
             to see which services read or write a bucket and which repo defines it.
+            A target that is a Spring config key is named from the YAML value (profiles,
+            ``${KEY:default}``, relaxed binding): ``target_source`` is ``config`` (with
+            ``config_profile``, ``via``, ``config_alternatives``) or ``config_key_unresolved``.
             ``amqp`` lists the publishers and listeners of one RabbitMQ exchange across the
             repos: ``service`` is the exchange (required; ``orders.exchange`` or
             ``external:rabbitmq:orders.exchange``), ``route`` an optional key and ``status``

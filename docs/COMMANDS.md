@@ -1172,6 +1172,16 @@ repository's name or alias, and declared queues, buckets, topics and tables its 
 resolved from Spring configuration). Items carry the declaring repo, file, line and `matched_via`. `awssdk` rows
 matched to a Terraform declaration carry `declared_by`. See [SERVICE_ALIASES.md](SERVICE_ALIASES.md).
 
+`origin="awssdk"` names a call whose target is a Spring configuration key from the value on the repo's
+`ConfigProperty` nodes (`${KEY:default}` and `${ENV_VAR}` placeholders that refer to another property of the same
+repo are expanded; relaxed binding, so `queue-name`, `queueName`, `queue_name` and `QUEUE_NAME` are one key). The
+row says `target_source: "config"`, `config_profile` (the default profile is preferred), `via` (the property and each
+placeholder read), and `config_alternatives` (other profiles' names when they differ). A key that cannot be named
+stays unresolved with `target_source: "config_key_unresolved"`, `placeholder` (the key), `config_defined` and
+`unresolved_reason` (`not_defined`, `no_value`, `env_placeholder`, `profiles_differ`, `ambiguous`). Values of
+secret-looking keys, private keys, JWTs, tokens and long random strings are never stored. Config values appear on
+nodes only after the repo is re-indexed (a full reindex follows from the new index fingerprint).
+
 `origin="awssdk"` also lists RDS (`rds`), load balancers and target groups (`elasticloadbalancing`), ElastiCache
 (`elasticache`) and OpenSearch/Elasticsearch (`es`), from SDK operations and from client connections that name a
 host (JDBC/R2DBC URLs, Spring `application*` keys, Python, Java and JavaScript database, Redis and search clients,
