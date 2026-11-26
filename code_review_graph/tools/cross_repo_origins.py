@@ -194,6 +194,8 @@ def external_links(
         for call in calls:
             if call["kind"] == "js":
                 group = eh.classify_js(call)
+            elif call["kind"] == "py":
+                group = eh.classify_py(call)
             else:
                 service = call.get("service")
                 registered = bool(

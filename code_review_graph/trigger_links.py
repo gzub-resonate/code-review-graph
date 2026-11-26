@@ -314,15 +314,100 @@ def _reference_rows(
     return rows
 
 
+_UNIT_SQL = (
+    "SELECT file_path, extra FROM nodes WHERE kind = 'File' AND language = 'hcl' "
+    "AND json_valid(extra) AND (json_extract(extra, '$.terragrunt_inputs.event_rules') "
+    "IS NOT NULL OR json_extract(extra, '$.terragrunt_inputs.sns_topics') IS NOT NULL "
+    "OR json_extract(extra, '$.terragrunt_inputs.include_sqs') IS NOT NULL) "
+    "ORDER BY file_path"
+)
+VIA_TERRAGRUNT = "terragrunt_inputs"
+
+
+def _terragrunt_rows(store: GraphStore) -> list[dict[str, Any]]:
+    """Rows for the triggers a Terragrunt Lambda unit declares in its ``inputs``.
+
+    The unit sets ``aws_cloudwatch_event_rules`` (a rule name and its schedule or event-pattern
+    sources), ``existing_sns_topics`` and ``include_sqs``/``sqs_name`` for the shared Lambda
+    module, which creates the rule, the subscription and the event source mapping. The target
+    is the unit's ``function_name`` (the name of the directory above the unit when no name
+    could be evaluated, marked ``target_from_directory``). The rule's ``input`` is never read.
+    """
+    rows: list[dict[str, Any]] = []
+    for file_path, raw in store._conn.execute(_UNIT_SQL).fetchall():
+        try:
+            info = json.loads(raw).get("terragrunt_inputs")
+        except (ValueError, AttributeError):
+            continue
+        if not isinstance(info, dict):
+            continue
+        name = info.get("function_name")
+        meta: dict[str, Any] = {}
+        if not isinstance(name, str) or not name:
+            name = _folder(_folder(file_path)).rsplit("/", 1)[-1]
+            meta["target_from_directory"] = True
+        if not name:
+            continue
+        target = ("lambda", "function", name, True)
+        for rule in info.get("event_rules") or []:
+            if not isinstance(rule, dict) or not isinstance(rule.get("name"), str):
+                continue
+            extra = {
+                **meta, "schedule": rule.get("schedule_expression"),
+                "event_pattern_sources": rule.get("event_pattern_sources"),
+            }
+            if rule.get("enabled") is False:
+                extra["disabled"] = True
+            if rule.get("list") == "schedules":
+                trigger, kind = "eventbridge_scheduler", "schedule"
+            else:
+                trigger, kind = "eventbridge_rule", "rule"
+            rows.append(_row(
+                trigger, file_path, 1, ("events" if kind == "rule" else "scheduler", kind,
+                                         rule["name"], True),
+                target, VIA_TERRAGRUNT, extra,
+            ))
+        queue = info.get("sqs_name") if info.get("include_sqs") else None
+        for topic in info.get("sns_topics") or []:
+            if not isinstance(topic, str):
+                continue
+            if isinstance(queue, str):
+                rows.append(_row(
+                    "sns_subscription", file_path, 1, ("sns", "topic", topic, True),
+                    ("sqs", "queue", queue, True), VIA_TERRAGRUNT, {**meta, "protocol": "sqs"},
+                ))
+            else:
+                rows.append(_row(
+                    "sns_subscription", file_path, 1, ("sns", "topic", topic, True),
+                    target, VIA_TERRAGRUNT, {**meta, "protocol": "lambda"},
+                ))
+        if isinstance(queue, str):
+            rows.append(_row(
+                "event_source_mapping", file_path, 1, ("sqs", "queue", queue, True), target,
+                VIA_TERRAGRUNT, meta,
+            ))
+    return rows
+
+
 def read_triggers(store: GraphStore) -> list[dict[str, Any]]:
-    """Every inbound-trigger row of one graph; ``file`` is the stored (absolute) path."""
+    """Every inbound-trigger row of one graph; ``file`` is the stored (absolute) path.
+
+    A row from a Terraform file whose firing side is only a Terraform label (``via`` is
+    ``terraform`` and the status ``source_unresolved``) is a shared-module *template*: the name
+    comes from a variable or local the module's callers set, so it is marked ``template``.
+    Rows from a Terragrunt unit's ``inputs`` have ``via == "terragrunt_inputs"``.
+    """
     edges = _wiring_edges(store)
     declared = _Declared()
     for edge in edges:
         if edge["operation"] == "declare":
             declared.add(edge)
     rows = _wiring_rows(edges, declared)
+    for row in rows:
+        if row["via"] == "terraform" and row["status"] == "source_unresolved":
+            row["template"] = True
     rows.extend(_reference_rows(store, declared))
+    rows.extend(_terragrunt_rows(store))
     # A wiring edge and the reference pass can describe one link twice; keep the wiring one.
     seen: set[tuple[Any, ...]] = set()
     unique = []

@@ -9,14 +9,19 @@ each service depend on". It reads the client ``Endpoint`` nodes of the selected 
 * a Spring Feign client whose service name resolves to no registered repo. The graph keeps
   the service name and the configuration keys of a ``${...}`` placeholder, never the value, so
   such a call is grouped by service name unless its annotation spells the URL out (the host is
-  then read from that one source line) or its mapping is an absolute URL.
+  then read from that one source line) or its mapping is an absolute URL;
+* a Python ``requests`` / ``httpx`` call (``py_http_clients``). The graph keeps only the host
+  of a literal URL and, for any other URL, the *name* of the variable it comes from, so a
+  webhook path or a token in a query string is never seen here. Such a call whose URL is not a
+  literal is ``host_unresolved``, grouped as ``${variable}`` (or ``<unresolved>``), source
+  ``python_http_variable``.
 
 Hosts are lower-cased and stripped of scheme, credentials, port, query and fragment, and a
 leading ``www.``. A host or service name that is a placeholder is ``host_unresolved``, with the
 property or variable key. A small static table names the vendor of well-known hosts; a tenant
 or region subdomain of a vendor marked as collapsing (``*.auth0.com``) shares one group. An
-unknown host stays as it is. Python, Java and Go clients that call ``requests``, ``HttpClient``
-or ``RestTemplate`` leave no ``Endpoint`` node, so they are not seen.
+unknown host stays as it is. Java and Go clients that call ``HttpClient`` or ``RestTemplate``
+leave no ``Endpoint`` node, so they are not seen.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from typing import Any, Optional
 
 from .graph import GraphStore
 from .js_api_extract import CLIENT_TAG as JS_CLIENT_TAG
+from .py_http_clients import CLIENT_TAG as PY_CLIENT_TAG
 
 STATUS_KNOWN = "known_vendor"
 STATUS_UNKNOWN = "unknown_vendor"
@@ -88,6 +94,8 @@ _PORT = re.compile(r":\d{0,5}$")
 _MAX_PATH = 120
 _MAX_LITERAL_SPAN = 12
 _MAX_FILE_BYTES = 1_000_000
+_SAFE_HOST = re.compile(r"[a-z0-9][a-z0-9.\-]{0,252}")
+_SAFE_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,127}")
 _ANNOTATION_URL = re.compile(r"\burl\s*=\s*\"([A-Za-z][A-Za-z0-9+.\-]*://[^\"\s]+)\"")
 
 
@@ -241,6 +249,16 @@ def read_client_calls(store: GraphStore, repo_path: Path) -> list[dict[str, Any]
                     call["literal_host"] = found.name
             out.append(call)
             continue
+        if extra.get("client") == PY_CLIENT_TAG:
+            host = extra.get("host") if isinstance(extra.get("host"), str) else None
+            variable = extra.get("url_variable")
+            out.append({
+                **base, "kind": "py", "service": None,
+                "host": host if host and _SAFE_HOST.fullmatch(host) else None,
+                "url_variable": variable
+                if isinstance(variable, str) and _SAFE_VARIABLE.fullmatch(variable) else None,
+            })
+            continue
         if extra.get("client") != JS_CLIENT_TAG:
             continue
         host = extra.get("host") if isinstance(extra.get("host"), str) else None
@@ -312,6 +330,18 @@ def classify_js(call: dict[str, Any]) -> Optional[Group]:
         return Group(f"${{{key}}}", STATUS_UNRESOLVED, "js_leading_placeholder",
                      unresolved_key=key, path=route[:_MAX_PATH])
     return None
+
+
+def classify_py(call: dict[str, Any]) -> Group:
+    """The group of a Python ``requests`` / ``httpx`` call: its host, or an unresolved bucket."""
+    host = call.get("host")
+    if isinstance(host, str):
+        return _from_host(Host(host, "/"), "python_http_literal")
+    key = call.get("url_variable")
+    return Group(
+        f"${{{key}}}" if key else _UNRESOLVED, STATUS_UNRESOLVED, "python_http_variable",
+        unresolved_key=key, path="/",
+    )
 
 
 def classify_feign(call: dict[str, Any], registered: bool) -> Optional[Group]:

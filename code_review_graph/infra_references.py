@@ -27,6 +27,7 @@ a secret, and an expression that cannot be reduced statically all leave nothing 
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
@@ -380,14 +381,34 @@ LAMBDA_INPUT_KEYS: tuple[str, ...] = ("handler", "function_name", "git_repo_sub_
 #: ``step_function_file_path``).
 STATE_MACHINE_NAME_KEY = "name"
 
+#: Keys of a Lambda unit that list EventBridge rules or schedules: each item is an object of
+#: which only :data:`EVENT_RULE_FIELDS` are read (never ``input``, ``description`` or a policy).
+EVENT_RULE_LIST_KEYS: tuple[str, ...] = (
+    "aws_cloudwatch_event_rules", "aws_cloudwatch_event_rules_ignore_changes", "schedules",
+)
+#: The fields of a rule or schedule item that are read.
+EVENT_RULE_FIELDS: frozenset[str] = frozenset(
+    {"name", "schedule_expression", "event_pattern", "is_enabled"}
+)
+#: Other trigger keys of a Lambda unit: names of existing SNS topics it subscribes to, and an
+#: SQS queue it creates (``include_sqs`` with ``sqs_name``).
+SNS_TOPICS_KEY = "existing_sns_topics"
+SQS_KEYS: tuple[str, ...] = ("include_sqs", "sqs_name")
+
 #: The only keys of a Terragrunt ``inputs`` object that are ever visited.
 TERRAGRUNT_INPUT_KEYS: frozenset[str] = frozenset(
-    {"step_function_file_path", STATE_MACHINE_NAME_KEY, *REPLACEMENT_VAR_MAPS, *LAMBDA_INPUT_KEYS}
+    {
+        "step_function_file_path", STATE_MACHINE_NAME_KEY, *REPLACEMENT_VAR_MAPS,
+        *LAMBDA_INPUT_KEYS, *EVENT_RULE_LIST_KEYS, SNS_TOPICS_KEY, *SQS_KEYS,
+    }
 )
 
 #: A unit is looked at only when it, or a file it includes, defines one of these.
 TERRAGRUNT_INPUT_TRIGGER_KEYS: frozenset[str] = frozenset(
-    {"step_function_file_path", *REPLACEMENT_VAR_MAPS, "handler"}
+    {
+        "step_function_file_path", *REPLACEMENT_VAR_MAPS, "handler", *EVENT_RULE_LIST_KEYS,
+        SNS_TOPICS_KEY, "include_sqs",
+    }
 )
 
 #: Most replacement entries kept for one unit.
@@ -487,6 +508,61 @@ def reduce_lambda_handler(value: Optional[str]) -> Optional[str]:
     if value is None or not _LAMBDA_HANDLER.match(value):
         return None
     return value
+
+
+_TRIGGER_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,256}$")
+_SCHEDULE_EXPRESSION = re.compile(
+    r"^(?:rate\([0-9]{1,5} [a-z]{4,7}\)|cron\([0-9A-Za-z*?/,\-#L ]{5,100}\))$"
+)
+_EVENT_SOURCE = re.compile(r"^[A-Za-z0-9_.\-]{1,100}$")
+MAX_EVENT_SOURCES = 10
+MAX_EVENT_RULES = 50
+MAX_SNS_TOPICS = 50
+
+
+def reduce_trigger_name(value: Optional[str]) -> Optional[str]:
+    """A rule, topic or queue name, or ``None`` for anything that is not a plain name.
+
+    A name that looks like a credential (:func:`value_looks_secret`) is dropped.
+    """
+    from .config_keys import value_looks_secret
+
+    if value is None or not _TRIGGER_NAME.match(value) or value_looks_secret(value):
+        return None
+    return value
+
+
+def reduce_event_rule(item: dict[str, Optional[str]]) -> Optional[dict[str, Any]]:
+    """``{name, schedule_expression?, event_pattern_sources?, enabled?}`` of one rule item.
+
+    Only a plain name, a ``rate(...)``/``cron(...)`` expression, the ``source`` strings of a JSON
+    event pattern and ``is_enabled = false`` are kept. The item's ``input``, ``description`` and
+    every other entry are never passed in, and a value that looks like a secret is dropped.
+    """
+    from .config_keys import storable_config_value
+
+    name = reduce_trigger_name(item.get("name"))
+    if name is None:
+        return None
+    out: dict[str, Any] = {"name": name}
+    schedule = item.get("schedule_expression")
+    if schedule is not None and _SCHEDULE_EXPRESSION.match(schedule) \
+            and storable_config_value("schedule_expression", schedule) is not None:
+        out["schedule_expression"] = schedule
+    pattern = item.get("event_pattern")
+    if pattern is not None and pattern.lstrip().startswith("{") and len(pattern) <= 4000:
+        try:
+            parsed = json.loads(pattern)
+        except ValueError:
+            parsed = None
+        sources = parsed.get("source") if isinstance(parsed, dict) else None
+        if isinstance(sources, list):
+            kept = [x for x in sources if isinstance(x, str) and _EVENT_SOURCE.match(x)]
+            if kept:
+                out["event_pattern_sources"] = kept[:MAX_EVENT_SOURCES]
+    if item.get("is_enabled") == "false":
+        out["enabled"] = False
+    return out
 
 
 def reduce_lambda_name(value: Optional[str]) -> Optional[str]:

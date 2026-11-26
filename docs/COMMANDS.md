@@ -1569,8 +1569,20 @@ Shapes it cannot resolve (these never get a guessed name):
   and is not stored.
 - Other triggers (CloudWatch Logs subscriptions, Cognito, Alexa, Config, DynamoDB Streams enabled
   by `aws_lambda_event_source_mapping` with a computed ARN, ALB target groups) are not read.
-- Terragrunt-driven module inputs are not evaluated: a rule declared inside a module and wired
-  in a stack shows only the half each repo declares.
+- A rule declared inside a shared module and wired in a stack shows only the half each repo
+  declares. Such a module row, whose firing side is only a Terraform label, is marked
+  `template: true`: the name comes from a variable the caller sets.
+
+Rows with `via: terragrunt_inputs` come from a Terragrunt Lambda unit's `inputs`: each item of
+`aws_cloudwatch_event_rules` / `aws_cloudwatch_event_rules_ignore_changes` (a `rule` with its
+`schedule`, `event_pattern_sources` when the pattern is a plain JSON string, `disabled: true`
+for `is_enabled = false`), `existing_sns_topics` (an `sns_subscription` to the function, or to
+the queue when `include_sqs = true`) and `include_sqs` with `sqs_name` (an `event_source_mapping`
+from the queue). The target is the unit's `function_name` (`target_from_directory: true` when
+the name had to be taken from the directory above the unit). Only names, `rate(...)`/`cron(...)`
+expressions and event-pattern `source` strings are read: the rule's `input` document, description
+and every other entry are never visited, and a name that looks like a secret drops the rule. The
+index must be rebuilt for a unit to carry these facts.
 
 `origin="external"` lists the HTTP calls that reach no registered service, grouped by host, to
 show which third-party vendors each repo depends on. One row per (host group, repo), the
@@ -1586,10 +1598,16 @@ the annotation gives the host, read from that annotation's lines). A `${...}` se
 `host_unresolved` with the first configuration key. Hosts are lower-cased; scheme, credentials,
 port, query, fragment and a leading `www.` are dropped; query strings and credentials never
 appear. A vendor entry such as `*.auth0.com` or `*.salesforce.com` collapses tenant subdomains.
+Python `requests` / `httpx` calls (`requests.get/post/...`, `requests.request`, a `Session()` or
+`httpx.Client()` object; only in a module that imports them) are listed too, by host only
+(`python_http_literal`: a literal URL or one with a literal `https://host/` start). The path and
+query of a Python URL are never stored, so a Slack webhook or a token in a query string shows as
+its host; `path` is always `/`. A URL that is not a literal is `host_unresolved`, grouped as
+`${variable}` (the variable, attribute or environment variable name; `python_http_variable`).
 `service` filters by host, domain, vendor or Feign service name, `route` by path prefix. Limits:
 the graph keeps a Feign service name and the keys of its placeholders, never the value, so a
 Feign client configured by property shows the service name, not a host; Python and Java clients
-(`requests`, `RestTemplate`, `HttpClient`) leave no `Endpoint` node and are not seen; an absolute
+(`RestTemplate`, `HttpClient`) leave no `Endpoint` node and are not seen; an absolute
 URL to the company's own domain is listed like any other host.
 
 `origin="consumers"` is the reverse lookup of a named resource. `service` is a queue, bucket,
