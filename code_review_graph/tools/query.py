@@ -1862,9 +1862,9 @@ def query_graph(
                         )
                         if pattern == "callers_of":
                             counts = _direct_caller_counts(store, candidates)
-                            for row in ranked:
-                                row["direct_callers"] = counts.get(
-                                    str(row.get("qualified_name")), 0,
+                            for ranked_row in ranked:
+                                ranked_row["direct_callers"] = counts.get(
+                                    str(ranked_row.get("qualified_name")), 0,
                                 )
                             caller_fields["total_direct_callers"] = sum(counts.values())
                             summary_text = _ambiguous_callers_summary(

@@ -4,6 +4,11 @@
 
 ### Added
 
+- `query_graph_tool` `handlers_of` with a route (`POST /v2/respondents/avmap`) no longer needs
+  `repo_root`: omit it on a multi-repo server, or pass `"*"`, and every registered repo with a graph
+  is asked. The reply names `repos_matched` and tags rows with `repo`, stays small (default 20
+  rows, ten per repo) and counts the repos it could not ask. Other patterns and non-route targets
+  keep the `repo_root is required` error. Query-time only.
 - `query_graph_tool` `callers_of` on a name several nodes share (`ambiguous`) now reports
   `direct_callers` per candidate (standard mode; the summary names them in minimal) and `total_direct_callers`, and its summary starts `AMBIGUOUS, not
   'no callers'`, so a candidate with no callers is not read as the answer. `target` may carry the

@@ -318,3 +318,116 @@ class TestFileHintInTarget:
             pattern="callers_of", target="Foo::refresh", repo_root=overloads["root"],
         )
         assert result["status"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# handlers_of on a route needs no repo_root
+# ---------------------------------------------------------------------------
+
+
+def _route_repo(parent: Path, name: str, routes: list[tuple[str, str, str]]) -> Path:
+    """A registered-looking repo whose graph serves ``(handler, method, route)`` endpoints."""
+    root = (parent / name).resolve()
+    (root / ".git").mkdir(parents=True)
+    path = (root / "Ctl.java").as_posix()
+    with GraphStore(root / ".code-review-graph" / "graph.db") as store:
+        _file(store, path)
+        for index, (handler, method, route) in enumerate(routes):
+            _fn(store, path, handler, 10 + index * 10, parent="Ctl")
+            endpoint = f"{path}::Ctl.{handler}@{method} {route}"
+            store.upsert_node(NodeInfo(
+                kind="Endpoint", name=f"{handler}@{method} {route}", file_path=path,
+                line_start=10 + index * 10, line_end=14 + index * 10, language="java",
+                parent_name="Ctl",
+                extra={"handler": handler, "http_method": method, "route": route},
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="HANDLES", source=f"{path}::Ctl.{handler}", target=endpoint,
+                file_path=path, line=11 + index * 10,
+            ))
+        store.commit()
+    return root
+
+
+@pytest.fixture()
+def registry_home(tmp_path, monkeypatch):
+    from code_review_graph import main as crg_main
+    from code_review_graph.registry import Registry
+
+    home = tmp_path / "crg-home"
+    home.mkdir()
+    monkeypatch.setenv("CRG_HOME", str(home))
+    monkeypatch.setattr(crg_main, "_multi_repo", True)
+    monkeypatch.setattr(crg_main, "_default_repo_root", None)
+    repos = tmp_path / "repos"
+    repos.mkdir()
+    registry = Registry(home / "registry.json")
+    served = _route_repo(repos, "respondents", [("avmap", "POST", "/v2/respondents/avmap")])
+    registry.register(str(served), alias="respondents-api")
+    other = _route_repo(repos, "billing", [("charge", "POST", "/v2/billing/charge")])
+    registry.register(str(other), alias="billing")
+    return {"registry": registry, "served": served, "other": other}
+
+
+def _tool(**kwargs):
+    import asyncio
+
+    from code_review_graph import main as crg_main
+
+    return asyncio.run(crg_main.query_graph_tool(**kwargs))
+
+
+class TestRouteLookupWithoutRepoRoot:
+    def test_a_route_is_found_in_the_repo_that_serves_it(self, registry_home):
+        result = _tool(pattern="handlers_of", target="POST /v2/respondents/avmap")
+        assert result["status"] == "ok"
+        assert [m["repo"] for m in result["repos_matched"]] == ["respondents-api"]
+        assert result["repos_searched"] == 2
+        assert [r["name"] for r in result["results"]] == ["avmap"]
+        assert result["results"][0]["repo"] == "respondents-api"
+        assert "respondents-api" in result["summary"]
+        assert "edges" not in result
+
+    def test_an_explicit_star_does_the_same(self, registry_home):
+        result = _tool(
+            pattern="handlers_of", target="/v2/billing/charge", repo_root="*",
+        )
+        assert [m["repo"] for m in result["repos_matched"]] == ["billing"]
+
+    def test_a_route_nothing_serves_says_how_many_repos_were_searched(self, registry_home):
+        result = _tool(pattern="handlers_of", target="GET /v9/nothing")
+        assert result["status"] == "not_found"
+        assert "2 registered repo" in result["summary"]
+
+    def test_a_name_that_is_not_a_route_still_needs_a_repo(self, registry_home):
+        from fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="repo_root is required"):
+            _tool(pattern="handlers_of", target="avmap")
+        with pytest.raises(ToolError, match="route"):
+            _tool(pattern="handlers_of", target="avmap", repo_root="*")
+
+    def test_other_patterns_still_need_a_repo(self, registry_home):
+        from fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="repo_root is required"):
+            _tool(pattern="callers_of", target="POST /v2/respondents/avmap")
+        with pytest.raises(ToolError, match="handlers_of"):
+            _tool(pattern="callers_of", target="x", repo_root="*")
+
+    def test_a_named_repo_is_unchanged(self, registry_home):
+        result = _tool(
+            pattern="handlers_of", target="POST /v2/respondents/avmap",
+            repo_root=str(registry_home["served"]),
+        )
+        assert result["status"] == "ok"
+        assert "repos_matched" not in result
+
+    def test_a_repo_without_a_graph_is_counted_not_fatal(self, registry_home, tmp_path):
+        bare = (tmp_path / "repos" / "bare").resolve()
+        (bare / ".git").mkdir(parents=True)
+        registry_home["registry"].register(str(bare))
+        result = _tool(pattern="handlers_of", target="POST /v2/respondents/avmap")
+        assert result["status"] == "ok"
+        assert result["repos_without_graph"] == 1
+        assert result["repos_searched"] == 2

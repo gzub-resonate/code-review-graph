@@ -618,6 +618,15 @@ summary.
 exact qualified name: the part before `::` is used as the file hint when it looks like a path (a
 separator or an extension), so `Foo::bar` is untouched.
 
+**A route needs no `repo_root`.** `handlers_of` with a route (`POST /v2/respondents/avmap`)
+names an endpoint, not a repository. On a `--multi-repo` server `repo_root` may be omitted, and
+anywhere `repo_root="*"` asks every registered repo that has a graph. The reply lists
+`repos_matched` (repo, handler count, `matched_endpoints`), tags each row with its `repo`, caps rows
+at `max_results` (default 20, at most ten per repo; `results_omitted` counts the rest) and counts
+`repos_searched`, `repos_without_graph`, `repos_unreadable` and `repos_skipped` (call budget). It
+has no `edges` and no cursor; pass `repo_root` for one repo's full answer. A name that is not a
+route, and every other pattern, still needs one repo and keeps the `repo_root is required` error.
+
 **Java importers.** Java imports are by class, so `importers_of` on a Java file path reads the
 classes the file declares: importers the build bound to the file, imports that kept the
 dotted class name (another source root, a nested or static member import), and `pkg.*` wildcards.

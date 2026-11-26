@@ -700,8 +700,14 @@ async def query_graph_tool(
         pattern: Query pattern name (see above).
         target: Node name, qualified name, or file path to query. A full name
             that one non-test symbol has resolves to it; otherwise the answer
-            is "ambiguous" and lists qualified names to choose from.
-        repo_root: Repository root path. Auto-detected if omitted.
+            is "ambiguous" and lists qualified names to choose from (for callers_of the summary
+            starts "AMBIGUOUS, not 'no callers'" and gives each candidate's direct callers).
+            ``path/File.java::name`` also works: when no node has that exact qualified name,
+            the path before ``::`` is used as ``file_hint``.
+        repo_root: Repository root path. Auto-detected if omitted. For handlers_of with a route
+            (``POST /v1/items``) it may be omitted on a multi-repo server, or ``"*"``: every
+            registered repo is asked and the reply lists ``repos_matched`` (rows carry ``repo``).
+            Any other query still needs one repo.
         detail_level: "standard" for full output, "minimal" for a compact summary: no
             ``edges``, and 5 rows unless ``max_results`` is given. Default: standard.
         max_results: Maximum results to return. Default: 100 (5 with detail_level="minimal").
@@ -741,6 +747,32 @@ async def query_graph_tool(
 
     Returns matching nodes and edges; ``next_cursor`` is present when more rows remain.
     """
+    if repo_root == "*" or (not repo_root and _multi_repo):
+        from .tools.query_extras import parse_route_target
+
+        is_route = pattern == "handlers_of" and parse_route_target(target) is not None
+        if is_route:
+            if cursor:
+                raise ToolError(
+                    "a route lookup across repos has no pages; pass repo_root for one repo"
+                )
+            from .tools.registry_tools import handlers_of_route_across_repos
+
+            return await _offload(
+                "query_graph_tool",
+                lambda: handlers_of_route_across_repos(
+                    target, detail_level=detail_level,
+                    max_results=limit if limit is not None else max_results,
+                ),
+                None,
+                provenance=False,
+            )
+        if repo_root == "*":
+            raise ToolError(
+                "repo_root='*' (every registered repo) is only supported for handlers_of "
+                "with a route such as 'POST /v1/items'; pass one repo's absolute path "
+                "for any other query."
+            )
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "query_graph_tool",
