@@ -407,6 +407,19 @@ mcp = FastMCP(
 )
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Any) -> Any:
+    """Liveness probe for load balancers: 200 with a tiny body, never touching a graph.
+
+    Served by the HTTP transport only. It needs no credentials and none of the MCP
+    ``Accept`` headers, so a plain health check gets 200 instead of the 406 that
+    ``GET /mcp`` answers.
+    """
+    from starlette.responses import JSONResponse
+
+    return JSONResponse({"status": "ok"})
+
+
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
 async def build_or_update_graph_tool(
     full_rebuild: bool = False,

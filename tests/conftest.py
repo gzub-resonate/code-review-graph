@@ -34,11 +34,13 @@ def fresh_repo_memo():
     test that rewrites a small graph quickly can leave the same timestamp and size behind, so
     nothing carries over from one test to the next.
     """
-    from code_review_graph.repo_cache import MEMO
+    from code_review_graph.repo_cache import INFRASTRUCTURE_RESULTS, MEMO
 
     MEMO.clear()
+    INFRASTRUCTURE_RESULTS.clear()
     yield
     MEMO.clear()
+    INFRASTRUCTURE_RESULTS.clear()
 
 
 @pytest.fixture(autouse=True)

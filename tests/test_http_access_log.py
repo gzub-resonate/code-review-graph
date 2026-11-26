@@ -181,3 +181,83 @@ def test_app_exception_propagates_and_logs(records):
     with pytest.raises(RuntimeError):
         _call(ClientAccessLog(boom), [])
     assert "status=-" in _lines(records)[0]
+
+
+# -- Health probes ---------------------------------------------------------------------------
+
+
+async def _not_acceptable_app(scope, receive, send):
+    await send({"type": "http.response.start", "status": 406, "headers": []})
+    await send({"type": "http.response.body", "body": b"Not Acceptable"})
+
+
+def test_get_mcp_406_from_a_proxy_is_not_logged_at_info(records):
+    _call(ClientAccessLog(_not_acceptable_app), [("user-agent", "probe/1")], method="GET")
+    assert _lines(records) == []
+
+
+def test_get_mcp_406_is_logged_at_debug(caplog):
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    _call(ClientAccessLog(_not_acceptable_app), [("user-agent", "probe/1")], method="GET")
+    (record,) = [r for r in caplog.records if r.name == LOGGER]
+    assert record.levelno == logging.DEBUG and "status=406" in record.getMessage()
+
+
+def test_get_mcp_406_from_a_public_peer_is_still_logged(records):
+    _call(ClientAccessLog(_not_acceptable_app), [], method="GET", peer="8.8.4.4")
+    (line,) = _lines(records)
+    assert "status=406" in line
+
+
+def test_get_mcp_with_another_status_is_still_logged(records):
+    _call(ClientAccessLog(_app), [("user-agent", "real/1")], method="GET")
+    (line,) = _lines(records)
+    assert "status=202" in line
+
+
+def test_a_406_post_is_still_logged(records):
+    _call(ClientAccessLog(_not_acceptable_app), [], method="POST")
+    (line,) = _lines(records)
+    assert "method=POST" in line and "status=406" in line
+
+
+def test_health_get_is_quiet_even_from_any_peer(records):
+    _call(ClientAccessLog(_app), [], method="GET", path="/health", peer="8.8.4.4")
+    assert _lines(records) == []
+
+
+def test_probes_are_counted_in_a_periodic_summary(monkeypatch, records):
+    monkeypatch.setenv("CRG_PROBE_SUMMARY_SECONDS", "0")
+    app = ClientAccessLog(_not_acceptable_app)
+    for _ in range(3):
+        _call(app, [], method="GET")
+    lines = _lines(records)
+    assert len(lines) == 3 and all(line.startswith("mcp_probe_summary") for line in lines)
+
+    monkeypatch.setenv("CRG_PROBE_SUMMARY_SECONDS", "3600")
+    app = ClientAccessLog(_not_acceptable_app)
+    for _ in range(3):
+        _call(app, [], method="GET")
+    assert len(_lines(records)) == 3  # no new summary inside the interval
+
+
+def test_real_post_line_format_is_unchanged(records):
+    _call(ClientAccessLog(_app), [("user-agent", "claude/1")], method="POST")
+    (line,) = _lines(records)
+    assert line == (
+        'mcp_client peer=10.0.0.5 client=10.0.0.5 method=POST path="/mcp" status=202 '
+        'ua="claude/1" xff=""'
+    )
+
+
+def test_health_route_answers_200_without_graph_or_headers(records):
+    from starlette.testclient import TestClient
+
+    from code_review_graph import main
+
+    app = main.mcp.http_app(middleware=build_client_log_middleware())
+    with TestClient(app) as client:
+        reply = client.get("/health")
+        assert reply.status_code == 200
+        assert reply.json() == {"status": "ok"}
+    assert _lines(records) == []

@@ -1165,7 +1165,7 @@ registered repo and folder each one resolves to. `service` filters by module rep
 prefix, and `status` is `matched`, `module_not_found`, `ambiguous` or `repo_not_registered`. Run it with
 `service=<module repo>` to see which stacks use a module.
 
-`origin="terraform"`, `"stepfunction"` and `"awssdk"` also return an `infrastructure` object that relates each
+`origin="terraform"`, `"stepfunction"` and `"awssdk"` also return an `infrastructure` object (first page only; a page reached with `cursor` carries `infrastructure_note` instead) that relates each
 selected repository to the infrastructure declared for it in any registered repository: ECR repositories, ECS
 services and task-definition families, Terragrunt stack and Terraform module directories whose name equals the
 repository's name or alias, and declared queues, buckets, topics and tables its code names (written out or
