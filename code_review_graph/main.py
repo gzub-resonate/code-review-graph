@@ -1995,6 +1995,16 @@ async def cross_repo_requests_tool(
             ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
             (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
             to see which services read or write a bucket and which repo defines it.
+            ``trigger`` answers "what invokes this Lambda, queue, state machine, topic or bucket
+            handler" from the Terraform already indexed (EventBridge rules and Scheduler
+            schedules, Lambda event source mappings, SNS subscriptions, S3 bucket notifications,
+            API Gateway routes and integrations, ``aws_lambda_permission``, EventBridge Pipes):
+            ``service`` keeps rows whose invoked side is that name, ``service/name`` or
+            Terraform label; ``route`` keeps rows whose firing side (rule, queue, topic, bucket,
+            route key) is that name, so "what does X fire" is ``route=X``. ``status`` is
+            ``resolved``, ``source_unresolved`` or ``target_unresolved``. Rows give
+            ``trigger_kind``, ``source``, ``target``, ``schedule``, ``event_pattern_sources``,
+            ``file``, ``line`` and ``via`` (``reference`` marks an inference).
             ``amqp`` lists the publishers and listeners of one RabbitMQ exchange across the
             repos: ``service`` is the exchange (required; ``orders.exchange`` or
             ``external:rabbitmq:orders.exchange``), ``route`` an optional key and ``status``

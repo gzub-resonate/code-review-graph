@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `cross_repo_requests_tool` `origin="trigger"`: what invokes a Lambda, queue, state machine,
+  topic or bucket handler, joined at query time from the indexed Terraform (EventBridge rules and
+  schedules, event source mappings, SNS subscriptions, S3 notifications, API Gateway,
+  `aws_lambda_permission`, EventBridge Pipes). Filters by target (`service`) and source
+  (`route`); rows are `resolved`, `source_unresolved` or `target_unresolved`. No rebuild needed.
+
 ### Changed
 
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or

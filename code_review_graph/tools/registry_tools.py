@@ -20,6 +20,7 @@ from .. import infra_join as ij
 from .. import service_aliases as sa
 from .. import stepfunction_links as sl
 from .. import terraform_links as tl
+from .. import trigger_links as trl
 from .. import workflow_links as wl
 from ..constants import cross_repo_budget_seconds, cross_repo_workers
 from ..endpoint_index import attach as attach_endpoints
@@ -900,6 +901,103 @@ def _amqp_links(
     return result
 
 
+def _trigger_links(
+    repos: list[str] | None,
+    target: str | None,
+    source: str | None,
+    status: str | None,
+    max_results: int,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """The ``origin="trigger"`` branch: what invokes a Lambda, queue, state machine or topic.
+
+    ``service`` filters the invoked side (name, ``service/name`` or Terraform label), ``route``
+    the firing side (rule, queue, topic, bucket, route key). Either, both or neither may be
+    given. ``status`` is ``resolved``, ``source_unresolved`` or ``target_unresolved``.
+    """
+    from ..registry import Registry
+
+    if status is not None and status not in trl.STATUSES:
+        raise ValueError(f"status must be one of: {', '.join(trl.STATUSES)}")
+    all_repos = Registry().list_repos()
+    selected: list[dict[str, Any]] = all_repos
+    unknown_shown: list[str] = []
+    if repos:
+        selected, unknown, _ambiguous = _select_repos(all_repos, repos)
+        unknown_shown, _total, _cut = _echoed(unknown)
+    budget = cross_repo_budget_seconds()
+    started = _now()
+
+    def read(entry: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+        def load() -> Optional[list[dict[str, Any]]]:
+            store = tl.open_store(entry)
+            if store is None:
+                return None
+            try:
+                return trl.read_triggers(store)
+            except (sqlite3.Error, GraphStoreError) as exc:
+                logger.warning("Cannot read triggers of %s: %s", entry["path"], exc)
+                return None
+            finally:
+                store.close()
+
+        return MEMO.get("trigger-rows", entry, load, cacheable=lambda found: found is not None)
+
+    rows: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    unreadable: list[str] = []
+    counts: dict[str, int] = {}
+    kinds: dict[str, int] = {}
+    results = parallel_map_budget(
+        read, selected, cross_repo_workers(),
+        lambda: bool(budget) and _now() - started > budget,
+    )
+    for entry, found in zip(selected, results):
+        label = _sanitize_name(_repo_label(entry))
+        if found is SKIPPED:
+            skipped.append(label)
+            continue
+        if found is None:
+            unreadable.append(label)
+            continue
+        root = str(Path(entry["path"]))
+        for raw in found:
+            if not trl.matches(raw, target, source):
+                continue
+            counts[raw["status"]] = counts.get(raw["status"], 0) + 1
+            kinds[raw["trigger_kind"]] = kinds.get(raw["trigger_kind"], 0) + 1
+            if status and raw["status"] != status:
+                continue
+            rows.append(trl.finish(raw, label, root))
+    page = paginate(
+        rows, max_results, 100, cursor,
+        scope=make_scope(
+            "cross_repo_requests_tool", origin="trigger",
+            repos=sorted(repos) if repos else None, target=target, source=source, status=status,
+        ),
+        stamp=content_stamp([rows, skipped]),
+    )
+    result: dict[str, Any] = {
+        "status": "ok",
+        "summary": f"{page.total} inbound trigger(s) across {len(selected)} repo(s)"
+        + shown_range(page),
+        "origin": "trigger",
+        "results": page.items,
+        "counts": counts,
+        "trigger_kinds": kinds,
+        "total": page.total,
+        "truncated": page.truncated or bool(skipped),
+        "repos_searched": len(selected) - len(skipped),
+        "unreadable": unreadable,
+        **page.fields(),
+    }
+    if skipped:
+        result["skipped_repos"] = skipped
+    if unknown_shown:
+        result["unknown"] = unknown_shown
+    return result
+
+
 def _relative_to(file_path: str, root: Path) -> str:
     try:
         return str(Path(file_path).relative_to(root))
@@ -1251,6 +1349,18 @@ def cross_repo_requests_func(
     rebuilt. It pages like the other origins (``max_results`` is the page size) and does not
     use ``limit`` or the infrastructure summary.
 
+    ``trigger`` answers "what invokes this Lambda, queue, state machine, topic or bucket
+    handler" from the Terraform already indexed (no rebuild): EventBridge rules and Scheduler
+    schedules, Lambda event source mappings, SNS subscriptions, S3 bucket notifications, API
+    Gateway routes and integrations, ``aws_lambda_permission`` and EventBridge Pipes. ``service``
+    keeps rows whose invoked side (target) is that name, ``service/name`` or Terraform label;
+    ``route`` keeps rows whose firing side (source) is that rule, queue, topic, bucket or route
+    key, so "what fires X" is ``route=X``. Rows carry ``trigger_kind``, ``source``, ``target``,
+    ``schedule`` and ``event_pattern_sources`` when written out, ``file``/``line`` and a
+    ``status`` of ``resolved``, ``source_unresolved`` or ``target_unresolved``; ``via`` is
+    ``reference`` for the shapes inferred from which resources a block mentions. See
+    ``docs/COMMANDS.md`` for the shapes that cannot be resolved.
+
     A Feign service name that is not a registered repo name resolves through the optional
     alias file ``CRG_SERVICE_ALIASES_FILE`` (``{"alias": "repo", "prefix:p-": "repo"}``) or
     the names the repos declare (``spring.application.name``, ECS service, ECR repository);
@@ -1272,21 +1382,24 @@ def cross_repo_requests_func(
         ``unreadable`` (repos whose graph could not be read), plus
         ``unknown``/``ambiguous`` when ``repos`` was given.
         When rows remain, ``next_cursor`` is the ``cursor`` that returns the next page.
-        The ``terraform``, ``workflow``, ``stepfunction``, ``awssdk`` and ``amqp`` origins page the
-        same way: ``max_results`` (at most 100) is the page size, ``limit`` is not used, and
-        the cursor is refused when the query or the rows changed.
+        The ``terraform``, ``workflow``, ``stepfunction``, ``awssdk``, ``amqp`` and ``trigger``
+        origins page the same way: ``max_results`` (at most 100) is the page size, ``limit`` is
+        not used, and the cursor is refused when the query or the rows changed.
     """
     from ..registry import Registry
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
-    infra_origins = ("terraform", "workflow", "stepfunction", "awssdk", "amqp")
+    infra_origins = ("terraform", "workflow", "stepfunction", "awssdk", "amqp", "trigger")
     if status is not None and origin not in infra_origins and status not in fl.STATUSES:
         raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
         raise ValueError(
-            "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp"
+            "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp, "
+            "trigger"
         )
+    if origin == "trigger":
+        return _trigger_links(repos, service, route, status, max_results, cursor)
     if origin == "amqp":
         return _amqp_links(repos, service, route, status, max_results, cursor)
     if origin == "awssdk":
