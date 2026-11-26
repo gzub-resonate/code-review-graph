@@ -101,19 +101,67 @@ SERVICES: dict[str, _Svc] = {
     "ecs": _Svc("ecs", "task-definition", ("taskdefinition",)),
     "glue": _Svc("glue", "job", ("jobname",)),
     "batch": _Svc("batch", "job-definition", ("jobdefinition",)),
+    "rds": _Svc("rds", "db-instance", ("dbinstanceidentifier",)),
+    "elasticloadbalancing": _Svc(
+        "elasticloadbalancing", "load-balancer",
+        ("loadbalancerarn", "loadbalancerarns", "loadbalancername", "loadbalancernames",
+         "names", "name"),
+    ),
+    "elasticache": _Svc("elasticache", "cache-cluster", ("cacheclusterid",)),
+    "es": _Svc("es", "search-domain", ("domainname", "domainnames")),
 }
+#: Services whose resources are data stores. A name is only joined to a declaration of the same
+#: kind (a replication group is not a cache cluster of the same name); see ``aws_sdk_links``.
+DATA_STORE_SERVICES = frozenset({"rds", "elasticloadbalancing", "elasticache", "es"})
+_RDS_CLUSTER_OPS = (
+    "describe_db_clusters", "create_db_cluster", "modify_db_cluster", "delete_db_cluster",
+    "start_db_cluster", "stop_db_cluster", "failover_db_cluster", "reboot_db_cluster",
+    "create_db_cluster_snapshot", "describe_db_cluster_snapshots",
+    "promote_read_replica_db_cluster", "restore_db_cluster_from_snapshot",
+    "restore_db_cluster_to_point_in_time", "describe_db_cluster_endpoints",
+    "add_role_to_db_cluster", "remove_role_from_db_cluster", "backtrack_db_cluster",
+    "describe_db_cluster_backtracks", "switchover_read_replica_db_cluster",
+)
+_TARGET_GROUP_OPS = (
+    "describe_target_health", "register_targets", "deregister_targets", "modify_target_group",
+    "modify_target_group_attributes", "describe_target_group_attributes", "delete_target_group",
+    "describe_target_groups", "create_target_group",
+)
+_REPLICATION_GROUP_OPS = (
+    "describe_replication_groups", "create_replication_group", "modify_replication_group",
+    "delete_replication_group", "increase_replica_count", "decrease_replica_count",
+    "test_failover", "start_migration", "complete_migration", "test_migration",
+    "modify_replication_group_shard_configuration",
+)
 #: Per-operation resource parameters that differ from the service's.
 _OP_PARAMS: dict[tuple[str, str], tuple[str, ...]] = {
     ("secretsmanager", "create_secret"): ("name",),
     ("ssm", "get_parameters_by_path"): ("path",),
     ("lambda", "create_function"): ("functionname",),
+    **{("rds", op): ("dbclusteridentifier",) for op in _RDS_CLUSTER_OPS},
+    **{("elasticloadbalancing", op): (
+        "targetgrouparn", "targetgrouparns", "names", "name",
+    ) for op in _TARGET_GROUP_OPS},
+    **{("elasticache", op): ("replicationgroupid",) for op in _REPLICATION_GROUP_OPS},
 }
+#: Per-operation resource kind that differs from the service's.
+_OP_KIND: dict[tuple[str, str], str] = {
+    **{("rds", op): "db-cluster" for op in _RDS_CLUSTER_OPS},
+    **{("elasticloadbalancing", op): "target-group" for op in _TARGET_GROUP_OPS},
+    **{("elasticache", op): "replication-group" for op in _REPLICATION_GROUP_OPS},
+}
+#: Parameters that take a list of names; each item (up to ten) is an edge.
+_LIST_PARAMS = frozenset({
+    "names", "loadbalancerarns", "loadbalancernames", "targetgrouparns", "domainnames",
+})
+_MAX_LIST_ITEMS = 10
 #: boto3 ``client(<name>)`` -> service key.
 _BOTO_SERVICE = {
     "s3": "s3", "dynamodb": "dynamodb", "lambda": "lambda", "stepfunctions": "states",
     "sfn": "states", "secretsmanager": "secretsmanager", "ssm": "ssm", "kinesis": "kinesis",
     "firehose": "firehose", "events": "events", "eventbridge": "events", "ecs": "ecs",
-    "glue": "glue", "batch": "batch",
+    "glue": "glue", "batch": "batch", "rds": "rds", "elbv2": "elasticloadbalancing",
+    "elb": "elasticloadbalancing", "elasticache": "elasticache", "es": "es", "opensearch": "es",
 }
 #: Java package segment (SDK v2 and v1) -> service key.
 _JAVA_PKG = {
@@ -122,6 +170,9 @@ _JAVA_PKG = {
     "ssm": "ssm", "simplesystemsmanagement": "ssm", "kinesis": "kinesis",
     "firehose": "firehose", "kinesisfirehose": "firehose", "eventbridge": "events",
     "cloudwatchevents": "events", "ecs": "ecs", "glue": "glue", "batch": "batch",
+    "rds": "rds", "elasticloadbalancing": "elasticloadbalancing",
+    "elasticloadbalancingv2": "elasticloadbalancing", "elasticache": "elasticache",
+    "elasticsearch": "es", "opensearch": "es",
 }
 #: npm package -> service key.
 _JS_PKG = {
@@ -129,7 +180,10 @@ _JS_PKG = {
     "client-lambda": "lambda", "client-sfn": "states", "client-secrets-manager": "secretsmanager",
     "client-ssm": "ssm", "client-kinesis": "kinesis", "client-firehose": "firehose",
     "client-eventbridge": "events", "client-ecs": "ecs", "client-glue": "glue",
-    "client-batch": "batch",
+    "client-batch": "batch", "client-rds": "rds",
+    "client-elastic-load-balancing-v2": "elasticloadbalancing",
+    "client-elastic-load-balancing": "elasticloadbalancing", "client-elasticache": "elasticache",
+    "client-elasticsearch-service": "es", "client-opensearch": "es",
 }
 _LIB_DYNAMODB_OPS = {
     "Get": "get_item", "Put": "put_item", "Update": "update_item", "Delete": "delete_item",
@@ -143,6 +197,14 @@ _RESOURCELESS = frozenset({
     "list_streams", "list_delivery_streams", "list_event_buses", "list_clusters",
     "list_task_definitions", "list_jobs", "describe_limits", "describe_parameters",
     "list_job_definitions", "describe_endpoints", "get_caller_identity",
+    "describe_db_engine_versions", "describe_orderable_db_instance_options",
+    "describe_db_parameter_groups", "describe_db_subnet_groups", "describe_option_groups",
+    "describe_event_subscriptions", "describe_events", "describe_certificates",
+    "describe_account_attributes", "describe_reserved_db_instances",
+    "describe_db_security_groups", "describe_cache_engine_versions",
+    "describe_cache_parameter_groups", "describe_cache_subnet_groups",
+    "describe_cache_security_groups", "describe_reserved_cache_nodes", "list_domain_names",
+    "describe_ssl_policies", "describe_account_limits", "list_domain_names",
 })
 _NON_OPERATIONS = frozenset({
     "close", "exceptions", "meta", "get_waiter", "can_paginate", "waiter_names", "get_paginator",
@@ -164,6 +226,7 @@ _WRITE_PREFIXES = (
     "batch_write", "transact_write", "batch_writer", "restore", "stop", "register",
     "deregister", "tag", "untag", "publish", "write", "set", "remove", "add", "import",
     "execute", "cancel", "terminate", "reset", "rotate", "replace", "emit", "invoke",
+    "modify", "failover", "reboot", "promote", "switchover", "increase", "decrease",
 )
 
 
@@ -187,7 +250,10 @@ _SDK_OPERATION = {
 }
 #: ``sdk`` values whose ``operation`` is not an SDK operation (a CLI sub-command, a URI scan,
 #: Terraform).
-_NON_SDK = frozenset({"terraform", "aws-cli", "uri-literal", "arn-helper"})
+_NON_SDK = frozenset({
+    "terraform", "aws-cli", "uri-literal", "arn-helper", "jdbc-url", "client-call",
+    "endpoint-literal", "spring-config",
+})
 ACCESS_MODES = ("read", "write", "delete", "list", "admin", "invoke")
 
 
@@ -260,6 +326,14 @@ _NAME_RE: dict[str, re.Pattern[str]] = {
     "rule": re.compile(r"^[A-Za-z0-9_.\-]{1,64}$"),
     "schedule": re.compile(r"^[A-Za-z0-9_.\-]{1,64}$"),
     "cluster": re.compile(r"^[A-Za-z0-9_\-]{1,255}$"),
+    "db-instance": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,62}$"),
+    "db-cluster": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,62}$"),
+    "db-proxy": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,62}$"),
+    "load-balancer": re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{0,31}$"),
+    "target-group": re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{0,31}$"),
+    "cache-cluster": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,49}$"),
+    "replication-group": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,39}$"),
+    "search-domain": re.compile(r"^[a-z][a-z0-9\-]{2,27}$"),
 }
 #: ARN resource prefix per kind for services ``reduce_arn`` does not know.
 _OWN_ARN = {
@@ -272,10 +346,29 @@ _PLACEHOLDER_OK = re.compile(r"[A-Za-z0-9_.\-\[\]]{1,128}")
 _PROP_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z0-9_.\-]+)(?::[^}]*)?\}$")
 
 
+#: Data store kind -> (ARN service, pattern of the resource part; group 1 is the name).
+_DATA_STORE_ARN: dict[str, tuple[str, re.Pattern[str]]] = {
+    "db-instance": ("rds", re.compile(r"^db:([^:/]+)$")),
+    "db-cluster": ("rds", re.compile(r"^cluster:([^:/]+)$")),
+    "cache-cluster": ("elasticache", re.compile(r"^cluster:([^:/]+)$")),
+    "replication-group": ("elasticache", re.compile(r"^replicationgroup:([^:/]+)$")),
+    "search-domain": ("es", re.compile(r"^domain/([^/]+)(?:/.*)?$")),
+    "load-balancer": (
+        "elasticloadbalancing",
+        re.compile(r"^loadbalancer/(?:(?:app|net|gwy)/)?([^/]+)(?:/[0-9a-f]{16})?$"),
+    ),
+    "target-group": ("elasticloadbalancing", re.compile(r"^targetgroup/([^/]+)/[0-9a-f]{16}$")),
+}
+
+
 def _name_from_arn(kind: str, text: str) -> Optional[str]:
     parts = text.split(":", 5)
     if len(parts) != 6 or parts[0] != "arn" or _DYN in parts[1] or _DYN in parts[2]:
         return None
+    if kind in _DATA_STORE_ARN:
+        service, pattern = _DATA_STORE_ARN[kind]
+        found = pattern.match(parts[5]) if parts[2] == service else None
+        return found.group(1) if found else None
     if kind in _OWN_ARN:
         service, prefix = _OWN_ARN[kind]
         if parts[2] != service or not parts[5].startswith(prefix):
@@ -367,7 +460,7 @@ class _Out:
     ) -> None:
         if len(self.edges) >= _MAX_EDGES_PER_FILE or operation in _RESOURCELESS:
             return
-        kind = kind or SERVICES[service].kind
+        kind = kind or _OP_KIND.get((service, operation)) or SERVICES[service].kind
         name, placeholder = resolve_name(kind, value)
         if placeholder is not None and not _PLACEHOLDER_OK.fullmatch(placeholder):
             placeholder = None
@@ -715,7 +808,12 @@ class _Python:
         params = _OP_PARAMS.get((svc, op), SERVICES[svc].params)
         for name in params:
             if name in kws:
-                self.out.add(svc, op, self.val(kws[name]), line, sdk)
+                node = kws[name]
+                if name in _LIST_PARAMS and node.type in ("list", "tuple"):
+                    for item in node.named_children[:_MAX_LIST_ITEMS]:
+                        self.out.add(svc, op, self.val(item), line, sdk)
+                    return
+                self.out.add(svc, op, self.val(node), line, sdk)
                 return
         if splat:
             self.out.add(svc, op, Val(), line, sdk)
@@ -1185,6 +1283,10 @@ class _Js:
         for name in _OP_PARAMS.get((service, operation), SERVICES[service].params):
             if name in pairs:
                 value = pairs[name]
+                if name in _LIST_PARAMS and value.type == "array":
+                    for item in value.named_children[:_MAX_LIST_ITEMS]:
+                        self.out.add(service, operation, self.val(item), line, "aws-sdk-js-v3")
+                    return
                 val = Val(self.consts.get(_text(value, self.src))) \
                     if value.type == "shorthand_property_identifier" else self.val(value)
                 getter = (
@@ -1501,7 +1603,7 @@ def aws_sdk_edges(
     path: Path, source: bytes, nodes: list[Any], edges: list[Any],
     get_parser: Callable[[str], Any],
 ) -> list[Any]:
-    """The AWS SDK, ``s3://``, ``aws s3`` and Terraform bucket edges of one parsed file."""
+    """The AWS SDK, ``s3://``, ``aws s3``, Terraform and data store connection edges of a file."""
     suffix = path.suffix.lower()
     posix = path.as_posix()
     is_workflow = suffix in (".yml", ".yaml") and any(p in posix for p in _WORKFLOW_PARTS)
@@ -1510,7 +1612,10 @@ def aws_sdk_edges(
     wants_sdk = bool(language) and any(m in source for m in sdk_markers)
     wants_uri = (suffix in _URI_SUFFIXES or is_workflow) and b"s3" in source
     wants_tf = suffix == ".tf" and any(m in source for m in _wiring.MARKERS)
-    if not (wants_sdk or wants_uri or wants_tf):
+    from . import data_store_calls as _stores
+
+    store_ast, store_text, store_config = _stores.wants(suffix, path.name, language, source)
+    if not (wants_sdk or wants_uri or wants_tf or store_ast or store_text or store_config):
         return []
     file_node = next((n for n in nodes if n.kind == "File"), None)
     if file_node is None:
@@ -1519,12 +1624,15 @@ def aws_sdk_edges(
 
     scopes = _Scopes(nodes, edges, file_node.file_path)
     out = _Out(scopes, EdgeInfo)
-    if wants_sdk and language:
+    if (wants_sdk or store_ast) and language:
         parser = get_parser(language)
         if parser is not None:
             root = parser.parse(source).root_node
-            runner = {"python": _Python, "java": _Java}.get(language, _Js)
-            runner(source, root, out).run()
+            if wants_sdk:
+                runner = {"python": _Python, "java": _Java}.get(language, _Js)
+                runner(source, root, out).run()
+            if store_ast:
+                _stores.scan_code(language, source, root, out)
     if wants_uri or wants_tf:
         text = source.decode("utf-8", "replace")
         if suffix == ".tf":
@@ -1534,4 +1642,10 @@ def aws_sdk_edges(
             _scan_shell(text, out)
         if suffix not in (".sh", ".bash") and not is_workflow:
             _scan_uris(text, out)
+    if store_text or store_config:
+        store_source = source.decode("utf-8", "replace")
+        if store_text:
+            _stores.scan_text(store_source, out)
+        if store_config:
+            _stores.scan_config(path.name, store_source, out)
     return out.edges

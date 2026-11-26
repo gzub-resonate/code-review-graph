@@ -1991,7 +1991,7 @@ async def cross_repo_requests_tool(
             ``aws s3`` commands: ``service`` filters by resource name, ``route`` by
             ``<service>/<name>`` or ``<service>`` (``s3``, ``dynamodb``, ``lambda``, ``states``,
             ``secretsmanager``, ``ssm``, ``kinesis``, ``firehose``, ``events``, ``ecs``,
-            ``glue``, ``batch``), ``status`` is ``matched``, ``not_found``, ``ambiguous``,
+            ``glue``, ``batch``, ``rds``, ``elasticloadbalancing``, ``elasticache``, ``es``), ``status`` is ``matched``, ``not_found``, ``ambiguous``,
             ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
             (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
             to see which services read or write a bucket and which repo defines it.

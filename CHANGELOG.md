@@ -26,6 +26,25 @@
 
 ### Added
 
+- `cross_repo_requests_tool` with `origin` `awssdk` now finds calls to RDS, load balancers
+  (ELB, ALB, NLB and target groups), ElastiCache and OpenSearch/Elasticsearch. Two sources feed it:
+  SDK operations (boto3 `rds`, `elbv2`, `elb`, `elasticache`, `es` and `opensearch`; the Java v1 and v2
+  packages; the `@aws-sdk/client-*` packages) and client connections that name a host: JDBC and
+  R2DBC URLs, Spring `application*` files (`spring.datasource.url`, `spring.data.redis.host`, the
+  Elasticsearch `uris`), psycopg2, psycopg, asyncpg, pymysql, SQLAlchemy, redis-py, Jedis, Lettuce,
+  Redisson, the Elasticsearch/OpenSearch clients, `pg`, `mysql2`, `ioredis`, `redis` and the
+  `@elastic`/`@opensearch-project` clients, and AWS endpoint hosts written in code. The service
+  is `rds`, `elasticloadbalancing`, `elasticache` or `es`; rows carry `resource_kind`
+  (`db-instance`, `db-cluster`, `db-proxy`, `load-balancer`, `target-group`, `cache-cluster`,
+  `replication-group`, `search-domain`) and, for a connection, `host`, `port`, `database`, `engine`
+  and `client`. A host or environment variable that is not written out gives an `unresolved` row
+  with its `placeholder`. Users, passwords and query strings of a URL are never stored. A name is
+  joined to a Terraform declaration (`aws_db_instance`, `aws_rds_cluster`, `aws_db_proxy`,
+  `aws_elasticache_replication_group`, `aws_elasticache_cluster`, `aws_lb`, `aws_alb`, `aws_elb`,
+  `aws_lb_target_group`, `aws_opensearch_domain`, `aws_elasticsearch_domain`) only when the
+  declared name equals it exactly and the kind is the same. **The index fingerprint changes: every
+  graph needs a full rebuild.**
+
 - AMQP exchange queries, at query time (no graph rebuild; the links need graphs whose publisher and
   listener edges meet on `external:rabbitmq:<exchange>`, so older graphs show nothing until
   rebuilt). `query_graph_tool` `listeners_of` and `publishers_of` accept `routing_key` on such a
