@@ -1181,7 +1181,9 @@ spells (`mydb.abc.us-east-1.rds.amazonaws.com` is `mydb`, `search-mydomain-<id>.
 `name-123456.us-east-1.elb.amazonaws.com` is `name`); a custom DNS name, an `internal-` load balancer host, a
 custom cluster endpoint or a variable gives an `unresolved` row (`unresolved_reason`, `placeholder`). A row is
 `matched` only when a Terraform declaration of the same kind has exactly that name. Credentials in a URL are never
-stored.
+stored. A connection row has `evidence` (`client_call`, `connection_url`, `config_key`, or `hostname_only` for a bare
+host with no client or endpoint key around it, which also has `confidence` 0.4); a host in a comment, docstring, log
+call, sample config, test, fixture, mock or docs path makes no row.
 
 `origin="workflow"` does the same for GitHub Actions: each `uses: org/repo/path@ref` of a workflow or composite
 action (a reusable workflow at job level, an action at step level) that names another repo is joined to the

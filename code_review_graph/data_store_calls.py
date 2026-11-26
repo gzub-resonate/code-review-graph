@@ -36,19 +36,34 @@ What counts as evidence of a connection:
   (``HttpHost``, ``connectedTo``) and the driver data sources in Java; ``pg``, ``mysql``,
   ``mysql2``, ``ioredis``, ``redis``, ``@elastic/elasticsearch``, ``@opensearch-project/opensearch``
   and ``sequelize`` in JavaScript and TypeScript;
-* the Spring keys ``spring.(data.)redis.host``, ``...cluster.nodes`` and the Elasticsearch ``uris``.
+* the Spring keys ``spring.(data.)redis.host``, ``...cluster.nodes`` and the Elasticsearch ``uris``;
+* an AWS endpoint host under a config key that names an endpoint (``spring.datasource.url``,
+  ``DB_HOST``, ``REDIS_URL``, ``SEARCH_ENDPOINT``, ``db_dsn``) in a Spring file, a ``.env`` file, a
+  Docker Compose file, a ``.tfvars`` file or the ``variable`` defaults and assignments of a ``.tf``
+  file, or written next to a variable of that kind in code.
+
+A host written out with none of that around it (``targets = ["<host>"]``) is still an edge, but one
+marked ``evidence: hostname_only`` with ``confidence`` 0.4, so a query can drop it. Every other row
+says how it was found in ``evidence``: ``client_call``, ``connection_url`` or ``config_key``.
+
+Nothing is read from a comment, a Python docstring or other triple-quoted string, a log or print
+call, a test, fixture, mock, example, sample or documentation path (``skip_path``), or a sample
+config (``*.example``, ``*.sample``, ``*.dist``, ``.env.example``).
 
 A host given as an environment variable or a property (``os.environ["DB_HOST"]``,
 ``${db.host}``) is an unresolved edge with its ``placeholder``; the value is never read.
 
 Credentials never enter an edge. A URL is cut into the host, the port and the database name; the
 user, the password and every query or property (``?password=``, ``;password=``) are dropped
-before anything is stored, and a host that does not look like a host is dropped with them.
+before anything is stored, and a host that does not look like a host is dropped with them. A URL
+whose password contains a ``;``, ``?``, ``#``, ``)`` or ``]`` is cut inside the password; its host
+is dropped, never kept as the user name.
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from .aws_sdk_calls import (
@@ -69,12 +84,44 @@ from .config_keys import normalize_spring_config_key
 __all__ = ["classify_host", "parse_targets", "scan_code", "scan_config", "scan_text", "wants"]
 
 _MAX_TARGETS = 5
+HOSTNAME_ONLY = "hostname_only"
+_HOSTNAME_ONLY_CONFIDENCE = 0.4
 SQL, REDIS, SEARCH = "sql", "redis", "search"
 _FAMILY_DEFAULT = {
     SQL: ("rds", "db-instance"),
     REDIS: ("elasticache", "cache-cluster"),
     SEARCH: ("es", "search-domain"),
 }
+
+# -- Paths ---------------------------------------------------------------------------------------
+
+_SAMPLE_NAME = re.compile(r"(?:^|[.\-_])(?:example|examples|sample|samples|dist|template|tmpl)"
+                          r"(?:[.\-_]|$)")
+_SAMPLE_DIRS = frozenset({
+    "fixtures", "fixture", "__fixtures__", "mocks", "mock", "__mocks__", "testdata", "test-data",
+    "test_data", "examples", "example", "samples", "sample", "docs", "doc", "documentation",
+    "stubs",
+})
+
+
+def skip_path(path: "str | Path", repo_root: "str | Path | None" = None) -> bool:
+    """A test, fixture, mock, example, sample or documentation path: no row comes from it.
+
+    Test paths use the parser's own rule; the other directories are read inside the repository
+    only, so a checkout under ``/home/me/examples/`` keeps its files.
+    """
+    from .parser import _repo_relative_path, is_test_file, normalize_file_path
+
+    if is_test_file(path, repo_root):
+        return True
+    normalized = normalize_file_path(path)
+    if _SAMPLE_NAME.search(normalized.rsplit("/", 1)[-1].lower()):
+        return True
+    relative = _repo_relative_path(normalized, repo_root)
+    if relative is None:
+        return False
+    return any(seg.lower() in _SAMPLE_DIRS for seg in relative.split("/")[:-1])
+
 
 # -- Hosts ---------------------------------------------------------------------------------------
 
@@ -240,6 +287,20 @@ def _pieces(authority: str, database: Optional[str], engine: Optional[str]) -> l
     return out
 
 
+def _cut_inside_userinfo(rest: str) -> bool:
+    """Whether the ``?``, ``#`` or ``;`` that cuts *rest* sits inside ``user:password@``.
+
+    ``user:12345;x@host`` would otherwise read as the host ``user`` and the port 12345. A ``@``
+    after the cut is a credential unless a ``/`` (the database path) or a ``key=value`` property
+    (``host;password=a@b``) comes first.
+    """
+    before, at, _ = rest.partition("@")
+    if not at or "/" in before:
+        return False
+    cut = re.search(r"[?#;]", before)
+    return cut is not None and "=" not in before[cut.end():]
+
+
 def _parse_url(text: str, family: str) -> list[Target]:
     match = _URL.match(text)
     if match is None:
@@ -249,6 +310,8 @@ def _parse_url(text: str, family: str) -> list[Target]:
     # Everything after ``?``, ``#`` or ``;`` (query, fragment, driver properties) may hold a
     # credential and is not read, apart from the SQL Server database name.
     head = re.split(r"[?#;]", rest, maxsplit=1)[0]
+    if "@" not in head and _cut_inside_userinfo(rest):
+        return [Target(None, None, None, None, engine)]
     if "@" in head:
         head = head.rsplit("@", 1)[1]
     authority, _, path = head.partition("/")
@@ -296,10 +359,12 @@ def parse_targets(text: str, family: str) -> list[Target]:
 
 def _emit(
     out: _Out, targets: list[Target], family: str, line: int, sdk: str, client: str,
-    engine: Optional[str] = None,
+    engine: Optional[str] = None, evidence: str = "client_call",
 ) -> None:
     for target in targets[:_MAX_TARGETS]:
-        extra: dict[str, Any] = {"client": client}
+        extra: dict[str, Any] = {"client": client, "evidence": evidence}
+        if evidence == HOSTNAME_ONLY:
+            extra.update(confidence=_HOSTNAME_ONLY_CONFIDENCE, confidence_tier="INFERRED")
         eng = target.engine or engine
         if eng:
             extra["engine"] = eng
@@ -325,7 +390,7 @@ def _emit(
 def _emit_val(
     out: _Out, val: Val, family: str, line: int, sdk: str, client: str,
     engine: Optional[str] = None, port: Optional[int] = None,
-    database: Optional[str] = None,
+    database: Optional[str] = None, evidence: str = "client_call",
 ) -> None:
     """Emit what a value says: the targets of its text, or the placeholder it stands for."""
     if val.template is None:
@@ -339,7 +404,7 @@ def _emit_val(
                        engine=t.engine or engine)
             for t in targets
         ]
-    _emit(out, targets, family, line, sdk, client, engine)
+    _emit(out, targets, family, line, sdk, client, engine, evidence)
 
 
 # -- Text: URLs and endpoint hosts in strings and Spring files -----------------------------------
@@ -354,10 +419,17 @@ _HOST_IN_TEXT = re.compile(
     r"|elb\.[a-z0-9\-]+\.amazonaws\.com|aos\.[a-z0-9\-]+\.on\.aws)(?:\.cn)?)(?![A-Za-z0-9\-])",
     re.I,
 )
-_COMMENT_START = ("#", "//", "*", "/*", "--", "!")
 _CONFIG_FILE = re.compile(
     r"^(?:application|bootstrap)(?:-[A-Za-z0-9_.\-]+)?\.(?:ya?ml|properties)$"
 )
+
+
+def _family_of_url(text: str) -> str:
+    return REDIS if text.lower().startswith("redis") else SQL
+
+
+_ENV_FILE = re.compile(r"^(?:\.env(?:\.[A-Za-z0-9_.\-]+)?|[A-Za-z0-9_.\-]+\.env)$", re.I)
+_COMPOSE_FILE = re.compile(r"^(?:docker-)?compose(?:[.\-][A-Za-z0-9_.\-]*)?\.ya?ml$", re.I)
 _REDIS_HOST_KEYS = frozenset({"spring.redis.host", "spring.data.redis.host"})
 _REDIS_NODE_KEYS = frozenset({
     "spring.redis.cluster.nodes", "spring.data.redis.cluster.nodes",
@@ -366,34 +438,128 @@ _SEARCH_KEYS = frozenset({
     "spring.elasticsearch.uris", "spring.elasticsearch.rest.uris", "spring.opensearch.uris",
     "spring.data.elasticsearch.client.reactive.endpoints",
 })
+_SPRING_STORE_PREFIXES = (
+    "spring.datasource", "spring.r2dbc", "spring.data.redis", "spring.redis",
+    "spring.elasticsearch", "spring.opensearch", "spring.data.elasticsearch",
+)
+_ENDPOINT_KEY = re.compile(
+    r"(?:^|_)(?:host|hostname|hostnames|url|uri|uris|endpoint|endpoints|dsn|address|addr|nodes"
+    r"|server|servers|connection_string|connstr)$"
+)
+#: What a line says before the host: ``KEY =``, ``"KEY":``, ``KEY: https://`` or
+#: ``os.environ.get("KEY", "``.
+_KEY_BEFORE = re.compile(
+    r"(?:([A-Za-z_][\w.\-]*)[\"']?\s*(?::=|=>|=|:)\s*[\"'\[(]*(?:\w+://)?(?:[^\s\"'@]*@)?"
+    r"|[\"']([A-Za-z_][\w]*)[\"']\s*,\s*[\"'])$"
+)
+_LOGGING = re.compile(
+    r"\b(?:log\w*|logger|console|print\w*|warn\w*|error|info|debug|trace|critical|fatal"
+    r"|exception)\s*\(|\b(?:raise|throw)\b|System\.(?:out|err)\.", re.I,
+)
 
 
-def _family_of_url(text: str) -> str:
-    return REDIS if text.lower().startswith("redis") else SQL
+_MARKER_LINE = re.compile(r"jdbc:|r2dbc:|redis|amazonaws\.com|\.on\.aws", re.I)
 
 
-def scan_text(text: str, out: _Out, sdk: str = "jdbc-url") -> None:
-    """URLs and AWS endpoint hosts written in the lines of *text* (a source or config file)."""
-    for number, line_text in enumerate(text[:_MAX_TEXT].splitlines(), 1):
-        line_text = line_text[:_MAX_LINE]
-        stripped = line_text.lstrip()
-        if stripped.startswith(_COMMENT_START) or (
-            "jdbc:" not in line_text.lower() and "r2dbc:" not in line_text.lower()
-            and "redis" not in line_text.lower() and "amazonaws.com" not in line_text
-            and ".on.aws" not in line_text
-        ):
+def _endpoint_key(key: str) -> bool:
+    """Whether a config key or variable name says its value is an endpoint."""
+    norm = normalize_spring_config_key(re.sub(r"\[[0-9]+\]$", "", key)).lower()
+    if norm.startswith(_SPRING_STORE_PREFIXES):
+        return True
+    last = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.split(".")[-1]).lower().replace("-", "_")
+    return _ENDPOINT_KEY.search(re.sub(r"\[[0-9]+\]$", "", last)) is not None
+
+
+def _blank(chunk: str) -> str:
+    return re.sub(r"[^\n]", " ", chunk)
+
+
+def _strip_comments(text: str, python: bool) -> str:
+    """*text* with comments, Python docstrings and triple-quoted strings blanked, lines kept."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    quote: Optional[str] = None
+    while i < n:
+        c = text[i]
+        if quote is not None:
+            if c == "\\":
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if c == quote or (c == "\n" and quote != "`"):
+                quote = None
+            out.append(c)
+            i += 1
+        elif python and text.startswith(('"""', "'''"), i):
+            end = text.find(text[i:i + 3], i + 3)
+            end = n if end < 0 else end + 3
+            out.append(_blank(text[i:end]))
+            i = end
+        elif c in "\"'" or (c == "`" and not python):
+            quote = c
+            out.append(c)
+            i += 1
+        elif (python and c == "#") or (not python and text.startswith("//", i)):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(" " * (end - i))
+            i = end
+        elif not python and text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            out.append(_blank(text[i:end]))
+            i = end
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _urls(line: str, number: int, out: _Out, sdk: str, evidence: str,
+          spans: Optional[list[tuple[int, int]]] = None) -> None:
+    """The connection URLs of one line. A URL a credential cut short is dropped whole."""
+    for m in _URL_IN_TEXT.finditer(line):
+        end = m.end()
+        spans_end = end + len(re.match(r"[^\s\"'`<>]*", line[end:]).group())  # type: ignore[union-attr]
+        if spans is not None:
+            spans.append((m.start(), spans_end))
+        if "@" in line[end:spans_end] or _LOGGING.search(line[:m.start()]):
             continue
-        for m in _URL_IN_TEXT.finditer(line_text):
-            url = m.group(0)
-            family = _family_of_url(url)
-            client = "jdbc" if url.lower().startswith(("jdbc", "r2dbc")) else "redis-url"
-            _emit(out, parse_targets(url, family), family, number,
-                  sdk if client == "jdbc" else "endpoint-literal", client)
+        url = m.group(0)
+        family = _family_of_url(url)
+        client = "jdbc" if url.lower().startswith(("jdbc", "r2dbc")) else "redis-url"
+        _emit(out, parse_targets(url, family), family, number,
+              sdk if client == "jdbc" else "endpoint-literal", client, evidence=evidence)
+
+
+def _in_span(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(a <= pos < b for a, b in spans)
+
+
+def scan_text(text: str, out: _Out, sdk: str = "jdbc-url", suffix: str = "") -> None:
+    """URLs and AWS endpoint hosts written in the code lines of *text* (a source file).
+
+    Comments, Python docstrings and the arguments of log and print calls are skipped. A host
+    under a variable or key that names an endpoint is ``config_key`` evidence; any other host is
+    ``hostname_only``.
+    """
+    code = _strip_comments(text[:_MAX_TEXT], suffix == ".py")
+    for number, line_text in enumerate(code.splitlines(), 1):
+        line_text = line_text[:_MAX_LINE]
+        if _MARKER_LINE.search(line_text) is None:
+            continue
+        spans: list[tuple[int, int]] = []
+        _urls(line_text, number, out, sdk, "connection_url", spans)
         for m in _HOST_IN_TEXT.finditer(line_text):
             host = m.group(1).lower()
-            if skip_host(host):
+            prefix = line_text[:m.start()]
+            if skip_host(host) or _in_span(m.start(), spans) or _LOGGING.search(prefix):
                 continue
-            _emit(out, [Target(host)], SQL, number, "endpoint-literal", "endpoint-host")
+            key = _KEY_BEFORE.search(prefix)
+            named = key and (key.group(1) or key.group(2))
+            evidence = "config_key" if named and _endpoint_key(named) else HOSTNAME_ONLY
+            _emit(out, [Target(host)], SQL, number, "endpoint-literal", "endpoint-host",
+                  evidence=evidence)
 
 
 def _yaml_entries(lines: list[str]) -> list[tuple[int, str, str]]:
@@ -445,23 +611,93 @@ def _properties_entries(lines: list[str]) -> list[tuple[int, str, str]]:
     return out
 
 
+def _env_entries(lines: list[str]) -> list[tuple[int, str, str]]:
+    """``KEY=value`` lines of a ``.env`` file (``export`` and quotes allowed)."""
+    out: list[tuple[int, str, str]] = []
+    for number, raw in enumerate(lines, 1):
+        raw = raw[:_MAX_LINE].strip()
+        if not raw or raw.startswith("#"):
+            continue
+        m = re.match(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_.\-]*)\s*=\s*(.*)$", raw)
+        if m:
+            value = m.group(2).strip()
+            if value[:1] in "\"'":
+                value = value[1:].split(value[0], 1)[0]
+            else:
+                value = re.sub(r"\s+#.*$", "", value)
+            out.append((number, m.group(1), value))
+    return out
+
+
+def _tf_entries(lines: list[str]) -> list[tuple[int, str, str]]:
+    """Quoted ``key = "value"`` lines of Terraform; a ``variable``'s ``default`` is keyed by it."""
+    out: list[tuple[int, str, str]] = []
+    variable: Optional[str] = None
+    for number, raw in enumerate(lines, 1):
+        raw = raw[:_MAX_LINE]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+            continue
+        opened = re.match(r'^variable\s+"([^"]+)"', stripped)
+        if opened:
+            variable = opened.group(1)
+            continue
+        if raw.startswith("}"):
+            variable = None
+            continue
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_\-]*)\s*=\s*"([^"]*)"', stripped)
+        if m:
+            key = variable if m.group(1) == "default" and variable else m.group(1)
+            out.append((number, key, m.group(2)))
+    return out
+
+
+def _compose_item(key: str, value: str) -> tuple[str, str]:
+    """``- DB_HOST=value`` under ``environment:`` is the variable ``DB_HOST``."""
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", value)
+    return (m.group(1), m.group(2).strip("'\"")) if m else (key, value)
+
+
 def scan_config(name: str, text: str, out: _Out) -> None:
-    """A Spring ``application*``/``bootstrap*`` file: its URLs, endpoint hosts and host keys."""
-    if not _CONFIG_FILE.match(name):
-        return
-    scan_text(text, out, sdk="spring-config")
+    """A config file: its URLs, and endpoint hosts under keys that name an endpoint.
+
+    Spring ``application*``/``bootstrap*`` files, ``.env`` files, Docker Compose files, ``.tfvars``
+    files and Terraform files. Hosts elsewhere in the file (a description, a label, a comment) are
+    not read.
+    """
+    spring = _CONFIG_FILE.match(name) is not None
     lines = text[:_MAX_TEXT].splitlines()
-    entries = (
-        _properties_entries(lines) if name.endswith(".properties") else _yaml_entries(lines)
-    )
+    lower = name.lower()
+    if spring:
+        entries = (
+            _properties_entries(lines) if lower.endswith(".properties") else _yaml_entries(lines)
+        )
+    elif _COMPOSE_FILE.match(name):
+        entries = [(n, *_compose_item(k, v)) for n, k, v in _yaml_entries(lines)]
+    elif lower.endswith(".tfvars") or lower.endswith(".tf"):
+        entries = _tf_entries(lines)
+    elif _ENV_FILE.match(name):
+        entries = _env_entries(lines)
+    else:
+        return
+    sdk = "spring-config" if spring else "endpoint-literal"
     for number, key, value in entries:
+        spans: list[tuple[int, int]] = []
+        _urls(value, number, out, sdk, "connection_url", spans)
+        if _endpoint_key(key):
+            for m in _HOST_IN_TEXT.finditer(value):
+                host = m.group(1).lower()
+                if not skip_host(host) and not _in_span(m.start(), spans):
+                    _emit(out, [Target(host)], SQL, number, sdk, "endpoint-host",
+                          evidence="config_key")
+        if not spring:
+            continue
         norm = normalize_spring_config_key(re.sub(r"\[[0-9]+\]$", "", key))
-        if norm in _REDIS_HOST_KEYS:
-            _emit_val(out, Val(value), REDIS, number, "spring-config", "spring-redis")
-        elif norm in _REDIS_NODE_KEYS:
-            _emit_val(out, Val(value), REDIS, number, "spring-config", "spring-redis")
+        if norm in _REDIS_HOST_KEYS or norm in _REDIS_NODE_KEYS:
+            _emit_val(out, Val(value), REDIS, number, sdk, "spring-redis", evidence="config_key")
         elif norm in _SEARCH_KEYS:
-            _emit_val(out, Val(value), SEARCH, number, "spring-config", "spring-elasticsearch")
+            _emit_val(out, Val(value), SEARCH, number, sdk, "spring-elasticsearch",
+                      evidence="config_key")
 
 
 # -- Python clients ------------------------------------------------------------------------------
@@ -934,11 +1170,15 @@ _CONFIG_SUFFIXES = frozenset({".yml", ".yaml", ".properties"})
 def wants(
     suffix: str, name: str, language: Optional[str], source: bytes,
 ) -> tuple[bool, bool, bool]:
-    """``(read the syntax tree, scan the text, read as a Spring config file)`` for a file."""
+    """``(read the syntax tree, scan the text, read as a config file)`` for a file."""
     ast_ok = bool(language) and any(m in source for m in _AST_MARKERS.get(language or "", ()))
     text_ok = suffix in _TEXT_SUFFIXES and any(m in source for m in _TEXT_MARKERS)
-    config_ok = suffix in _CONFIG_SUFFIXES and _CONFIG_FILE.match(name) is not None
-    return ast_ok, text_ok, config_ok
+    spring = suffix in _CONFIG_SUFFIXES and _CONFIG_FILE.match(name) is not None
+    other = (
+        _ENV_FILE.match(name) is not None or _COMPOSE_FILE.match(name) is not None
+        or suffix in (".tfvars", ".tf")
+    ) and any(m in source for m in _TEXT_MARKERS)
+    return ast_ok, text_ok, spring or other
 
 
 def scan_code(language: str, src: bytes, root: Any, out: _Out) -> None:

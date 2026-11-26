@@ -1601,7 +1601,7 @@ _WORKFLOW_PARTS = (".github/workflows/", ".github/actions/")
 
 def aws_sdk_edges(
     path: Path, source: bytes, nodes: list[Any], edges: list[Any],
-    get_parser: Callable[[str], Any],
+    get_parser: Callable[[str], Any], repo_root: Optional[Path] = None,
 ) -> list[Any]:
     """The AWS SDK, ``s3://``, ``aws s3``, Terraform and data store connection edges of a file."""
     suffix = path.suffix.lower()
@@ -1615,6 +1615,8 @@ def aws_sdk_edges(
     from . import data_store_calls as _stores
 
     store_ast, store_text, store_config = _stores.wants(suffix, path.name, language, source)
+    if _stores.skip_path(path, repo_root):
+        store_ast = store_text = store_config = False
     if not (wants_sdk or wants_uri or wants_tf or store_ast or store_text or store_config):
         return []
     file_node = next((n for n in nodes if n.kind == "File"), None)
@@ -1645,7 +1647,7 @@ def aws_sdk_edges(
     if store_text or store_config:
         store_source = source.decode("utf-8", "replace")
         if store_text:
-            _stores.scan_text(store_source, out)
+            _stores.scan_text(store_source, out, suffix=suffix)
         if store_config:
             _stores.scan_config(path.name, store_source, out)
     return out.edges

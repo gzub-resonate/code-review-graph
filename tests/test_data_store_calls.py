@@ -248,8 +248,8 @@ def test_spring_config_files() -> None:
     assert found == {
         ("external:aws-rds:?", "db.host"), ("external:aws-elasticache:mycache", None),
     }
-    # Not a Spring configuration file name: nothing is read.
-    assert edges_of("docker-compose.yml", yml) == []
+    # Not a configuration file name the scanner knows: nothing is read.
+    assert edges_of("settings.yml", yml) == []
 
 
 def test_python_clients() -> None:

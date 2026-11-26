@@ -53,6 +53,7 @@ _ROW_EXTRA = (
 #: What a client connection names besides the resource: never a user, password or query.
 _CONNECTION_FIELDS = (
     "client", "host", "port", "database", "engine", "aws_endpoint", "unresolved_reason",
+    "evidence", "confidence",
 )
 
 

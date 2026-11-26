@@ -24,6 +24,19 @@
   returned are unchanged. Each call logs the seconds its phases took. No graph rebuild is needed,
   and the index fingerprint is unchanged.
 
+### Fixed
+
+- `origin="awssdk"` no longer makes a data-store row from an AWS endpoint host that is only written
+  somewhere: in a comment, a Python docstring, a log or print call, a sample config (`*.example`,
+  `*.sample`, `*.dist`), a fixture, mock, example or docs directory, or a config key that does not name
+  an endpoint (`description`). A host counts under a key such as `spring.datasource.url`, `DB_HOST`,
+  `REDIS_URL` or `*_ENDPOINT`, in a known client call, or in a connection URL; a bare host in code
+  still gives a row, marked `evidence: hostname_only` with `confidence` 0.4 (rows now carry
+  `evidence`: `client_call`, `connection_url`, `config_key` or `hostname_only`). A URL whose password
+  contains `;`, `?`, `#`, `)` or `]` no longer yields the user name as a host. Docker Compose
+  `environment` entries and Terraform `variable` defaults are read for endpoint keys.
+  **The index fingerprint changes: every repo is reindexed.**
+
 ### Added
 
 - `cross_repo_requests_tool` with `origin` `awssdk` now finds calls to RDS, load balancers
