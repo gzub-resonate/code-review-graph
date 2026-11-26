@@ -4,6 +4,17 @@
 
 ### Changed
 
+- `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or
+  `amqp` now pages. A list cut at `max_results` carries `next_cursor`; passing it back as `cursor`
+  returns the next page, until the last page has none. Before, those origins ended at
+  `max_results` rows with `truncated` set and no way to read the rest. The first page is
+  unchanged. A cursor is refused when the query or the rows changed.
+- The `infrastructure` block of a cross-repo reply stops after 20 repos or when the time
+  budget is spent. When it does, `repos_not_checked` names the repos it left out (up to 50,
+  with `repos_not_checked_total`), so a call with `repos` narrowed to them covers the rest.
+- A cross-repo call that takes `CRG_CROSS_REPO_SLOW_SECONDS` (default 10) or longer logs its
+  per-phase timing line as a warning. The server does not configure INFO logging, so the
+  timing line was never visible before.
 - `cross_repo_requests_tool` is faster over a large registry. The `stepfunction` and `awssdk`
   joins, and the service-identity facts the Feign join reads, use up to `CRG_CROSS_REPO_WORKERS`
   threads (default 4) instead of one repo after another, and keep what they read about a repo (its

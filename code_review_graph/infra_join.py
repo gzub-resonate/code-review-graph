@@ -44,6 +44,7 @@ __all__ = ["Declaration", "build_infrastructure", "declared_by_for", "read_decla
 MAX_ITEMS = 10
 #: Most repos that get a summary in one call (the rest are counted).
 MAX_REPOS = 20
+MAX_NOT_CHECKED_NAMES = 50
 _MAX_IDENTITIES = 8
 
 #: ``(kind key, summary list key)``.
@@ -352,6 +353,8 @@ def build_infrastructure(
     Only selected repos that have at least one match appear; ``repos_total`` counts those,
     ``repos_checked`` how many were looked at, and ``truncated`` is set when the repo cap
     or the time budget (seconds, ``0`` for none) stopped the work early.
+    When it did, ``repos_not_checked`` names the selected repos left out (up to 50, with
+    ``repos_not_checked_total``), so a call with ``repos`` narrowed to them covers the rest.
     """
     started = time.monotonic()
     decls = _Declarations(repos)
@@ -364,16 +367,23 @@ def build_infrastructure(
     checked = 0
     truncated = False
     matched_total = 0
-    for index in selected:
+    left: list[str] = []
+    for position, index in enumerate(selected):
         if checked >= MAX_REPOS or (budget and time.monotonic() - started > budget):
             truncated = True
+            left = [_clean(sa.repo_names(repos[i])[0]) for i in selected[position:]]
             break
         checked += 1
         summary = _summarise_repo(index, repos, facts, decls, rules, lookup)
         if summary["counts"]:
             matched_total += 1
             summaries[_clean(sa.repo_names(repos[index])[0])] = summary
-    return {
+    block: dict[str, Any] = {
         "repos": summaries, "repos_total": matched_total, "repos_checked": checked,
         "truncated": truncated or checked < len(selected),
     }
+    if truncated:
+        # Name what was not looked at, so a caller can ask again with ``repos`` narrowed to it.
+        block["repos_not_checked"] = left[:MAX_NOT_CHECKED_NAMES]
+        block["repos_not_checked_total"] = len(left)
+    return block

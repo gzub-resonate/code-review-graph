@@ -449,3 +449,53 @@ class TestProducesPublishers:
             "publishers_of", "external:rabbitmq:nowhere", repo_root=str(produces_repo),
         )
         assert "external:rabbitmq:nowhere" in reply["confidence"]
+
+
+class TestAmqpPages:
+    """The ``amqp`` origin pages like the other cross-repo origins."""
+
+    @staticmethod
+    def read_all(page_size: int, **query):
+        rows: list = []
+        cursor = None
+        for _ in range(100):
+            reply = cross_repo_requests_func(
+                origin="amqp", service="orders.exchange", max_results=page_size,
+                cursor=cursor, **query,
+            )
+            rows.extend(reply["results"])
+            cursor = reply.get("next_cursor")
+            if cursor is None:
+                return rows, reply
+        raise AssertionError("paging did not end")
+
+    def test_a_cut_list_carries_a_cursor_and_the_pages_add_up(self, two_repos):
+        everything = cross_repo_requests_func(
+            origin="amqp", service="orders.exchange", max_results=100,
+        )
+        assert everything["total"] > 3 and "next_cursor" not in everything
+        first = cross_repo_requests_func(
+            origin="amqp", service="orders.exchange", max_results=3,
+        )
+        assert first["truncated"] is True and first["next_cursor"]
+        assert first["results"] == everything["results"][:3]
+        rows, last = self.read_all(3)
+        assert rows == everything["results"]
+        assert last["truncated"] is False and last["offset"] > 0
+
+    def test_a_cursor_for_another_exchange_or_key_is_refused(self, two_repos):
+        from code_review_graph.paging import CursorError
+
+        first = cross_repo_requests_func(
+            origin="amqp", service="orders.exchange", max_results=3,
+        )
+        with pytest.raises(CursorError):
+            cross_repo_requests_func(
+                origin="amqp", service="orders.exchange", route="orders.created",
+                max_results=3, cursor=first["next_cursor"],
+            )
+        with pytest.raises(CursorError):
+            cross_repo_requests_func(
+                origin="amqp", service="other.exchange", max_results=3,
+                cursor=first["next_cursor"],
+            )
