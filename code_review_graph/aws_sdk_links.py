@@ -9,6 +9,15 @@ that defines it:
   ``declare`` that ``aws_sdk_calls`` writes from the Terraform file); the bucket's
   ``aws_s3_bucket_notification`` targets (``lambda/<name>``, ``sns/<name>``, ``sqs/<name>``) come
   back as ``notify_targets``;
+* an RDS instance, cluster or proxy, an ElastiCache cluster or replication group, an OpenSearch
+  or Elasticsearch domain, a load balancer or a target group: a Terraform declaration
+  (``aws_db_instance``, ``aws_rds_cluster``, ``aws_elasticache_*``,
+  ``aws_opensearch_domain``, ``aws_lb`` ...) whose
+  literal name equals the name of the call, and whose kind is the same one (a replication group
+  is never joined to a cache cluster of the same name). The name of a call comes from an SDK
+  parameter or from the host of a client connection (see
+  :mod:`~code_review_graph.data_store_calls`); a host that does not spell a name leaves the
+  row ``unresolved``;
 * a Lambda function, state machine, table, ECS task definition, Batch job definition or Glue job:
   by the rules of :class:`~code_review_graph.stepfunction_links.Definitions`.
 
@@ -30,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from .aws_config_names import config_key_for_getter, config_prefixes
-from .aws_sdk_calls import RESOLUTION, UNRESOLVED_NAME
+from .aws_sdk_calls import DATA_STORE_SERVICES, RESOLUTION, UNRESOLVED_NAME
 from .aws_terraform_wiring import REF_TYPES, WIRING_OPS
 from .graph import GraphStore
 
@@ -41,6 +50,16 @@ _ROW_EXTRA = (
     "schedule", "event_sources", "wiring", "route", "protocol", "dead_letter_target",
     "arn_getter", "via",
 )
+#: What a client connection names besides the resource: never a user, password or query.
+_CONNECTION_FIELDS = (
+    "client", "host", "port", "database", "engine", "aws_endpoint", "unresolved_reason",
+    "evidence", "confidence",
+)
+
+
+def decl_key(service: str, kind: str) -> str:
+    """The service part of a declaration key: data store kinds are matched kind to kind."""
+    return f"{service}:{kind}" if service in DATA_STORE_SERVICES else service
 
 
 def _config_key(
@@ -141,7 +160,7 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
                 k: info[k]
                 for k in (
                     "notify_targets", "key_prefix", "terraform_label", "terraform_type",
-                    "source_ref", *_ROW_EXTRA, *_NAME_FIELDS,
+                    "source_ref", *_ROW_EXTRA, *_NAME_FIELDS, *_CONNECTION_FIELDS,
                 )
                 if k in info
             },
@@ -276,13 +295,14 @@ def _declared_by(
     that has no declaration line to point at.
     """
     name = edge["name"]
+    service = decl_key(edge["service"], edge["kind"])
     if matched_profiles and isinstance(names_by_profile, dict):
         for profile in matched_profiles:
             candidate = names_by_profile.get(profile)
-            if isinstance(candidate, str) and (edge["service"], candidate, index) in declared_at:
+            if isinstance(candidate, str) and (service, candidate, index) in declared_at:
                 name = candidate
                 break
-    where = declared_at.get((edge["service"], name, index))
+    where = declared_at.get((service, name, index))
     if where is None:
         return None
     root = Path(repo["path"])
@@ -326,8 +346,9 @@ def resolve_links(
                 continue
             key = (edge["service"], edge["name"])
             if edge["operation"] == "declare":
-                declared.setdefault(key, set()).add(index)
-                declared_at.setdefault((*key, index), (edge["file_path"], edge["line"]))
+                dkey = (decl_key(edge["service"], edge["kind"]), edge["name"])
+                declared.setdefault(dkey, set()).add(index)
+                declared_at.setdefault((*dkey, index), (edge["file_path"], edge["line"]))
             for target in edge["extra"].get("notify_targets", []):
                 if target not in notify.setdefault(key, []):
                     notify[key].append(target)
@@ -335,9 +356,9 @@ def resolve_links(
         if index in edges_by_repo:
             continue
         for edge in edges:
-            key = (edge["service"], edge["name"])
-            declared.setdefault(key, set()).add(index)
-            declared_at.setdefault((*key, index), (edge["file_path"], edge["line"]))
+            dkey = (decl_key(edge["service"], edge["kind"]), edge["name"])
+            declared.setdefault(dkey, set()).add(index)
+            declared_at.setdefault((*dkey, index), (edge["file_path"], edge["line"]))
     triggers: dict[str, list[str]] = {}
     for index, edges in edges_by_repo.items():
         for edge in edges:
@@ -357,7 +378,7 @@ def resolve_links(
     def owners_of(service: str, kind: str, name: str) -> list[int]:
         target = (service, kind, name)
         if target not in owners:
-            by_tf = set(declared.get((service, name), ()))
+            by_tf = set(declared.get((decl_key(service, kind), name), ()))
             by_defs = {i for i in range(len(all_repos)) if defined_in_repo(i, target)}
             owners[target] = sorted(by_tf | by_defs)
         return owners[target]
@@ -404,8 +425,13 @@ def resolve_links(
                 "sdk": edge["sdk"],
                 "status": status,
             }
+            if edge["service"] in DATA_STORE_SERVICES:
+                row["resource_kind"] = edge["kind"]
             if edge["placeholder"]:
                 row["placeholder"] = edge["placeholder"]
+            for field in _CONNECTION_FIELDS:
+                if field in edge["extra"]:
+                    row[field] = edge["extra"][field]
             if edge["extra"].get("key_prefix"):
                 row["key_prefix"] = edge["extra"]["key_prefix"]
             if "config_defined" in edge["extra"]:

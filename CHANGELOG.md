@@ -49,7 +49,39 @@
   returned are unchanged. Each call logs the seconds its phases took. No graph rebuild is needed,
   and the index fingerprint is unchanged.
 
+### Fixed
+
+- `origin="awssdk"` no longer makes a data-store row from an AWS endpoint host that is only written
+  somewhere: in a comment, a Python docstring, a log or print call, a sample config (`*.example`,
+  `*.sample`, `*.dist`), a fixture, mock, example or docs directory, or a config key that does not name
+  an endpoint (`description`). A host counts under a key such as `spring.datasource.url`, `DB_HOST`,
+  `REDIS_URL` or `*_ENDPOINT`, in a known client call, or in a connection URL; a bare host in code
+  still gives a row, marked `evidence: hostname_only` with `confidence` 0.4 (rows now carry
+  `evidence`: `client_call`, `connection_url`, `config_key` or `hostname_only`). A URL whose password
+  contains `;`, `?`, `#`, `)` or `]` no longer yields the user name as a host. Docker Compose
+  `environment` entries and Terraform `variable` defaults are read for endpoint keys.
+  **The index fingerprint changes: every repo is reindexed.**
+
 ### Added
+
+- `cross_repo_requests_tool` with `origin` `awssdk` now finds calls to RDS, load balancers
+  (ELB, ALB, NLB and target groups), ElastiCache and OpenSearch/Elasticsearch. Two sources feed it:
+  SDK operations (boto3 `rds`, `elbv2`, `elb`, `elasticache`, `es` and `opensearch`; the Java v1 and v2
+  packages; the `@aws-sdk/client-*` packages) and client connections that name a host: JDBC and
+  R2DBC URLs, Spring `application*` files (`spring.datasource.url`, `spring.data.redis.host`, the
+  Elasticsearch `uris`), psycopg2, psycopg, asyncpg, pymysql, SQLAlchemy, redis-py, Jedis, Lettuce,
+  Redisson, the Elasticsearch/OpenSearch clients, `pg`, `mysql2`, `ioredis`, `redis` and the
+  `@elastic`/`@opensearch-project` clients, and AWS endpoint hosts written in code. The service
+  is `rds`, `elasticloadbalancing`, `elasticache` or `es`; rows carry `resource_kind`
+  (`db-instance`, `db-cluster`, `db-proxy`, `load-balancer`, `target-group`, `cache-cluster`,
+  `replication-group`, `search-domain`) and, for a connection, `host`, `port`, `database`, `engine`
+  and `client`. A host or environment variable that is not written out gives an `unresolved` row
+  with its `placeholder`. Users, passwords and query strings of a URL are never stored. A name is
+  joined to a Terraform declaration (`aws_db_instance`, `aws_rds_cluster`, `aws_db_proxy`,
+  `aws_elasticache_replication_group`, `aws_elasticache_cluster`, `aws_lb`, `aws_alb`, `aws_elb`,
+  `aws_lb_target_group`, `aws_opensearch_domain`, `aws_elasticsearch_domain`) only when the
+  declared name equals it exactly and the kind is the same. **The index fingerprint changes: every
+  graph needs a full rebuild.**
 
 - AMQP exchange queries, at query time (no graph rebuild; the links need graphs whose publisher and
   listener edges meet on `external:rabbitmq:<exchange>`, so older graphs show nothing until

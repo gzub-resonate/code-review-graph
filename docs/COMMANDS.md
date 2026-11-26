@@ -1172,6 +1172,19 @@ repository's name or alias, and declared queues, buckets, topics and tables its 
 resolved from Spring configuration). Items carry the declaring repo, file, line and `matched_via`. `awssdk` rows
 matched to a Terraform declaration carry `declared_by`. See [SERVICE_ALIASES.md](SERVICE_ALIASES.md).
 
+`origin="awssdk"` also lists RDS (`rds`), load balancers and target groups (`elasticloadbalancing`), ElastiCache
+(`elasticache`) and OpenSearch/Elasticsearch (`es`), from SDK operations and from client connections that name a
+host (JDBC/R2DBC URLs, Spring `application*` keys, Python, Java and JavaScript database, Redis and search clients,
+AWS endpoint hosts in code). A row has `resource_kind`; a connection row has `operation` `connect`, `access`
+`connect` and `host`, `port`, `database`, `engine`, `client`. The name is the identifier an AWS endpoint host
+spells (`mydb.abc.us-east-1.rds.amazonaws.com` is `mydb`, `search-mydomain-<id>...es.amazonaws.com` is `mydomain`,
+`name-123456.us-east-1.elb.amazonaws.com` is `name`); a custom DNS name, an `internal-` load balancer host, a
+custom cluster endpoint or a variable gives an `unresolved` row (`unresolved_reason`, `placeholder`). A row is
+`matched` only when a Terraform declaration of the same kind has exactly that name. Credentials in a URL are never
+stored. A connection row has `evidence` (`client_call`, `connection_url`, `config_key`, or `hostname_only` for a bare
+host with no client or endpoint key around it, which also has `confidence` 0.4); a host in a comment, docstring, log
+call, sample config, test, fixture, mock or docs path makes no row.
+
 `origin="workflow"` does the same for GitHub Actions: each `uses: org/repo/path@ref` of a workflow or composite
 action (a reusable workflow at job level, an action at step level) that names another repo is joined to the
 registered repo called `repo` (the part after `org/`) and the file or folder `path` in its graph. Rows carry the

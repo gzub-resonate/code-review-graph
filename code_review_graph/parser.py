@@ -4307,7 +4307,9 @@ class CodeParser:
                 node.is_test = True
         # AWS SDK calls, s3:// locations and aws s3 commands (see aws_sdk_calls.py); not in tests.
         if not self._is_test_path(fallback_path):
-            edges.extend(aws_sdk_edges(path, source, nodes, edges, self._get_parser))
+            edges.extend(aws_sdk_edges(
+                path, source, nodes, edges, self._get_parser, self._repo_root,
+            ))
             # URL allow-lists held in Python constants (see module_constants.py).
             constant_nodes, constant_edges = python_url_constants(
                 path, source, nodes, edges, self._get_parser,
