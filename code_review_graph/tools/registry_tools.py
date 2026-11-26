@@ -56,6 +56,11 @@ _MAX_CROSS_REPO_RESULTS = 100
 # response, which caps each entry at 256 characters.
 _MAX_ECHOED_NAMES = 20
 
+_INFRASTRUCTURE_FIRST_PAGE_ONLY = (
+    "infrastructure describes the selected repos, not these rows, and is returned on the "
+    "first page only; call again without a cursor to read it"
+)
+
 _NO_RESULTS_FOR_CURSOR = (
     "the registry no longer holds a repository this cursor can continue; "
     "call again without a cursor to start over"
@@ -1356,8 +1361,12 @@ def _infra_links(
     if unknown_shown:
         result["unknown"] = unknown_shown
     phase = _now()
-    if infrastructure:
+    if infrastructure and page.offset == 0:
         _attach_infrastructure(result, all_repos, selected, budget)
+    elif infrastructure:
+        # The block describes the selected repos, not the rows, so a continuation page leaves
+        # it out (the first page has it) instead of rebuilding it for every page.
+        result["infrastructure_note"] = _INFRASTRUCTURE_FIRST_PAGE_ONLY
     timings["infrastructure"] = _now() - phase
     elapsed = _now() - started
     # The server does not configure INFO logging, so a slow call is logged as a warning.
@@ -1490,7 +1499,8 @@ def cross_repo_requests_func(
     rows carry ``matched_via``, and a name reaching several repos is ``ambiguous`` with
     ``candidate_repos``. The ``terraform``, ``stepfunction`` and ``awssdk`` origins also return
     an ``infrastructure`` object relating each selected repo to the ECR, ECS, stack and declared
-    resources that belong to it (see ``docs/SERVICE_ALIASES.md``).
+    resources that belong to it (see ``docs/SERVICE_ALIASES.md``), on the first page only; a
+    page reached with ``cursor`` says so in ``infrastructure_note`` instead.
 
     ``external`` groups the HTTP calls that reach no registered service by host, to show which
     third-party vendors each repo depends on: one row per (host, repo) with ``vendor`` (a small
