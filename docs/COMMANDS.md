@@ -1546,6 +1546,24 @@ When the time budget is checked with more than one worker, up to `workers - 1` r
 after it ran out. The server log has one `cross-repo <origin>:` line per call with the seconds each
 phase took (`read`, `context`, `prefetch`, `resolve`, `infrastructure`).
 
+#### `transitions_of_tool`
+```
+machine: str                 # Machine name, <file>::<machine>, or the *.asl.json file
+repo_root: str | None        # Repository root; auto-detected
+detail_level: str = "standard"   # "standard" rows are dicts; "minimal" rows are one string each
+max_results: int = 200       # Rows per page (at most 500)
+cursor: str | None           # next_cursor of the previous reply (see Paging)
+```
+
+Every transition of one Step Functions state machine in one reply, instead of one `next_states_of`
+call per state. Rows follow the file order and cover nested Parallel and Map states. A standard row
+is `{from, to, kind, condition?, line, errors?}`; a minimal row is
+`"from -> to | kind | condition | Lline"`. `kind` is `Next`, `Choice`, `Default`, `Catch`, `Branch`
+or `Map`. A Choice `condition` is read from the file while it is the one that was indexed (the graph
+never stores it); otherwise `note` counts the conditions left out. The reply carries `state_count`
+and `transition_count` for the whole machine, and pages with `next_cursor`. A name that matches
+several machines answers `ambiguous` with their qualified names. Query-time only: no index change.
+
 #### `pr_blast_radius_tool`
 ```
 pr: int | None               # Pull request number; the server fetches refs/pull/<pr>/head from origin

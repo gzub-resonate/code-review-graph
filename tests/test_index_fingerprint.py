@@ -30,6 +30,7 @@ QUERY_ONLY = {
     "repo_cache", "trigger_links", "external_hosts", "consumer_join", "config_values",
     # MCP tool front-ends
     "tools.change_scope",
+    "tools.asl_tools",
     "tools.analysis_tools", "tools.community_tools", "tools.context", "tools.flows_tools",
     "tools.pr_tools", "tools.query", "tools.query_extras", "tools.refactor_tools",
     "tools.registry_tools", "tools.review", "tools.cross_repo_origins",

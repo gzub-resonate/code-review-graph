@@ -568,6 +568,14 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default_max": 4_000,
         "worst_max": 30_000,
     },
+    "transitions_of_tool": {
+        # The fixture holds no state machine, so this pins the not-found answer; the row cap
+        # is pinned in tests/test_asl_query_ergonomics.py.
+        "default": {"machine": "no_such_machine"},
+        "worst": {"machine": "no_such_machine" + "x" * 5_000, "max_results": HUGE},
+        "default_max": 800,
+        "worst_max": 2_000,
+    },
     "pr_blast_radius_tool": {
         "default": {"head": "HEAD", "base": "HEAD"},
         "worst": {"head": "HEAD", "base": "HEAD", "depth": HUGE},

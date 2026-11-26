@@ -4,6 +4,11 @@
 
 ### Added
 
+- `transitions_of_tool`: every transition of one Step Functions state machine (name, `<file>::<machine>`
+  or `*.asl.json` file) in a single call, with `from`, `to`, `kind` (Next, Choice, Default, Catch,
+  Branch, Map), the Choice `condition`, `line` and, for Catch, `errors`. It pages like the other
+  tools; `detail_level="minimal"` returns one string per transition. It replaces a
+  `next_states_of` call per state. Query-time only; the index fingerprint is unchanged.
 - `query_graph_tool` `children_of` on a Step Functions definition file (`*.asl.json`) now lists the
   states of its machine, nested Parallel and Map states included, with a `note` saying so; it used
   to return only the machine node, whose qualified name (`<file>::<machine>`) had to be guessed. A

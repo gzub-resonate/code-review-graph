@@ -213,6 +213,26 @@ def _read_asl_conditions(
         return None
 
 
+def _choice_condition(
+    store: Any, root: Path, cache: dict[str, dict[tuple[int, int], str | None] | None],
+    edge: Any,
+) -> tuple[str | None, str | None]:
+    """``(test, reason)`` for a ``choice`` edge: one of the two is ``None``.
+
+    *cache* holds each file's table, so a file is read once however many edges ask.
+    """
+    index = edge.extra.get("index")
+    if edge.extra.get("via") != "choice" or not isinstance(index, int):
+        return None, None
+    if edge.file_path not in cache:
+        cache[edge.file_path] = _read_asl_conditions(store, root, edge.file_path)
+    table = cache[edge.file_path]
+    if table is None:
+        return None, "the file changed since it was indexed, or cannot be read"
+    text = table.get((edge.line, index))
+    return (text, None) if text else (None, "the rule's test is not readable")
+
+
 def _amqp_edge_fields(edge: Any) -> dict[str, Any]:
     """The AMQP keys of a publisher or listener edge, sanitised for output.
 
@@ -2243,18 +2263,7 @@ def query_graph(
 
             def rule_condition(edge: Any) -> tuple[str | None, str | None]:
                 """``(test, reason)`` for a ``choice`` edge: one of the two is ``None``."""
-                index = edge.extra.get("index")
-                if edge.extra.get("via") != "choice" or not isinstance(index, int):
-                    return None, None
-                if edge.file_path not in conditions_by_file:
-                    conditions_by_file[edge.file_path] = _read_asl_conditions(
-                        store, root, edge.file_path,
-                    )
-                table = conditions_by_file[edge.file_path]
-                if table is None:
-                    return None, "the file changed since it was indexed, or cannot be read"
-                text = table.get((edge.line, index))
-                return (text, None) if text else (None, "the rule's test is not readable")
+                return _choice_condition(store, root, conditions_by_file, edge)
 
             conditions_by_state: dict[str, list[str]] = {}
             for edge in edges:

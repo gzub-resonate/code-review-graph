@@ -114,3 +114,44 @@ def test_children_of_an_asl_file_includes_nested_states_and_leaves_other_files_a
     py = query_graph("children_of", str((tmp_path / "util.py").resolve()), repo_root=root)
     assert [r["name"] for r in py["results"]] == ["helper"]
     assert "note" not in py
+
+
+def test_transitions_of_returns_every_edge_in_one_call(tmp_path: Path) -> None:
+    from code_review_graph.tools.asl_tools import transitions_of_func
+
+    root, machine_file = _built(tmp_path)
+    expected = [
+        ("Choose", "Resize", "Default", None),
+        ("Choose", "Scale", "Choice", '$.mode StringEquals "a"'),
+        ("Scale", "Resize", "Next", None),
+        ("Scale", "Fail", "Catch", None),
+    ]
+    for ask in ("m", str(machine_file.resolve()), f"{machine_file.resolve()}::m"):
+        result = transitions_of_func(ask, repo_root=root)
+        rows = result["transitions"]
+        assert [(r["from"], r["to"], r["kind"], r.get("condition")) for r in rows] == expected
+        assert all(isinstance(r["line"], int) for r in rows)
+        assert result["transition_count"] == 4 and result["state_count"] == 4
+    assert rows[-1]["errors"] == ["States.ALL"]
+
+
+def test_transitions_of_minimal_rows_are_strings(tmp_path: Path) -> None:
+    from code_review_graph.tools.asl_tools import transitions_of_func
+
+    root, _ = _built(tmp_path)
+    rows = transitions_of_func("m", repo_root=root, detail_level="minimal")["transitions"]
+    assert rows[1].startswith('Choose -> Scale | Choice | $.mode StringEquals "a" | L')
+    assert all(isinstance(r, str) for r in rows)
+
+
+def test_transitions_of_pages_and_refuses_an_unknown_machine(tmp_path: Path) -> None:
+    from code_review_graph.tools.asl_tools import transitions_of_func
+
+    root, _ = _built(tmp_path)
+    first = transitions_of_func("m", repo_root=root, max_results=3)
+    assert len(first["transitions"]) == 3 and "next_cursor" in first
+    second = transitions_of_func("m", repo_root=root, max_results=3, cursor=first["next_cursor"])
+    assert len(second["transitions"]) == 1 and "next_cursor" not in second
+    assert transitions_of_func("nope", repo_root=root)["status"] == "not_found"
+    assert transitions_of_func("Choose", repo_root=root)["status"] == "not_found"
+    assert len(transitions_of_func("m", repo_root=root, max_results=10**6)["transitions"]) == 4
