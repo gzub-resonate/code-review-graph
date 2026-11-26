@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, testing, staging]
+    branches: [main, testing, staging, "integration/**"]
   pull_request:
-    branches: [main, testing, staging]
+    branches: [main, testing, staging, "integration/**"]
   # Manual trigger for the upgrade-path job, which is far too slow and network
   # heavy for every pull request. Run it before cutting a release.
   workflow_dispatch:
