@@ -1152,7 +1152,7 @@ summary reports the counts rather than echoing the names.
 repos: list[str] | None      # Calling repos (aliases or folder names); default: every registered repo
 service: str | None          # Only calls to this Feign service name (exact)
 route: str | None            # Only calls whose route equals this or lies below it
-status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
+status: str | None           # matched | ambiguous | case_mismatch | method_not_served | prefix_mismatch | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js | terraform | workflow | stepfunction | awssdk; default: feign and js
@@ -1171,6 +1171,29 @@ services and task-definition families, Terragrunt stack and Terraform module dir
 repository's name or alias, and declared queues, buckets, topics and tables its code names (written out or
 resolved from Spring configuration). Items carry the declaring repo, file, line and `matched_via`. `awssdk` rows
 matched to a Terraform declaration carry `declared_by`. See [SERVICE_ALIASES.md](SERVICE_ALIASES.md).
+
+`origin="awssdk"` names a call whose target is a Spring configuration key from the value on the repo's
+`ConfigProperty` nodes (`${KEY:default}` and `${ENV_VAR}` placeholders that refer to another property of the same
+repo are expanded; relaxed binding, so `queue-name`, `queueName`, `queue_name` and `QUEUE_NAME` are one key). The
+row says `target_source: "config"`, `config_profile` (the default profile is preferred), `via` (the property and each
+placeholder read), and `config_alternatives` (other profiles' names when they differ). A key that cannot be named
+stays unresolved with `target_source: "config_key_unresolved"`, `placeholder` (the key), `config_defined` and
+`unresolved_reason` (`not_defined`, `no_value`, `env_placeholder`, `profiles_differ`, `ambiguous`). Values of
+secret-looking keys, private keys, JWTs, tokens and long random strings are never stored. Config values appear on
+nodes only after the repo is re-indexed (a full reindex follows from the new index fingerprint).
+
+`origin="awssdk"` also lists RDS (`rds`), load balancers and target groups (`elasticloadbalancing`), ElastiCache
+(`elasticache`) and OpenSearch/Elasticsearch (`es`), from SDK operations and from client connections that name a
+host (JDBC/R2DBC URLs, Spring `application*` keys, Python, Java and JavaScript database, Redis and search clients,
+AWS endpoint hosts in code). A row has `resource_kind`; a connection row has `operation` `connect`, `access`
+`connect` and `host`, `port`, `database`, `engine`, `client`. The name is the identifier an AWS endpoint host
+spells (`mydb.abc.us-east-1.rds.amazonaws.com` is `mydb`, `search-mydomain-<id>...es.amazonaws.com` is `mydomain`,
+`name-123456.us-east-1.elb.amazonaws.com` is `name`); a custom DNS name, an `internal-` load balancer host, a
+custom cluster endpoint or a variable gives an `unresolved` row (`unresolved_reason`, `placeholder`). A row is
+`matched` only when a Terraform declaration of the same kind has exactly that name. Credentials in a URL are never
+stored. A connection row has `evidence` (`client_call`, `connection_url`, `config_key`, or `hostname_only` for a bare
+host with no client or endpoint key around it, which also has `confidence` 0.4); a host in a comment, docstring, log
+call, sample config, test, fixture, mock or docs path makes no row.
 
 `origin="workflow"` does the same for GitHub Actions: each `uses: org/repo/path@ref` of a workflow or composite
 action (a reusable workflow at job level, an action at step level) that names another repo is joined to the
@@ -1250,6 +1273,19 @@ How a call is classified:
   The call needs the same segment count, an equal method and at least two segments it
   spells out, and more than 10 matching server routes is too open to report. Only a
   call that would otherwise be `no_route_match` can change.
+- For a JavaScript or TypeScript call that is still `no_route_match`, two more leads are
+  looked for (the caller's own repository first, then the others; the first beats the second).
+  `method_not_served`: the normalised route exists on a registered server but only with other
+  HTTP methods. The row's `candidates` are those endpoints (repo, file, line, method) and
+  `served_methods` lists the methods that are served; `reason` is
+  `route_served_with_other_method`. The Ember Data parser infers all five CRUD verbs per
+  model, so many of these are calls the client never makes. `prefix_mismatch`: no route of the
+  right method fits, but one has the same last two path segments under a different prefix
+  (client `/v1/admin/projects/{id}`, server `/admin/projects/{id}`). It is a lead, not a match:
+  `confidence` is `low`, `reason` is `same_last_two_segments_under_other_prefix`, `candidates`
+  are the routes that share the tail, and more than 10 distinct routes is too open to report.
+  Both `status` values filter, are counted in `counts` and the summary, and `no_route_match`
+  remains for a call nothing fits. Only a call that would otherwise be `no_route_match` can change.
 
 Every row has an `origin`: `feign` for a Spring client method, `js` for a
 JavaScript or TypeScript call. Feign rows are classified exactly as above.
@@ -1378,7 +1414,107 @@ limit). When it is spent no further client repo is read; those left are listed i
 them out. A cursor made on such a partial answer is refused unless the same repos are
 skipped again.
 
-Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk` and `amqp` origins return at most
+AMQP list mode. `origin: "amqp"` with no `service` lists every exchange instead of one
+exchange's rows: one row per exchange, sorted by name, with `publisher_count`, `listener_count`,
+`publisher_repos`, `listener_repos`, the `routing_keys` publishers use and the `binding_keys`
+listeners bind with (each list cut at 20, with a `*_total` when longer) and a `status`:
+`unlistened` (publishers, no listener), `unpublished` (listeners, no publisher) or `matched`
+(both; the keys are not compared). `status` filters on those three values (`publisher` and
+`listener` belong to the one-exchange form and are refused), `route` keeps the exchanges with a
+routing or binding key containing it as a substring, and `repos` limits the repos read, so the
+roles are those of the selected repos. `counts` covers every exchange that passed `route`. It
+pages like the other origins. With `service` the reply is unchanged.
+
+### `origin="trigger"`: what invokes a resource
+
+Answers "what invokes this Lambda / queue / state machine / topic / bucket handler?" as a
+query-time join over the Terraform already in each graph; no rebuild and no parser change.
+`service` keeps rows whose invoked side (target) is that name, `service/name` (`lambda/worker`) or
+Terraform label; `route` keeps rows whose firing side (source) is that rule, queue, topic, bucket
+or route key. "What triggers X" is `service=X`; "what does X fire" is `route=X`. `status` is
+`resolved`, `source_unresolved` or `target_unresolved`. Pages like the other origins.
+
+| `trigger_kind` | Read from | Source | Target |
+| --- | --- | --- | --- |
+| `eventbridge_rule` | `aws_cloudwatch_event_rule` + `aws_cloudwatch_event_target` | rule, with its literal `schedule` and `event_pattern_sources` | lambda, sqs, sns, ecs cluster, state machine |
+| `eventbridge_scheduler` | `aws_scheduler_schedule` | schedule, with `schedule` | as above |
+| `event_source_mapping` | `aws_lambda_event_source_mapping` | sqs / kinesis / dynamodb | lambda |
+| `sns_subscription` | `aws_sns_topic_subscription` | topic | lambda, sqs, or the protocol (`https`, `email`) |
+| `s3_notification` | `aws_s3_bucket_notification` | bucket | lambda, sqs, sns |
+| `api_gateway` | `aws_apigatewayv2_route` + integration; `aws_api_gateway_integration` | route key (v2) or REST API label (v1) | lambda |
+| `lambda_permission` | `aws_lambda_permission` | rule / topic / bucket / API, with inferred `principal` | lambda |
+| `eventbridge_pipe` | `aws_pipes_pipe` | queue / stream / table | lambda, state machine |
+
+Each row has `source`, `source_service`, `target` (`service/name`), the declaring `repo`, `file`,
+`line`, `status` and `via` (`terraform` when read from the attributes the indexer recorded,
+`reference` when inferred from which resources a block mentions).
+
+Shapes it cannot resolve (these never get a guessed name):
+
+- A name built from a variable, local, `${...}` or `module.*` output: the row is
+  `source_unresolved` / `target_unresolved` and carries the Terraform label
+  (`aws_api_gateway_rest_api.public`). A reference to a resource in another directory of the
+  module is not followed.
+- State machines, REST APIs, Kinesis streams and ECS clusters are not named by the indexer, so a
+  reference to one is a label, not a deployed name.
+- `aws_lambda_permission`, `aws_pipes_pipe` and `aws_api_gateway_integration` are not recorded
+  attribute by attribute: the index holds only which resources the block references. The
+  `principal` is inferred from the referenced resource type; `source_arn` is not stored. A pipe
+  with zero or several candidate sources gets an unresolved source.
+- API Gateway v1 route paths and methods are not recorded; the row has no `route`.
+- Event patterns: only literal `source` values are kept, not `detail-type` or `detail`. Bucket
+  notification event types and filters are not kept. An SNS endpoint URL or address is a value
+  and is not stored.
+- Other triggers (CloudWatch Logs subscriptions, Cognito, Alexa, Config, DynamoDB Streams enabled
+  by `aws_lambda_event_source_mapping` with a computed ARN, ALB target groups) are not read.
+- Terragrunt-driven module inputs are not evaluated: a rule declared inside a module and wired
+  in a stack shows only the half each repo declares.
+
+`origin="external"` lists the HTTP calls that reach no registered service, grouped by host, to
+show which third-party vendors each repo depends on. One row per (host group, repo), the
+busiest host first: `host`, `vendor` and `vendor_basis` (`host_table` or `service_name`; an
+unknown host has none), `status` (`known_vendor`, `unknown_vendor`, `host_unresolved`), `calls`,
+`host_calls`, `files` (up to 5), `samples` (up to 3 `method`/`path`/`file`/`line`), `sources`
+(counts by how the host was found) and, for a collapsed vendor, `hosts_seen`. Sources:
+JavaScript/TypeScript calls with an absolute URL, `baseURL` or Ember adapter `host`
+(`js_absolute_url`, `js_base_url`, `ember_adapter_host`), a route that starts with a `${KEY}`
+placeholder (`host_unresolved`, with `unresolved_key`), and Feign clients whose service name
+resolves to no registered repo (`feign_service`, grouped as `service:<name>`; a literal `url=` in
+the annotation gives the host, read from that annotation's lines). A `${...}` service name is
+`host_unresolved` with the first configuration key. Hosts are lower-cased; scheme, credentials,
+port, query, fragment and a leading `www.` are dropped; query strings and credentials never
+appear. A vendor entry such as `*.auth0.com` or `*.salesforce.com` collapses tenant subdomains.
+`service` filters by host, domain, vendor or Feign service name, `route` by path prefix. Limits:
+the graph keeps a Feign service name and the keys of its placeholders, never the value, so a
+Feign client configured by property shows the service name, not a host; Python and Java clients
+(`requests`, `RestTemplate`, `HttpClient`) leave no `Endpoint` node and are not seen; an absolute
+URL to the company's own domain is listed like any other host.
+
+`origin="consumers"` is the reverse lookup of a named resource. `service` is a queue, bucket,
+SSM parameter, table, topic or secret name. Rows are the Terraform declarations (`role`
+`declaration`: `aws_sqs_queue`, `aws_sns_topic`, `aws_s3_bucket`, `aws_dynamodb_table`,
+`aws_lambda_function`, and `aws_ssm_parameter` / `aws_secretsmanager_secret`, whose `name` is read
+from the block's lines; a `${...}` name is a template, `declared_as: template`) and every repo
+that uses it (`role` `consumer`) with `match`: `exact` (a name in code, a Spring property
+resolved in a profile with `via: resolved_name`, or Terraform wiring of another repo), `prefix`
+(an SSM `GetParametersByPath` path above the parameter) or `config_key` (a property or
+environment variable called as asked). `route` filters by AWS service or kind (`sqs`, `queue`,
+`ssm`), `status` by `declaration`, `consumer`, `exact`, `prefix` or `config_key`. Matching is
+case-sensitive equality; an SSM name matches with or without its leading `/`. False positives: a
+name shorter than 4 characters, or a generic one (`logs`, `test`, `events`, `prod` ...), is
+refused (`refused`, `min_name_length` in the reply) and a `GetParametersByPath` path that short
+or generic is not used for prefix matching; equal names in different accounts or regions are not
+told apart. Not joined, because the graphs hold no values: environment variable and task
+definition values, and string literals other than AWS call targets (`not_joined` in the reply).
+With no `service` it lists the SSM reads (`role` `undeclared_read`) that match no declared
+parameter of any registered repo; "undeclared" means no registered Terraform declares it by a
+literal or templated name, not that it is missing in AWS. Reads whose name is unknown are counted
+in `unresolved_ssm_reads`, and SSM/secret blocks whose name is computed in
+`declarations_with_computed_name`. The existing `terraform` origin is unrelated: it joins
+remote module sources to repos and has no resource names.
+
+Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk`, `amqp`, `trigger`, `external`
+and `consumers` origins return at most
 `max_results` rows (at most 100) per call. When rows remain, `truncated` is set and
 `next_cursor` is returned; pass it back as `cursor`, with the same other arguments, to read
 the next page. `limit` is not used by these origins. A page after the first has `offset`

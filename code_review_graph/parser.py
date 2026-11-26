@@ -36,7 +36,11 @@ from . import asl_parse, ember_extract, ember_template, js_api_extract, py_api_e
 from . import dead_code_evidence as _dead_code_evidence
 from . import scala_parse as _scala_parse
 from .aws_sdk_calls import aws_sdk_edges
-from .config_keys import is_spring_config_path, normalize_spring_config_key
+from .config_keys import (
+    is_spring_config_path,
+    normalize_spring_config_key,
+    storable_config_value,
+)
 from .constants import (
     E2E_DIR_RE,
     E2E_FILE_NAME_RES,
@@ -4307,7 +4311,9 @@ class CodeParser:
                 node.is_test = True
         # AWS SDK calls, s3:// locations and aws s3 commands (see aws_sdk_calls.py); not in tests.
         if not self._is_test_path(fallback_path):
-            edges.extend(aws_sdk_edges(path, source, nodes, edges, self._get_parser))
+            edges.extend(aws_sdk_edges(
+                path, source, nodes, edges, self._get_parser, self._repo_root,
+            ))
             # URL allow-lists held in Python constants (see module_constants.py).
             constant_nodes, constant_edges = python_url_constants(
                 path, source, nodes, edges, self._get_parser,
@@ -12845,7 +12851,7 @@ class CodeParser:
         path: Path,
         source: bytes,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
-        """Index Spring property names while deliberately discarding values."""
+        """Index Spring property names; keep a value only when it is safe to (see config_keys)."""
         if path.suffix.lower() == ".properties":
             return self._parse_spring_properties(path, source)
         return self._parse_spring_yaml(path, source)
@@ -12855,7 +12861,7 @@ class CodeParser:
         path: Path,
         source: bytes,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
-        """Flatten Spring YAML keys using PyYAML's syntax tree, never values."""
+        """Flatten Spring YAML keys via PyYAML's syntax tree; secret-looking values are dropped."""
         try:
             documents = list(_yaml.compose_all(source.decode("utf-8", errors="replace")))
         except (_yaml.YAMLError, RecursionError) as exc:
@@ -12868,6 +12874,10 @@ class CodeParser:
         file_path = normalize_file_path(path)
         nodes = [self._spring_config_file_node(path, source, "yaml")]
         emitted: set[str] = set()
+        doc_profiles = {
+            i: profiles for i, doc in enumerate(documents)
+            if (profiles := self._yaml_document_profiles(doc))
+        }
 
         def emit(raw_key: str, value_node: object, document_index: int) -> None:
             key = normalize_spring_config_key(raw_key)
@@ -12878,6 +12888,16 @@ class CodeParser:
             value_type = tag.rsplit(":", 1)[-1]
             if value_type not in {"bool", "float", "int", "null", "str", "timestamp"}:
                 value_type = "scalar"
+            extra: dict[str, Any] = {
+                "document_index": document_index,
+                "raw_key": raw_key,
+                "source_file": path.name,
+                "value_type": value_type,
+            }
+            if value_type != "null":
+                self._add_config_value(extra, key, getattr(value_node, "value", None))
+            if doc_profiles.get(document_index):
+                extra["doc_profiles"] = doc_profiles[document_index]
             nodes.append(NodeInfo(
                 kind="ConfigProperty",
                 name=key,
@@ -12885,12 +12905,7 @@ class CodeParser:
                 line_start=_yaml_line(value_node),
                 line_end=_yaml_end_line(value_node),
                 language="yaml",
-                extra={
-                    "document_index": document_index,
-                    "raw_key": raw_key,
-                    "source_file": path.name,
-                    "value_type": value_type,
-                },
+                extra=extra,
             ))
 
         def visit(
@@ -12925,6 +12940,67 @@ class CodeParser:
             if document is not None:
                 visit(document, "", document_index, frozenset())
         return nodes, []
+
+    @staticmethod
+    def _add_config_value(extra: dict[str, Any], key: str, raw: object) -> None:
+        """Put ``value`` (and ``value_truncated``) on *extra* when the value is safe to keep."""
+        stored = storable_config_value(key, raw)
+        if stored is not None:
+            extra["value"] = stored[0]
+            if stored[1]:
+                extra["value_truncated"] = True
+
+    @staticmethod
+    def _yaml_document_profiles(document: object) -> list[str]:
+        """Plain profile names a multi-document YAML document is bound to, else ``[]``.
+
+        Reads ``spring.config.activate.on-profile`` (nested or dotted) and the legacy
+        ``spring.profiles``; a negated or compound expression binds nothing here.
+        """
+        if not isinstance(document, _YamlMapping):
+            return []
+        found: list[str] = []
+
+        def walk(node: object, prefix: str, depth: int) -> None:
+            if depth > 6:
+                return
+            if isinstance(node, _YamlMapping):
+                for key_node, value_node in node.value:
+                    segment = _yaml_scalar(key_node)
+                    if segment:
+                        walk(value_node, f"{prefix}.{segment}" if prefix else segment, depth + 1)
+            elif normalize_spring_config_key(prefix) in (
+                "spring.config.activate.onProfile", "spring.profiles",
+            ):
+                items = node.value if isinstance(node, _YamlSequence) else [node]
+                for item in items:
+                    text = _yaml_scalar(item) if isinstance(item, _YamlScalar) else None
+                    if text:
+                        found.extend(p.strip() for p in text.split(","))
+
+        walk(document, "", 0)
+        if not found or any(not re.fullmatch(r"[A-Za-z0-9_.\-]{1,64}", p) for p in found):
+            return []
+        return found
+
+    @staticmethod
+    def _spring_property_value(line: str) -> Optional[str]:
+        """The raw value part of one Java-properties entry (after the key and its separator)."""
+        stripped = line.lstrip()
+        escaped = False
+        boundary = len(stripped)
+        for index, char in enumerate(stripped):
+            if char == "\\":
+                escaped = not escaped
+                continue
+            if not escaped and (char in "=:" or char.isspace()):
+                boundary = index
+                break
+            escaped = False
+        rest = stripped[boundary:].lstrip()
+        if rest[:1] in ("=", ":"):
+            rest = rest[1:]
+        return rest.strip() or None
 
     @staticmethod
     def _is_non_spring_yaml(documents: list[object]) -> bool:
@@ -12997,7 +13073,7 @@ class CodeParser:
         path: Path,
         source: bytes,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
-        """Index Spring .properties keys without retaining their values."""
+        """Index Spring .properties keys; secret-looking values are not retained."""
         text = source.decode("utf-8", errors="replace")
         file_path = normalize_file_path(path)
         nodes = [self._spring_config_file_node(path, source, "properties")]
@@ -13010,6 +13086,12 @@ class CodeParser:
             if not key or key in emitted:
                 continue
             emitted.add(key)
+            extra: dict[str, Any] = {
+                "raw_key": raw_key,
+                "source_file": path.name,
+                "value_type": "scalar",
+            }
+            self._add_config_value(extra, key, self._spring_property_value(line))
             nodes.append(NodeInfo(
                 kind="ConfigProperty",
                 name=key,
@@ -13017,11 +13099,7 @@ class CodeParser:
                 line_start=line_number,
                 line_end=line_number,
                 language="properties",
-                extra={
-                    "raw_key": raw_key,
-                    "source_file": path.name,
-                    "value_type": "scalar",
-                },
+                extra=extra,
             ))
         return nodes, []
 

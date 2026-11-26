@@ -184,14 +184,15 @@ def _code_names(store: GraphStore) -> dict[tuple[str, str], tuple[str, list[str]
     for edge in al.read_edges(store):
         if edge["sdk"] == "terraform":
             continue
+        key_service = al.decl_key(edge["service"], edge["kind"])
         if not edge["unresolved"] and edge["name"] != "?":
-            names.setdefault((edge["service"], edge["name"]), ("literal", []))
+            names.setdefault((key_service, edge["name"]), ("literal", []))
         resolved = edge["extra"].get("resolved_names")
         if isinstance(resolved, dict):
             for profile, name in resolved.items():
                 if isinstance(name, str):
                     how, profiles = names.setdefault(
-                        (edge["service"], name), ("resolved_name", []),
+                        (key_service, name), ("resolved_name", []),
                     )
                     if how == "resolved_name" and str(profile) not in profiles:
                         profiles.append(str(profile))
@@ -288,7 +289,7 @@ def _summarise_repo(
                         "stack", other_label, raw, rel_dir, None, via, stack_kind=stack_kind,
                     ))
         for decl in decls.get(other):
-            used = code_names.get((decl["service"], decl["name"]))
+            used = code_names.get((al.decl_key(decl["service"], decl["kind"]), decl["name"]))
             if used is not None:
                 items["resource"].append(_item(
                     decl["kind"] or "resource", other_label, decl["name"], decl["file"],

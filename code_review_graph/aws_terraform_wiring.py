@@ -36,6 +36,26 @@ DECLARED: dict[str, tuple[str, str, str]] = {
     "aws_cloudwatch_event_rule": ("events", "rule", "name"),
     "aws_scheduler_schedule": ("scheduler", "schedule", "name"),
 }
+#: Terraform type -> ``(service, target kind, name attribute)`` of a data store or load balancer
+#: that application code reaches through an endpoint host or an SDK call. Declared like the
+#: resources above, but not nameable in an ARN attribute, so they are not in ``REF_TYPES``.
+DATA_STORES: dict[str, tuple[str, str, str]] = {
+    "aws_db_instance": ("rds", "db-instance", "identifier"),
+    "aws_rds_cluster_instance": ("rds", "db-instance", "identifier"),
+    "aws_rds_cluster": ("rds", "db-cluster", "cluster_identifier"),
+    "aws_db_proxy": ("rds", "db-proxy", "name"),
+    "aws_elasticache_replication_group": (
+        "elasticache", "replication-group", "replication_group_id",
+    ),
+    "aws_elasticache_cluster": ("elasticache", "cache-cluster", "cluster_id"),
+    "aws_lb": ("elasticloadbalancing", "load-balancer", "name"),
+    "aws_alb": ("elasticloadbalancing", "load-balancer", "name"),
+    "aws_elb": ("elasticloadbalancing", "load-balancer", "name"),
+    "aws_lb_target_group": ("elasticloadbalancing", "target-group", "name"),
+    "aws_alb_target_group": ("elasticloadbalancing", "target-group", "name"),
+    "aws_opensearch_domain": ("es", "search-domain", "domain_name"),
+    "aws_elasticsearch_domain": ("es", "search-domain", "domain_name"),
+}
 #: Terraform type -> ``(service, kind)`` of a resource that can be named in an ARN attribute.
 REF_TYPES: dict[str, tuple[str, str]] = {
     **{rtype: (v[0], v[1]) for rtype, v in DECLARED.items()},
@@ -48,7 +68,9 @@ WIRING_OPS = frozenset({"event_source", "subscribe", "event_target", "schedule_t
 MARKERS = (
     b"aws_sqs_queue", b"aws_sns_topic", b"aws_lambda_function", b"aws_lambda_event_source_mapping",
     b"aws_dynamodb_table", b"aws_cloudwatch_event", b"aws_scheduler_schedule",
-    b"aws_apigatewayv2",
+    b"aws_apigatewayv2", b"aws_db_instance", b"aws_rds_cluster", b"aws_db_proxy",
+    b"aws_elasticache_", b"aws_lb", b"aws_alb", b"aws_elb", b"aws_opensearch_domain",
+    b"aws_elasticsearch_domain",
 )
 _MAX_TARGETS = 20
 
@@ -178,9 +200,10 @@ def scan_wiring(
     found: dict[tuple[str, str], str] = {
         ("aws_s3_bucket", label): name for label, name in bucket_names.items()
     }
+    declarable = {**DECLARED, **DATA_STORES}
     for _start, rtype, label, attrs, _body in parsed:
-        if rtype in DECLARED:
-            _service, kind, attr = DECLARED[rtype]
+        if rtype in declarable:
+            _service, kind, attr = declarable[rtype]
             name = _literal(attrs.get(attr))
             if name and name_ok(kind, name):
                 found[(rtype, label)] = name
@@ -209,8 +232,8 @@ def scan_wiring(
 
     for start, rtype, label, attrs, body in parsed:
         line = line_of(start)
-        if rtype in DECLARED:
-            service, kind, _attr = DECLARED[rtype]
+        if rtype in declarable:
+            service, kind, _attr = declarable[rtype]
             name = found.get((rtype, label))
             if not name:
                 continue

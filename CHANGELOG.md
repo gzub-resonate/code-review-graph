@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Added
+
+- `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
+  (it used to be an error): publisher and listener counts and repos, routing and binding keys,
+  and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
+  `route` is a key substring, and the rows page. With an exchange the reply is unchanged.
+- A JavaScript or TypeScript call that was `no_route_match` can now be `method_not_served` (the
+  route exists on a registered server, but only with other methods; the row names them in
+  `served_methods` and the serving repo and file in `candidates`) or `prefix_mismatch` (the same
+  last two path segments exist under a different prefix: a low-confidence lead, not a match).
+  `status` accepts both and the summary counts them. `no_route_match` remains for calls nothing
+  fits. Query-time only; the index fingerprint is unchanged.
+- `cross_repo_requests_tool` `origin="trigger"`: what invokes a Lambda, queue, state machine,
+  topic or bucket handler, joined at query time from the indexed Terraform (EventBridge rules and
+  schedules, event source mappings, SNS subscriptions, S3 notifications, API Gateway,
+  `aws_lambda_permission`, EventBridge Pipes). Filters by target (`service`) and source
+  (`route`); rows are `resolved`, `source_unresolved` or `target_unresolved`. No rebuild needed.
+- `cross_repo_requests_tool` `origin="external"` groups the HTTP calls that reach no registered
+  service by host (JavaScript absolute URLs, `baseURL`, Ember adapter hosts, Feign clients of an
+  unregistered service), with a vendor guess from a small static table and `host_unresolved` for
+  placeholder hosts. `origin="consumers"` looks up one named queue, bucket, SSM parameter, table,
+  topic or secret and lists its Terraform declarations and every repo that references it (`exact`,
+  `prefix`, `config_key`); with no name it lists SSM reads that match no declared
+  `aws_ssm_parameter`. Both page and are query-time only: no index change.
+- `ConfigProperty` nodes of Spring `application*`/`bootstrap*` files now carry the literal value
+  (`extra.value`, cut at 200 characters with `value_truncated`; a YAML document bound by
+  `spring.config.activate.on-profile` carries `doc_profiles`). The value of a key that looks like a secret
+  (password, secret, token, key, credential ...) is never stored, nor is a private key, JWT, access token,
+  URL with credentials, hex or long random string; a 12-digit AWS account id is replaced by `ACCOUNT`.
+  This changes the index fingerprint, so every repo is reindexed once.
+- `cross_repo_requests_tool` with `origin="awssdk"` names a call whose queue, bucket, topic or table comes from a
+  configuration key by reading that value at query time: `${KEY:default}` and `${ENV_VAR}` placeholders that refer to
+  another property of the same repo are expanded, per profile (default preferred; `config_profile` and
+  `config_alternatives` say which), with Spring relaxed binding. Rows carry `target_source` (`config` or
+  `config_key_unresolved`) and `via`. New module `config_values.py`.
+
 ### Changed
 
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or
@@ -24,7 +60,39 @@
   returned are unchanged. Each call logs the seconds its phases took. No graph rebuild is needed,
   and the index fingerprint is unchanged.
 
+### Fixed
+
+- `origin="awssdk"` no longer makes a data-store row from an AWS endpoint host that is only written
+  somewhere: in a comment, a Python docstring, a log or print call, a sample config (`*.example`,
+  `*.sample`, `*.dist`), a fixture, mock, example or docs directory, or a config key that does not name
+  an endpoint (`description`). A host counts under a key such as `spring.datasource.url`, `DB_HOST`,
+  `REDIS_URL` or `*_ENDPOINT`, in a known client call, or in a connection URL; a bare host in code
+  still gives a row, marked `evidence: hostname_only` with `confidence` 0.4 (rows now carry
+  `evidence`: `client_call`, `connection_url`, `config_key` or `hostname_only`). A URL whose password
+  contains `;`, `?`, `#`, `)` or `]` no longer yields the user name as a host. Docker Compose
+  `environment` entries and Terraform `variable` defaults are read for endpoint keys.
+  **The index fingerprint changes: every repo is reindexed.**
+
 ### Added
+
+- `cross_repo_requests_tool` with `origin` `awssdk` now finds calls to RDS, load balancers
+  (ELB, ALB, NLB and target groups), ElastiCache and OpenSearch/Elasticsearch. Two sources feed it:
+  SDK operations (boto3 `rds`, `elbv2`, `elb`, `elasticache`, `es` and `opensearch`; the Java v1 and v2
+  packages; the `@aws-sdk/client-*` packages) and client connections that name a host: JDBC and
+  R2DBC URLs, Spring `application*` files (`spring.datasource.url`, `spring.data.redis.host`, the
+  Elasticsearch `uris`), psycopg2, psycopg, asyncpg, pymysql, SQLAlchemy, redis-py, Jedis, Lettuce,
+  Redisson, the Elasticsearch/OpenSearch clients, `pg`, `mysql2`, `ioredis`, `redis` and the
+  `@elastic`/`@opensearch-project` clients, and AWS endpoint hosts written in code. The service
+  is `rds`, `elasticloadbalancing`, `elasticache` or `es`; rows carry `resource_kind`
+  (`db-instance`, `db-cluster`, `db-proxy`, `load-balancer`, `target-group`, `cache-cluster`,
+  `replication-group`, `search-domain`) and, for a connection, `host`, `port`, `database`, `engine`
+  and `client`. A host or environment variable that is not written out gives an `unresolved` row
+  with its `placeholder`. Users, passwords and query strings of a URL are never stored. A name is
+  joined to a Terraform declaration (`aws_db_instance`, `aws_rds_cluster`, `aws_db_proxy`,
+  `aws_elasticache_replication_group`, `aws_elasticache_cluster`, `aws_lb`, `aws_alb`, `aws_elb`,
+  `aws_lb_target_group`, `aws_opensearch_domain`, `aws_elasticsearch_domain`) only when the
+  declared name equals it exactly and the kind is the same. **The index fingerprint changes: every
+  graph needs a full rebuild.**
 
 - AMQP exchange queries, at query time (no graph rebuild; the links need graphs whose publisher and
   listener edges meet on `external:rabbitmq:<exchange>`, so older graphs show nothing until

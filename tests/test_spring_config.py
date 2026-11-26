@@ -91,7 +91,7 @@ def test_ansible_content_wins_even_without_ansible_path(tmp_path: Path) -> None:
     assert not any(node.kind == "ConfigProperty" for node in nodes)
 
 
-def test_yaml_config_indexes_keys_without_values(tmp_path: Path) -> None:
+def test_yaml_config_keeps_safe_values_and_drops_secrets(tmp_path: Path) -> None:
     path = tmp_path / "application.yml"
     nodes, edges = CodeParser().parse_bytes(path, YAML_SOURCE)
     properties = [node for node in nodes if node.kind == "ConfigProperty"]
@@ -108,11 +108,14 @@ def test_yaml_config_indexes_keys_without_values(tmp_path: Path) -> None:
     serialized_metadata = json.dumps([node.extra for node in properties])
     assert "yaml-super-secret" not in serialized_metadata
     assert "second-super-secret" not in serialized_metadata
-    assert "jdbc:postgresql" not in serialized_metadata
-    assert all("config_value" not in node.extra for node in properties)
+    values = {node.name: node.extra.get("value") for node in properties}
+    assert values["spring.datasource.url"] == "jdbc:postgresql://localhost/orders"
+    assert values["spring.kafka.bootstrapServers[0]"] == "broker-one:9092"
+    assert values["spring.datasource.password"] is None
+    assert values["app.apiToken"] is None
 
 
-def test_properties_config_indexes_keys_without_values(tmp_path: Path) -> None:
+def test_properties_config_keeps_safe_values_and_drops_secrets(tmp_path: Path) -> None:
     path = tmp_path / "application-prod.properties"
     nodes, edges = CodeParser().parse_bytes(path, PROPERTIES_SOURCE)
     properties = [node for node in nodes if node.kind == "ConfigProperty"]
@@ -126,8 +129,10 @@ def test_properties_config_indexes_keys_without_values(tmp_path: Path) -> None:
     serialized_metadata = json.dumps([node.extra for node in properties])
     assert "properties-super-secret" not in serialized_metadata
     assert "another-secret" not in serialized_metadata
-    assert "https://" not in serialized_metadata
-    assert all("config_value" not in node.extra for node in properties)
+    values = {node.name: node.extra.get("value") for node in properties}
+    assert values["payment.gateway.url"] == "https://pay.example.test"
+    assert values["payment.apiToken"] is None
+    assert values["spring.datasource.password"] is None
 
 
 def test_java_config_annotations_emit_key_only_dependencies(tmp_path: Path) -> None:

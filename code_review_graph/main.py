@@ -1931,7 +1931,9 @@ async def cross_repo_requests_tool(
     repo's stored endpoint index (or its graph when it has none).
     A call is ``matched`` (one endpoint), ``ambiguous`` (several),
     ``case_mismatch`` (no exact route, but one that differs only in letter
-    case: a low-confidence lead, not a match), ``no_route_match``,
+    case: a low-confidence lead, not a match), ``method_not_served`` (JS/TS: the route is
+    served only with other HTTP methods), ``prefix_mismatch`` (JS/TS: same last two segments
+    under another prefix, a lead), ``no_route_match``,
     ``no_target_repo`` (no registered repo carries the service name) or
     ``unmatchable`` with a ``reason`` (placeholder service name, absolute
     ``url``, ``URI`` argument, or a route piece that could not be resolved).
@@ -1991,19 +1993,51 @@ async def cross_repo_requests_tool(
             ``aws s3`` commands: ``service`` filters by resource name, ``route`` by
             ``<service>/<name>`` or ``<service>`` (``s3``, ``dynamodb``, ``lambda``, ``states``,
             ``secretsmanager``, ``ssm``, ``kinesis``, ``firehose``, ``events``, ``ecs``,
-            ``glue``, ``batch``), ``status`` is ``matched``, ``not_found``, ``ambiguous``,
+            ``glue``, ``batch``, ``rds``, ``elasticloadbalancing``, ``elasticache``, ``es``),
+            ``status`` is ``matched``, ``not_found``, ``ambiguous``,
             ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
             (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
             to see which services read or write a bucket and which repo defines it.
+            ``trigger`` answers "what invokes this Lambda, queue, state machine, topic or bucket
+            handler" from the Terraform already indexed (EventBridge rules and Scheduler
+            schedules, Lambda event source mappings, SNS subscriptions, S3 bucket notifications,
+            API Gateway routes and integrations, ``aws_lambda_permission``, EventBridge Pipes):
+            ``service`` keeps rows whose invoked side is that name, ``service/name`` or
+            Terraform label; ``route`` keeps rows whose firing side (rule, queue, topic, bucket,
+            route key) is that name, so "what does X fire" is ``route=X``. ``status`` is
+            ``resolved``, ``source_unresolved`` or ``target_unresolved``. Rows give
+            ``trigger_kind``, ``source``, ``target``, ``schedule``, ``event_pattern_sources``,
+            ``file``, ``line`` and ``via`` (``reference`` marks an inference).
+            A target that is a Spring config key is named from the YAML value (profiles,
+            ``${KEY:default}``, relaxed binding): ``target_source`` is ``config`` (with
+            ``config_profile``, ``via``, ``config_alternatives``) or ``config_key_unresolved``.
             ``amqp`` lists the publishers and listeners of one RabbitMQ exchange across the
-            repos: ``service`` is the exchange (required; ``orders.exchange`` or
+            repos: ``service`` is the exchange (``orders.exchange`` or
             ``external:rabbitmq:orders.exchange``), ``route`` an optional key and ``status``
-            ``publisher`` or ``listener``. With ``route`` set, a listener row is kept when its
+            ``publisher`` or ``listener``. Without ``service`` it lists every exchange instead,
+            one row each with publisher and listener counts and repos, and a ``status`` of
+            ``unlistened``, ``unpublished`` or ``matched`` (``status`` filters on those, and
+            ``route`` is a key substring). With ``route`` set, a listener row is kept when its
             ``binding_key`` matches it and a publisher row when its ``routing_key`` matches it,
             with AMQP topic wildcards (``*`` one word, ``#`` zero or more) applied only in
             binding keys that hold one; ``matched_via`` is ``exact_key``, ``topic_pattern`` or
             ``key_unknown``. Repos with no AMQP edges are named in ``repos_without_amqp``: a
             repo indexed before the exchange edges existed shows nothing until it is rebuilt.
+            ``external`` groups the HTTP calls that reach no registered service by host: one
+            row per (host, repo) with a ``vendor`` guess from a small static table, ``calls``,
+            ``files`` and ``samples`` (JavaScript absolute URLs, ``baseURL``, Ember adapter
+            hosts, Feign clients of an unregistered service); a placeholder host is
+            ``host_unresolved`` with its key. ``service`` filters by host, domain, vendor or
+            Feign service name, ``route`` by path prefix, ``status`` is ``known_vendor``,
+            ``unknown_vendor`` or ``host_unresolved``. Query strings and credentials are never
+            shown. ``consumers`` is a reverse lookup: ``service`` is a queue, bucket, SSM
+            parameter, table, topic or secret name; the rows are its Terraform declarations
+            and the repos that reference it, with ``match`` ``exact``, ``prefix`` or
+            ``config_key``. ``route`` filters by AWS service or kind, ``status`` by
+            ``declaration``, ``consumer`` or a match. Names under 4 characters and generic ones
+            (``logs``, ``test``) are refused. With no ``service`` it lists SSM reads that match
+            no declared ``aws_ssm_parameter``. Environment variable values and string literals
+            are not in the graphs and are not joined.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
         repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as
