@@ -8,6 +8,7 @@ from code_review_graph import constants
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import NodeInfo
 from code_review_graph.registry import Registry
+from code_review_graph.repo_cache import _reset_shared_pool
 from code_review_graph.tools import registry_tools
 from code_review_graph.tools.registry_tools import (
     _match_tier,
@@ -373,6 +374,7 @@ def test_repos_are_searched_in_parallel_up_to_the_worker_count(tmp_path, registr
     for alias in "abcdefgh":
         named_repo(tmp_path, registry, alias, ["getMetricsBatch", *WEAK])
     monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, "4")
+    _reset_shared_pool()  # the pool's size is read when it is first used
     state = _watch_concurrency(monkeypatch)
     reply = search(query="getMetricsBatch")
     assert reply["repos_searched"] == list("abcdefgh")
