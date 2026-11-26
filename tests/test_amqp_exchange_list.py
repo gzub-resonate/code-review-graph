@@ -87,9 +87,9 @@ def test_route_is_a_key_substring_and_repos_limit_the_roles(world):
     assert [r["exchange"] for r in reply["results"]] == ["audit.exchange"]
     only_sub = cross_repo_requests_func(origin="amqp", repos=["sub"])
     rows = _by_name(only_sub)
-    # Seen from sub alone, orders.exchange has no publisher.
-    assert rows["orders.exchange"]["status"] == "unpublished"
+    # Only exchanges with an edge in sub are listed, but the status rests on every repo.
     assert "audit.exchange" not in rows
+    assert set(rows) == {"legacy.exchange", "orders.exchange"}
 
 
 def test_rows_page_and_cursor_is_scoped(world):
@@ -107,3 +107,106 @@ def test_exchange_given_behaviour_is_unchanged(world):
     reply = cross_repo_requests_func(origin="amqp", service="orders.exchange")
     assert reply["summary"].startswith("10 AMQP publisher/listener row(s) for exchange")
     assert {r["role"] for r in reply["results"]} == {"publisher", "listener"}
+
+
+@pytest.fixture
+def queue_world(tmp_path, registry):  # noqa: F811
+    repo = _build_repo(tmp_path / "attr", exchange_edges=False)
+    _add_edges(repo, [
+        # Bare queue listeners (@RabbitListener(queues=...)): the name is the target itself.
+        ("HANDLES", "attr.process-permutation", {"queue": "attr.process-permutation"}),
+        ("HANDLES", "attr.refresh-vertical", {"queue": "attr.refresh-vertical"}),
+        # A publish on the default exchange names the queue as its routing key.
+        ("PUBLISHES", "attr.refresh-vertical",
+         {"queue": "attr.refresh-vertical", "routing_key": "attr.refresh-vertical"}),
+        # A real exchange binding: its queue is another name.
+        ("HANDLES", "api.e.topic",
+         {"binding_key": "a.*", "queue": "attr.q", "exchange": "api.e.topic"}),
+    ])
+    registry.register(str(repo), alias="attr")
+    return repo
+
+
+def test_queue_names_are_not_listed_as_exchanges(queue_world):
+    reply = cross_repo_requests_func(origin="amqp")
+    assert [r["exchange"] for r in reply["results"]] == ["api.e.topic"]
+    assert reply["counts"] == {"unpublished": 1}
+    queues = {q["queue"]: q for q in reply["queues"]}
+    assert set(queues) == {"attr.process-permutation", "attr.refresh-vertical"}
+    assert all(q["kind"] == "queue" for q in queues.values())
+    assert queues["attr.process-permutation"]["listener_count"] == 1
+    assert queues["attr.refresh-vertical"]["status"] == "matched"
+    assert reply["queues_total"] == 2 and "queue name(s)" in reply["summary"]
+
+
+def test_a_queue_edge_of_one_exchange_name_is_flagged_in_the_single_exchange_mode(queue_world):
+    reply = cross_repo_requests_func(origin="amqp", service="attr.process-permutation")
+    assert {r["kind"] for r in reply["results"]} == {"queue"}
+    exchange = cross_repo_requests_func(origin="amqp", service="api.e.topic")
+    assert all("kind" not in r for r in exchange["results"])
+
+
+def test_scoped_list_computes_status_over_all_repos_and_shows_both_counts(world):
+    reply = cross_repo_requests_func(origin="amqp", repos=["sub"])
+    orders = _by_name(reply)["orders.exchange"]
+    assert orders["status"] == "matched"
+    assert (orders["publisher_count"], orders["listener_count"]) == (3, 7)
+    assert (orders["scoped_publisher_count"], orders["scoped_listener_count"]) == (0, 1)
+    assert orders["publisher_repos"] == ["pub"]
+    assert reply["scoped_to"] == ["sub"] and reply["status_basis"] == "all_repos"
+    assert reply["counts"] == {"unpublished": 1, "matched": 1}
+    assert "status computed over all 3 repo(s)" in reply["summary"]
+    # An unscoped call has no scoped counts.
+    assert "scoped_publisher_count" not in _by_name(
+        cross_repo_requests_func(origin="amqp"))["orders.exchange"]
+
+
+def test_scoped_service_mode_reports_the_status_over_all_repos(world):
+    reply = cross_repo_requests_func(origin="amqp", service="orders.exchange", repos=["sub"])
+    assert {r["repo"] for r in reply["results"]} == {"sub"} and reply["total"] == 1
+    assert reply["exchange_status"] == "matched"
+    assert reply["exchange_counts"] == {"publisher": 3, "listener": 7}
+    assert reply["exchange_status_confirmed"] is True and reply["scoped_to"] == ["sub"]
+
+
+def test_a_spent_budget_is_in_the_summary_and_statuses_are_not_asserted(world, monkeypatch):
+    from code_review_graph.tools import registry_tools
+
+    monkeypatch.setenv("CRG_CROSS_REPO_BUDGET_SECONDS", "1")
+    monkeypatch.setenv("CRG_CROSS_REPO_WORKERS", "1")
+    # started, then the check before pub (in budget), sub and plain (spent).
+    clock = iter([0.0, 0.5, 5.0, 5.0, 5.0, 5.0])
+    monkeypatch.setattr(registry_tools, "_now", lambda: next(clock))
+    reply = cross_repo_requests_func(origin="amqp")
+    assert "searched 1 of 3 repos, 2 skipped by the time budget" in reply["summary"]
+    assert "across 3 repo(s)" not in reply["summary"]
+    assert reply["skipped_repos"] == ["sub", "plain"] and reply["status_basis"] == "partial"
+    assert "2 of 3" in reply["truncated_reason"]
+    rows = _by_name(reply)
+    assert rows["audit.exchange"]["status_confirmed"] is False
+    assert "status_confirmed" not in rows["orders.exchange"]
+
+
+def test_a_service_query_reads_the_repos_sharing_its_words_first():
+    from code_review_graph.tools.registry_tools import _amqp_hint_order
+
+    repos = [{"path": "/x/services-sink-s3"}, {"path": "/x/services-api-attribute"},
+             {"path": "/x/geoflux"}, {"path": "/x/services-api"}]
+    names = [r["path"].rsplit("/", 1)[1] for r in
+             _amqp_hint_order(repos, "api.e.topic.attribute")]
+    # "attribute" is shared ("api" is too generic to count); the rest keep their order.
+    assert names == ["services-api-attribute", "services-sink-s3", "geoflux", "services-api"]
+    assert _amqp_hint_order(repos, None) is repos
+
+
+def test_a_spent_budget_marks_the_service_status_unconfirmed(world, monkeypatch):
+    from code_review_graph.tools import registry_tools
+
+    monkeypatch.setenv("CRG_CROSS_REPO_BUDGET_SECONDS", "1")
+    monkeypatch.setenv("CRG_CROSS_REPO_WORKERS", "1")
+    clock = iter([0.0, 0.5, 5.0, 5.0, 5.0, 5.0])
+    monkeypatch.setattr(registry_tools, "_now", lambda: next(clock))
+    reply = cross_repo_requests_func(origin="amqp", service="audit.exchange")
+    assert reply["exchange_status"] == "unlistened"
+    assert reply["exchange_status_confirmed"] is False
+    assert "searched 1 of 3 repos, 2 skipped by the time budget" in reply["summary"]

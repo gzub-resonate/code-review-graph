@@ -1150,3 +1150,13 @@ def test_query_keys_are_known_only_when_the_url_spells_them_out(folded, keys):
     from code_review_graph.js_api_extract import query_keys_of
 
     assert query_keys_of(folded) == keys
+
+
+def test_summary_names_the_requested_origin_even_with_no_rows(world):
+    js = cross_repo_requests_func(repos=["web"], origin="js", service="x")
+    assert js["total"] == 0 and js["origin"] == "js"
+    assert "JS/TS" in js["summary"] and "origin=js" in js["summary"]
+    assert "Feign" not in js["summary"]
+    feign = cross_repo_requests_func(repos=["web"], origin="feign")
+    assert feign["origin"] == "feign" and "origin=feign" in feign["summary"]
+    assert cross_repo_requests_func(repos=["web"])["origin"] == "all"

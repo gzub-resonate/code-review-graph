@@ -361,6 +361,7 @@ class TestCrossRepoAmqp:
 
     def test_repos_left_after_the_budget_are_named(self, two_repos, monkeypatch):
         monkeypatch.setenv("CRG_CROSS_REPO_BUDGET_SECONDS", "1")
+        monkeypatch.setenv("CRG_CROSS_REPO_WORKERS", "1")
         clock = iter([0.0, 0.5, 5.0, 5.0, 5.0])
         monkeypatch.setattr(registry_tools, "_now", lambda: next(clock))
         reply = cross_repo_requests_func(origin="amqp", service="orders.exchange")

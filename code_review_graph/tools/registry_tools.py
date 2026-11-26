@@ -62,6 +62,14 @@ _INFRASTRUCTURE_FIRST_PAGE_ONLY = (
     "first page only; call again without a cursor to read it"
 )
 
+#: Queue-only names echoed in the ``queues`` section of an AMQP exchange list.
+_MAX_QUEUE_ROWS = 100
+
+_INFRASTRUCTURE_NO_MATCHES = (
+    "no rows matched the filter, so there is no infrastructure to describe and the block is "
+    "omitted; it describes the repos of the matched rows, never other repos"
+)
+
 _NO_RESULTS_FOR_CURSOR = (
     "the registry no longer holds a repository this cursor can continue; "
     "call again without a cursor to start over"
@@ -783,6 +791,127 @@ def _awssdk_links(
     return result
 
 
+def _amqp_repo_map(entry: dict[str, Any]) -> Optional[dict[str, list[dict[str, Any]]]]:
+    """Every exchange or queue name of one repo's graph with its edges; ``{}`` without AMQP.
+
+    ``None`` when the graph cannot be read. Kept while the graph file is unchanged, so a
+    second AMQP call is answered from memory. The values are raw (not sanitised) and shared:
+    callers copy what they change.
+    """
+    def load() -> Optional[dict[str, list[dict[str, Any]]]]:
+        store = tl.open_store(entry)
+        if store is None:
+            return None
+        try:
+            if not aj.has_amqp_edges(store):
+                return {}
+            return {
+                name: list(aj.read_channel_edges(store, name))
+                for name in ax.list_exchange_names(store)
+            }
+        except (sqlite3.Error, GraphStoreError) as exc:
+            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
+            return None
+        finally:
+            store.close()
+
+    return MEMO.get("amqp-edges", entry, load, cacheable=lambda found: found is not None)
+
+
+_HINT_STOP = frozenset({"api", "e", "topic", "exchange", "service", "services", "the", "and"})
+
+
+def _amqp_hint_order(entries: list[dict[str, Any]], channel: str | None) -> list[dict[str, Any]]:
+    """*entries* with the repos whose name shares words with *channel* first (stable)."""
+    if not channel:
+        return entries
+    words = {w for w in re.split(r"[^a-z0-9]+", channel.lower()) if len(w) > 2} - _HINT_STOP
+    if not words:
+        return entries
+
+    def score(entry: dict[str, Any]) -> int:
+        label = {w for w in re.split(r"[^a-z0-9]+", _repo_label(entry).lower()) if w}
+        return -len(words & label)
+
+    return sorted(entries, key=score)
+
+
+class _AmqpScan:
+    """What one read of the AMQP edges of the registry found, and what it could not read."""
+
+    def __init__(self) -> None:
+        self.loaded: list[tuple[str, bool, dict[str, list[dict[str, Any]]]]] = []
+        self.skipped: list[str] = []
+        self.skipped_in_scope: list[str] = []
+        self.unreadable: list[str] = []
+        self.without_amqp: list[str] = []
+        self.total = 0
+
+    @property
+    def searched(self) -> int:
+        return self.total - len(self.skipped)
+
+    @property
+    def incomplete(self) -> bool:
+        """Some repo that could have changed a status was not (fully) read."""
+        return bool(self.skipped or self.unreadable)
+
+    def coverage(self, selected: int, scoped: bool) -> str:
+        """The part of a summary that says which repos the numbers rest on."""
+        where = (
+            f" in {selected} selected repo(s)" if scoped else ""
+        )
+        if self.skipped:
+            return (
+                f"{where}; searched {self.searched} of {self.total} repos, "
+                f"{len(self.skipped)} skipped by the time budget (statuses are incomplete)"
+            )
+        if scoped:
+            return f"{where} (status computed over all {self.total} repo(s))"
+        return f" across {self.total} repo(s)"
+
+
+def _amqp_scan(
+    all_repos: list[dict[str, Any]], selected: list[dict[str, Any]], scoped: bool,
+    channel: str | None = None,
+) -> _AmqpScan:
+    """Read the AMQP edges of the selected repos, then (when *scoped*) of all the others.
+
+    A status is a statement about every repo, so a ``repos`` scope only chooses what is
+    reported. The selected repos are read first, so a spent time budget costs the status
+    before it costs the rows asked for. Repos run on ``CRG_CROSS_REPO_WORKERS`` threads.
+    """
+    chosen = {id(e) for e in selected}
+    rest = [e for e in all_repos if id(e) not in chosen] if scoped else []
+    ordered = _amqp_hint_order(list(selected), channel) + _amqp_hint_order(rest, channel)
+    scan = _AmqpScan()
+    scan.total = len(ordered)
+    budget = cross_repo_budget_seconds()
+    started = _now()
+
+    def out_of_budget() -> bool:
+        return bool(budget) and _now() - started > budget
+
+    for entry, found in zip(
+        ordered, parallel_map_budget(_amqp_repo_map, ordered, cross_repo_workers(), out_of_budget),
+    ):
+        label = _sanitize_name(_repo_label(entry))
+        in_scope = id(entry) in chosen
+        if found is SKIPPED:
+            scan.skipped.append(label)
+            if in_scope:
+                scan.skipped_in_scope.append(label)
+        elif found is None:
+            scan.unreadable.append(label)
+        elif not found:
+            if in_scope:
+                scan.without_amqp.append(label)
+        else:
+            scan.loaded.append((label, in_scope, found))
+    return scan
+
+
+
 def _amqp_exchange_list(
     repos: list[str] | None,
     routing_key: str | None,
@@ -797,8 +926,14 @@ def _amqp_exchange_list(
     ``binding_keys`` listeners bind with, and a ``status``: ``unlistened`` (publishers, no
     listener), ``unpublished`` (listeners, no publisher) or ``matched`` (both; the keys are not
     compared). ``status`` filters on those values; ``routing_key`` (``route``) keeps the
-    exchanges with a routing or binding key containing it as a substring. ``repos`` limits the
-    repos read, so the roles are those of the selected repos only. Pages like the other origins.
+    exchanges with a routing or binding key containing it as a substring.
+
+    ``repos`` chooses which exchanges are listed (those with an edge in the selected repos),
+    not what a status rests on: counts, repos and ``status`` always cover every repo, and
+    ``scoped_publisher_count`` / ``scoped_listener_count`` give the selected repos' share.
+    A name only ever used as a queue is listed apart, in ``queues``. When the time budget leaves
+    repos unread the summary says so and a status that could change is flagged
+    ``status_confirmed: false``. Pages like the other origins.
     """
     from ..registry import Registry
 
@@ -812,49 +947,39 @@ def _amqp_exchange_list(
     if repos:
         selected, unknown, _ambiguous = _select_repos(all_repos, repos)
         unknown_shown, _total, _cut = _echoed(unknown)
-    budget = cross_repo_budget_seconds()
-    started = _now()
-    skipped: list[str] = []
-    unreadable: list[str] = []
-    without_amqp: list[str] = []
+    scoped = bool(repos)
+    scan = _amqp_scan(all_repos, selected, scoped)
     exchanges: dict[str, ax.Exchange] = {}
-    for entry in selected:
-        label = _sanitize_name(_repo_label(entry))
-        if budget and _now() - started > budget:
-            skipped.append(label)
-            continue
-        store = tl.open_store(entry)
-        if store is None:
-            unreadable.append(label)
-            continue
-        try:
-            if not aj.has_amqp_edges(store):
-                without_amqp.append(label)
-                continue
-            for name in ax.list_exchange_names(store):
-                edges = [
-                    {**e, "routing_key": _sanitize_name(e["routing_key"])
-                     if isinstance(e.get("routing_key"), str) else None,
-                     "binding_key": _sanitize_name(e["binding_key"])
-                     if isinstance(e.get("binding_key"), str) else None}
-                    for e in aj.read_channel_edges(store, name)
-                ]
-                ax.add_edges(
-                    exchanges.setdefault(_sanitize_name(name), ax.new_exchange()), label, edges,
-                )
-        except (sqlite3.Error, GraphStoreError) as exc:
-            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
-            unreadable.append(label)
-            continue
-        finally:
-            store.close()
+    for label, in_scope, amap in scan.loaded:
+        for name, raw_edges in amap.items():
+            edges = [
+                {**e, "routing_key": _sanitize_name(e["routing_key"])
+                 if isinstance(e.get("routing_key"), str) else None,
+                 "binding_key": _sanitize_name(e["binding_key"])
+                 if isinstance(e.get("binding_key"), str) else None}
+                for e in raw_edges
+            ]
+            ax.add_edges(
+                exchanges.setdefault(_sanitize_name(name), ax.new_exchange()), label, edges,
+                in_scope=in_scope,
+            )
     counts: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
+    queues: list[dict[str, Any]] = []
     for name in sorted(exchanges):
         entry_data = exchanges[name]
+        if scoped and not ax.in_scope_edges(entry_data):
+            continue
         if routing_key and not ax.has_key_containing(entry_data, routing_key):
             continue
-        row = ax.render(name, entry_data)
+        row = ax.render(name, entry_data, scoped=scoped)
+        if scan.incomplete and row["status"] != ax.MATCHED:
+            # A repo that was not read could hold the missing publisher or listener.
+            row["status_confirmed"] = False
+        if ax.is_queue(entry_data):
+            # A name only used as a queue is not an exchange: no exchange status, no count.
+            queues.append(row)
+            continue
         counts[row["status"]] = counts.get(row["status"], 0) + 1
         if status and row["status"] != status:
             continue
@@ -865,7 +990,7 @@ def _amqp_exchange_list(
             "cross_repo_requests_tool", origin="amqp", mode="exchange_list",
             repos=sorted(repos) if repos else None, routing_key=routing_key, status=status,
         ),
-        stamp=content_stamp([rows, skipped]),
+        stamp=content_stamp([rows, scan.skipped]),
     )
     ordered = ", ".join(f"{counts[s]} {s}" for s in ax.LIST_STATUSES if s in counts)
     result: dict[str, Any] = {
@@ -873,26 +998,42 @@ def _amqp_exchange_list(
         "summary": (
             f"{sum(counts.values())} AMQP exchange(s)"
             + (f" with a key containing '{_sanitize_name(routing_key)}'" if routing_key else "")
-            + f" across {len(selected)} repo(s)"
+            + scan.coverage(len(selected), scoped)
             + (f": {ordered}" if ordered else "")
+            + (f"; {len(queues)} queue name(s) listed apart (see queues)" if queues else "")
             + shown_range(page)
         ),
         "origin": "amqp",
         "results": page.items,
         "counts": counts,
         "total": page.total,
-        "truncated": page.truncated or bool(skipped),
-        "repos_searched": len(selected) - len(skipped),
-        "unreadable": unreadable,
+        "truncated": page.truncated or bool(scan.skipped),
+        "repos_searched": len(selected) - len(scan.skipped_in_scope),
+        "repos_read": scan.searched,
+        "unreadable": scan.unreadable,
+        "status_basis": "partial" if scan.incomplete else "all_repos",
         **page.fields(),
     }
-    if without_amqp:
-        result["repos_without_amqp"] = _bounded(
-            without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+    if scan.skipped:
+        result["truncated_reason"] = (
+            f"time budget spent, {len(scan.skipped)} of {scan.total} repo(s) not read "
+            "(see skipped_repos); statuses and counts leave them out"
+        )
+    if scoped:
+        result["scoped_to"] = _bounded(
+            [_sanitize_name(_repo_label(e)) for e in selected], _MAX_ECHOED_NAMES,
+            _MAX_ECHOED_NAMES,
         )[0]
-        result["repos_without_amqp_total"] = len(without_amqp)
-    if skipped:
-        result["skipped_repos"] = skipped
+    if queues and not status:
+        result["queues"] = queues[:_MAX_QUEUE_ROWS]
+        result["queues_total"] = len(queues)
+    if scan.without_amqp:
+        result["repos_without_amqp"] = _bounded(
+            scan.without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+        )[0]
+        result["repos_without_amqp_total"] = len(scan.without_amqp)
+    if scan.skipped:
+        result["skipped_repos"] = scan.skipped
     if unknown_shown:
         result["unknown"] = unknown_shown
     return result
@@ -911,9 +1052,12 @@ def _amqp_links(
     ``exchange`` is required (``service``); ``routing_key`` (``route``) keeps the rows linked
     to that key by the rules of :func:`~code_review_graph.amqp_join.link_kind`: a listener's
     ``binding_key`` is the pattern for a publisher's key, and for a publisher row the key given
-    is the pattern. Read-only; the graphs are opened read-only, one at a time, inside the
-    call budget (repos left over are named in ``skipped_repos``). The rows are paged like those
-    of the other origins: ``max_results`` is the page size and ``next_cursor`` the next page.
+    is the pattern. Read-only; the graphs are opened read-only inside the call budget (repos
+    left over are named in ``skipped_repos`` and the summary says how many). The rows are paged
+    like those of the other origins: ``max_results`` is the page size and ``next_cursor`` the
+    next page. ``repos`` chooses whose rows are listed; ``exchange_status`` and
+    ``exchange_counts`` still cover every repo (``scoped_to`` names the scope), and
+    ``exchange_status_confirmed`` is false when unread repos could change it.
     """
     from ..registry import Registry
 
@@ -931,34 +1075,19 @@ def _amqp_links(
     if repos:
         selected, unknown, _ambiguous = _select_repos(all_repos, repos)
         unknown_shown, _total, _cut = _echoed(unknown)
-    budget = cross_repo_budget_seconds()
-    started = _now()
+    scoped = bool(repos)
+    scan = _amqp_scan(all_repos, selected, scoped, channel)
     rows: list[dict[str, Any]] = []
-    skipped: list[str] = []
-    unreadable: list[str] = []
-    without_amqp: list[str] = []
     counts: dict[str, int] = {}
-    for entry in selected:
-        label = _sanitize_name(_repo_label(entry))
-        if budget and _now() - started > budget:
-            skipped.append(label)
+    overall = {"publisher": 0, "listener": 0}
+    paths = {_sanitize_name(_repo_label(e)): Path(e["path"]) for e in all_repos}
+    for label, in_scope, amap in scan.loaded:
+        found = amap.get(channel, [])
+        for edge in found:
+            overall[edge["role"]] += 1
+        if not in_scope:
             continue
-        store = tl.open_store(entry)
-        if store is None:
-            unreadable.append(label)
-            continue
-        try:
-            if not aj.has_amqp_edges(store):
-                without_amqp.append(label)
-                continue
-            found = list(aj.read_channel_edges(store, channel))
-        except (sqlite3.Error, GraphStoreError) as exc:
-            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
-            unreadable.append(label)
-            continue
-        finally:
-            store.close()
-        root = Path(entry["path"])
+        root = paths.get(label, Path("."))
         for edge in found:
             if routing_key:
                 if edge["role"] == "listener":
@@ -981,6 +1110,8 @@ def _amqp_links(
             for key in ("routing_key", "binding_key", "queue"):
                 if isinstance(edge.get(key), str) and edge[key]:
                     row[key] = _sanitize_name(edge[key])
+            if edge.get("kind") == aj.KIND_QUEUE:
+                row["kind"] = aj.KIND_QUEUE
             if how:
                 row["matched_via"] = how
             rows.append(row)
@@ -991,7 +1122,7 @@ def _amqp_links(
             repos=sorted(repos) if repos else None,
             exchange=exchange, routing_key=routing_key, status=status,
         ),
-        stamp=content_stamp([rows, skipped]),
+        stamp=content_stamp([rows, scan.skipped]),
     )
     shown, total = page.items, page.total
     result: dict[str, Any] = {
@@ -1000,25 +1131,43 @@ def _amqp_links(
             f"{total} AMQP publisher/listener row(s) for exchange "
             f"'{_sanitize_name(channel)}'"
             + (f" linked to key '{_sanitize_name(routing_key)}'" if routing_key else "")
-            + f" across {len(selected)} repo(s)"
+            + scan.coverage(len(selected), scoped)
             + shown_range(page)
         ),
         "origin": "amqp",
         "results": shown,
         "counts": counts,
         "total": total,
-        "truncated": page.truncated or bool(skipped),
-        "repos_searched": len(selected) - len(skipped),
-        "unreadable": unreadable,
+        "truncated": page.truncated or bool(scan.skipped),
+        "repos_searched": len(selected) - len(scan.skipped_in_scope),
+        "repos_read": scan.searched,
+        "unreadable": scan.unreadable,
         **page.fields(),
     }
-    if without_amqp:
-        result["repos_without_amqp"] = _bounded(
-            without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+    if overall["publisher"] or overall["listener"]:
+        result["exchange_counts"] = overall
+        result["exchange_status"] = ax.exchange_status(overall["publisher"], overall["listener"])
+        result["exchange_status_confirmed"] = (
+            not scan.incomplete or result["exchange_status"] == ax.MATCHED
+        )
+    elif scan.incomplete:
+        result["exchange_status_confirmed"] = False
+    if scoped:
+        result["scoped_to"] = _bounded(
+            [_sanitize_name(_repo_label(e)) for e in selected], _MAX_ECHOED_NAMES,
+            _MAX_ECHOED_NAMES,
         )[0]
-        result["repos_without_amqp_total"] = len(without_amqp)
-    if skipped:
-        result["skipped_repos"] = skipped
+    if scan.skipped:
+        result["truncated_reason"] = (
+            f"time budget spent, {len(scan.skipped)} of {scan.total} repo(s) not read "
+            "(see skipped_repos); rows and exchange_status leave them out"
+        )
+        result["skipped_repos"] = scan.skipped
+    if scan.without_amqp:
+        result["repos_without_amqp"] = _bounded(
+            scan.without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+        )[0]
+        result["repos_without_amqp_total"] = len(scan.without_amqp)
     if unknown_shown:
         result["unknown"] = unknown_shown
     return result
@@ -1361,14 +1510,45 @@ def _infra_links(
         result["skipped_repos"] = skipped
     if unknown_shown:
         result["unknown"] = unknown_shown
+    reasons: list[str] = []
+    if page.truncated:
+        reasons.append("rows cut at the page size (see next_cursor)")
+    if skipped:
+        reasons.append(
+            f"time budget spent, {len(skipped)} repo(s) not read (see skipped_repos)"
+        )
     phase = _now()
-    if infrastructure and page.offset == 0:
-        _attach_infrastructure(result, all_repos, selected, budget)
+    # A filter narrows the answer to some repos; the block then describes those, not every
+    # selected repo (which would present unrelated repos as part of the result).
+    scoped = bool(target_repo or target_path or status)
+    if infrastructure and scoped:
+        owners = {
+            r[key] for r in rows for key in ("repo", "target_repo", "module_repo", "client_repo")
+            if isinstance(r.get(key), str)
+        }
+        described = [
+            e for e in all_repos if _sanitize_name(_repo_label(e)) in {
+                _sanitize_name(o) for o in owners
+            }
+        ]
+    else:
+        described = selected
+    if infrastructure and scoped and not described:
+        result["infrastructure_note"] = _INFRASTRUCTURE_NO_MATCHES
+    elif infrastructure and page.offset == 0:
+        _attach_infrastructure(result, all_repos, described, budget)
+        if result["infrastructure"]["truncated"]:
+            reasons.append(
+                "the infrastructure block stopped at its repo cap or the time budget "
+                "(see infrastructure.truncated, repos_not_checked)"
+            )
     elif infrastructure:
         # The block describes the selected repos, not the rows, so a continuation page leaves
         # it out (the first page has it) instead of rebuilding it for every page.
         result["infrastructure_note"] = _INFRASTRUCTURE_FIRST_PAGE_ONLY
     timings["infrastructure"] = _now() - phase
+    if result["truncated"] and reasons:
+        result["truncated_reason"] = "; ".join(reasons)
     elapsed = _now() - started
     # The server does not configure INFO logging, so a slow call is logged as a warning.
     logger.log(
@@ -1908,7 +2088,12 @@ def cross_repo_requests_func(
             "status": "ok",
             "summary": (
                 (
-                    f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
+                    # A filtered request names its origin, also when nothing matched.
+                    f"{total} JS/TS call(s) (origin=js) in {len(searched)} repo(s)"
+                    if origin == "js"
+                    else f"{total} Feign call(s) (origin=feign) in {len(searched)} repo(s)"
+                    if origin == "feign"
+                    else f"{total} call(s) ({origin_counts.get('feign', 0)} Feign, "
                     f"{origin_counts.get('js', 0)} JS/TS) in {len(searched)} repo(s)"
                     if origin_counts.get("js")
                     else f"{total} Feign call(s) in {len(searched)} repo(s)"
@@ -1917,6 +2102,7 @@ def cross_repo_requests_func(
                 + shown_range(page)
                 + notes
             ),
+            "origin": origin or "all",
             "results": results,
             "counts": counts,
             "total": total,
