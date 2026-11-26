@@ -179,6 +179,29 @@ def vendor_of_service(service: str) -> Optional[str]:
     return None
 
 
+#: ``no_target_reason`` values of a Feign row with status ``no_target_repo``.
+REASON_EXTERNAL_VENDOR = "external_vendor"
+REASON_REPO_NOT_REGISTERED = "repo_not_registered"
+REASON_TARGET_UNREADABLE = "target_unreadable"
+NO_TARGET_REASONS = (
+    REASON_EXTERNAL_VENDOR, REASON_REPO_NOT_REGISTERED, REASON_TARGET_UNREADABLE,
+)
+
+
+def no_target_reason(service: Optional[str], resolution_reason: Optional[str]) -> str:
+    """Why a Feign call reached no repo: a known vendor, an unregistered repo, or unreadable.
+
+    ``resolution_reason`` is the ``reason`` the join gave the row. Whether the name belongs to
+    an internal service cannot be known offline, so any name that is not a known vendor and
+    that no registered repo carries is ``repo_not_registered``.
+    """
+    if resolution_reason == REASON_TARGET_UNREADABLE:
+        return REASON_TARGET_UNREADABLE
+    if service and vendor_of_service(service):
+        return REASON_EXTERNAL_VENDOR
+    return REASON_REPO_NOT_REGISTERED
+
+
 # ---------------------------------------------------------------------------
 # Reading one graph
 # ---------------------------------------------------------------------------

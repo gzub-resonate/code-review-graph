@@ -260,6 +260,8 @@ def test_every_status_and_reason(world):
     assert rows[6]["status"] == "ambiguous" and rows[6]["candidates_total"] == 2
     assert rows[7]["status"] == "no_target_repo"
     assert rows[7]["reason"] == "service_not_registered"
+    assert rows[7]["no_target_reason"] == "repo_not_registered"
+    assert result["counts_by_reason"] == {"repo_not_registered": 1}
     assert rows[8]["reason"] == "service_unresolved"
     assert rows[9]["reason"] == "url_literal"
     assert rows[11]["reason"] == "url_from_argument"
@@ -524,3 +526,53 @@ def test_exact_match_wins_over_a_case_variant():
 
 def test_case_mismatch_is_listed_among_the_statuses():
     assert fl.CASE_MISMATCH in fl.STATUSES
+
+
+@pytest.mark.parametrize(
+    ("service", "reason", "expected"),
+    [
+        ("Auth0", "service_not_registered", "external_vendor"),
+        ("auth0api", "service_not_registered", "external_vendor"),
+        ("salesforce", "service_not_registered", "external_vendor"),
+        ("ship", "service_not_registered", "repo_not_registered"),
+        ("constellation-ai-agents", "service_not_registered", "repo_not_registered"),
+        ("salesforce", "target_unreadable", "target_unreadable"),
+        (None, "service_not_registered", "repo_not_registered"),
+    ],
+)
+def test_no_target_reason_rules(service, reason, expected):
+    from code_review_graph.external_hosts import no_target_reason
+
+    assert no_target_reason(service, reason) == expected
+
+
+def test_no_target_reason_rows_counts_and_status_filter(tmp_path, registry):
+    web = (tmp_path / "web").resolve()
+    make_repo(tmp_path, registry, "web", nodes=[
+        _client(web, 1, "POST", "/oauth/token", service="Auth0"),
+        _client(web, 2, "POST", "/services/oauth2/token", service="salesforce"),
+        _client(web, 3, "GET", "/v1/x", service="internal-thing"),
+    ])
+    result = cross_repo_requests_func(repos=["web"])
+    rows = {r["client_line"]: r for r in result["results"]}
+    assert rows[1]["no_target_reason"] == "external_vendor"
+    assert rows[2]["no_target_reason"] == "external_vendor"
+    assert rows[3]["no_target_reason"] == "repo_not_registered"
+    assert all(r["status"] == "no_target_repo" for r in rows.values())
+    assert result["counts"] == {"no_target_repo": 3}
+    assert result["counts_by_reason"] == {"external_vendor": 2, "repo_not_registered": 1}
+
+    vendors = cross_repo_requests_func(repos=["web"], status="external_vendor")
+    assert vendors["total"] == 2
+    assert vendors["counts_by_reason"] == {"external_vendor": 2}
+    assert {r["client_line"] for r in vendors["results"]} == {1, 2}
+    internal = cross_repo_requests_func(repos=["web"], status="repo_not_registered")
+    assert [r["client_line"] for r in internal["results"]] == [3]
+    assert cross_repo_requests_func(repos=["web"], status="no_target_repo")["total"] == 3
+
+
+def test_matched_rows_have_no_no_target_reason(world):
+    result = cross_repo_requests_func(repos=["web"])
+    for row in result["results"]:
+        if row["status"] != "no_target_repo":
+            assert "no_target_reason" not in row
