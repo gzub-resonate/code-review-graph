@@ -1378,6 +1378,19 @@ limit). When it is spent no further client repo is read; those left are listed i
 them out. A cursor made on such a partial answer is refused unless the same repos are
 skipped again.
 
+Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk` and `amqp` origins return at most
+`max_results` rows (at most 100) per call. When rows remain, `truncated` is set and
+`next_cursor` is returned; pass it back as `cursor`, with the same other arguments, to read
+the next page. `limit` is not used by these origins. A page after the first has `offset`
+and names its range in `summary`, for example `showing 51-100 of 133`. A cursor is refused when the
+query, the repos left out by the time budget, or the rows themselves changed since it was
+made; call again without a cursor to start over. A call that takes
+`CRG_CROSS_REPO_SLOW_SECONDS` (default 10) or longer logs its timing line as a warning.
+
+The `infrastructure` block covers at most 20 selected repos. When it stops early,
+`infrastructure.repos_not_checked` names the repos left out (up to 50; the full count is
+`repos_not_checked_total`); call again with `repos` set to them to read the rest.
+
 Speed. The `stepfunction` and `awssdk` origins, and the service-identity facts the Feign join
 reads from every repo, are read on up to `CRG_CROSS_REPO_WORKERS` threads (default 4, `1` = one at
 a time, at most 32), each on its own graph connection. What is read about a repo is kept while

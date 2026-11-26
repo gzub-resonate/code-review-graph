@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -689,12 +690,14 @@ def _terraform_links(
     module_path: str | None,
     status: str | None,
     max_results: int,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="terraform"`` branch: remote module sources joined to registered repos."""
     return _infra_links(
         "terraform", "remote Terraform module source(s)", tl.STATUSES, tl.read_module_edges,
         tl.module_folder_exists, tl.resolve_links, "module_repo", "module_path",
         repos, module_repo, module_path, status, max_results, infrastructure=True,
+        cursor=cursor,
     )
 
 
@@ -704,12 +707,13 @@ def _workflow_links(
     target_path: str | None,
     status: str | None,
     max_results: int,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="workflow"`` branch: GitHub Actions ``uses`` joined to registered repos."""
     return _infra_links(
         "workflow", "GitHub Actions reference(s)", wl.STATUSES, wl.read_uses_edges,
         wl.path_exists, wl.resolve_links, "target_repo", "target_path",
-        repos, target_repo, target_path, status, max_results,
+        repos, target_repo, target_path, status, max_results, cursor=cursor,
     )
 
 
@@ -719,6 +723,7 @@ def _stepfunction_links(
     target: str | None,
     status: str | None,
     max_results: int,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="stepfunction"`` branch: what state machines call, joined to its owner."""
     definitions = sl.Definitions()
@@ -726,7 +731,7 @@ def _stepfunction_links(
         "stepfunction", "Step Functions target(s)", sl.STATUSES, sl.read_target_edges,
         definitions.defines, sl.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
-        edge_filter=_edge_target_filter, prefetch=definitions.prefetch,
+        edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
     )
     for row in result["results"]:
         for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
@@ -743,6 +748,7 @@ def _awssdk_links(
     target: str | None,
     status: str | None,
     max_results: int,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="awssdk"`` branch: AWS resources application code calls, joined to owners."""
     definitions = sl.Definitions()
@@ -751,7 +757,7 @@ def _awssdk_links(
         definitions.defines, al.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         read_context=al.read_declare_edges,
-        edge_filter=_edge_target_filter, prefetch=definitions.prefetch,
+        edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
     )
     for row in result["results"]:
         # Every string here was read from a repository's files: none is passed on as written.
@@ -774,6 +780,7 @@ def _amqp_links(
     routing_key: str | None,
     status: str | None,
     max_results: int,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="amqp"`` branch: publishers and listeners of one exchange, across repos.
 
@@ -781,7 +788,8 @@ def _amqp_links(
     to that key by the rules of :func:`~code_review_graph.amqp_join.link_kind`: a listener's
     ``binding_key`` is the pattern for a publisher's key, and for a publisher row the key given
     is the pattern. Read-only; the graphs are opened read-only, one at a time, inside the
-    call budget (repos left over are named in ``skipped_repos``).
+    call budget (repos left over are named in ``skipped_repos``). The rows are paged like those
+    of the other origins: ``max_results`` is the page size and ``next_cursor`` the next page.
     """
     from ..registry import Registry
 
@@ -852,7 +860,16 @@ def _amqp_links(
             if how:
                 row["matched_via"] = how
             rows.append(row)
-    shown, total, truncated = _bounded(rows, max_results, 100)
+    page = paginate(
+        rows, max_results, 100, cursor,
+        scope=make_scope(
+            "cross_repo_requests_tool", origin="amqp",
+            repos=sorted(repos) if repos else None,
+            exchange=exchange, routing_key=routing_key, status=status,
+        ),
+        stamp=content_stamp([rows, skipped]),
+    )
+    shown, total = page.items, page.total
     result: dict[str, Any] = {
         "status": "ok",
         "summary": (
@@ -860,14 +877,16 @@ def _amqp_links(
             f"'{_sanitize_name(channel)}'"
             + (f" linked to key '{_sanitize_name(routing_key)}'" if routing_key else "")
             + f" across {len(selected)} repo(s)"
+            + shown_range(page)
         ),
         "origin": "amqp",
         "results": shown,
         "counts": counts,
         "total": total,
-        "truncated": truncated or bool(skipped),
+        "truncated": page.truncated or bool(skipped),
         "repos_searched": len(selected) - len(skipped),
         "unreadable": unreadable,
+        **page.fields(),
     }
     if without_amqp:
         result["repos_without_amqp"] = _bounded(
@@ -886,6 +905,25 @@ def _relative_to(file_path: str, root: Path) -> str:
         return str(Path(file_path).relative_to(root))
     except ValueError:
         return file_path
+
+
+SLOW_CALL_ENV = "CRG_CROSS_REPO_SLOW_SECONDS"
+DEFAULT_SLOW_CALL_SECONDS = 10.0
+
+
+def _slow_call_seconds() -> float:
+    """Seconds from which a cross-repo call is logged as a warning (default 10).
+
+    ``0`` logs every call as a warning; an unreadable or negative value uses the default.
+    """
+    raw = os.environ.get(SLOW_CALL_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_SLOW_CALL_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_SLOW_CALL_SECONDS
+    return value if value >= 0 else DEFAULT_SLOW_CALL_SECONDS
 
 
 def _edge_target_filter(
@@ -928,6 +966,7 @@ def _infra_links(
     read_context: Any = None,
     edge_filter: Any = None,
     prefetch: Any = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Shared body of the ``terraform``, ``workflow``, ``stepfunction`` and ``awssdk`` origins.
 
@@ -940,6 +979,10 @@ def _infra_links(
     ``(target_name, target) -> (edge -> bool)``; it lets ``resolve`` skip the owner lookup of an
     edge the two filters would drop. *prefetch*, when given, is ``(all repos, workers) -> None``
     and reads ahead what ``exists_in_repo`` needs from every repo.
+
+    The rows are paged: *max_results* (at most 100) is the page size, and a cut list carries
+    ``next_cursor``, which returns the next page when passed back as *cursor*. A cursor is
+    tied to the query and to the rows it was made on, so it is refused when either changed.
     """
     from ..registry import Registry
 
@@ -1066,21 +1109,32 @@ def _infra_links(
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     if status:
         rows = [r for r in rows if r["status"] == status]
-    shown, total, truncated = _bounded(rows, max_results, 100)
+    page = paginate(
+        rows, max_results, 100, cursor,
+        scope=make_scope(
+            "cross_repo_requests_tool", origin=origin,
+            repos=sorted(repos) if repos else None,
+            target_repo=target_repo, target_path=target_path, status=status,
+        ),
+        # The repos left out of a partial answer are part of the stamp, as for Feign.
+        stamp=content_stamp([rows, skipped]),
+    )
+    shown, total = page.items, page.total
     for r in shown:
         for key in ("repo", "file", repo_key, path_key, "ref"):
             if isinstance(r.get(key), str):
                 r[key] = _sanitize_name(r[key])
     result: dict[str, Any] = {
         "status": "ok",
-        "summary": f"{total} {noun} across {len(selected)} repo(s)",
+        "summary": f"{total} {noun} across {len(selected)} repo(s)" + shown_range(page),
         "origin": origin,
         "results": shown,
         "counts": counts,
         "total": total,
-        "truncated": truncated or bool(skipped),
+        "truncated": page.truncated or bool(skipped),
         "repos_searched": len(selected) - len(skipped),
         "unreadable": unreadable,
+        **page.fields(),
     }
     if skipped:
         result["skipped_repos"] = skipped
@@ -1090,11 +1144,14 @@ def _infra_links(
     if infrastructure:
         _attach_infrastructure(result, all_repos, selected, budget)
     timings["infrastructure"] = _now() - phase
-    logger.info(
+    elapsed = _now() - started
+    # The server does not configure INFO logging, so a slow call is logged as a warning.
+    logger.log(
+        logging.WARNING if elapsed >= _slow_call_seconds() else logging.INFO,
         "cross-repo %s: %d selected repo(s), %d worker(s), %s, total %.1fs",
         origin, len(selected), workers,
         ", ".join(f"{name} {seconds:.1f}s" for name, seconds in timings.items()),
-        _now() - started,
+        elapsed,
     )
     return result
 
@@ -1191,7 +1248,8 @@ def cross_repo_requests_func(
     ``matched_via`` is ``exact_key``, ``topic_pattern`` or ``key_unknown``. The exchange type is
     never inferred. It can only find links once both repos carry the exchange edges: a repo
     indexed before they existed is named in ``repos_without_amqp`` and shows nothing until
-    rebuilt. It does not use ``limit``, ``cursor`` or the infrastructure summary.
+    rebuilt. It pages like the other origins (``max_results`` is the page size) and does not
+    use ``limit`` or the infrastructure summary.
 
     A Feign service name that is not a registered repo name resolves through the optional
     alias file ``CRG_SERVICE_ALIASES_FILE`` (``{"alias": "repo", "prefix:p-": "repo"}``) or
@@ -1214,6 +1272,9 @@ def cross_repo_requests_func(
         ``unreadable`` (repos whose graph could not be read), plus
         ``unknown``/``ambiguous`` when ``repos`` was given.
         When rows remain, ``next_cursor`` is the ``cursor`` that returns the next page.
+        The ``terraform``, ``workflow``, ``stepfunction``, ``awssdk`` and ``amqp`` origins page the
+        same way: ``max_results`` (at most 100) is the page size, ``limit`` is not used, and
+        the cursor is refused when the query or the rows changed.
     """
     from ..registry import Registry
 
@@ -1227,15 +1288,15 @@ def cross_repo_requests_func(
             "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp"
         )
     if origin == "amqp":
-        return _amqp_links(repos, service, route, status, max_results)
+        return _amqp_links(repos, service, route, status, max_results, cursor)
     if origin == "awssdk":
-        return _awssdk_links(repos, service, route, status, max_results)
+        return _awssdk_links(repos, service, route, status, max_results, cursor)
     if origin == "stepfunction":
-        return _stepfunction_links(repos, service, route, status, max_results)
+        return _stepfunction_links(repos, service, route, status, max_results, cursor)
     if origin == "terraform":
-        return _terraform_links(repos, service, route, status, max_results)
+        return _terraform_links(repos, service, route, status, max_results, cursor)
     if origin == "workflow":
-        return _workflow_links(repos, service, route, status, max_results)
+        return _workflow_links(repos, service, route, status, max_results, cursor)
 
     try:
         all_repos = Registry().list_repos()
