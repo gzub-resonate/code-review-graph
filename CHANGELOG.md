@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `cross_repo_requests_tool` is faster over a large registry. The `stepfunction` and `awssdk`
+  joins, and the service-identity facts the Feign join reads, use up to `CRG_CROSS_REPO_WORKERS`
+  threads (default 4) instead of one repo after another, and keep what they read about a repo (its
+  definitions, declarations and identity facts) while its graph file is unchanged, so a server reads
+  a repo again only after a rebuild of it. `CRG_REPO_MEMO_ENTRIES` (default 4096, `0` = off) bounds that cache. A `service` or
+  `route` filter on `stepfunction` and `awssdk` skips the owner lookup of the rows it drops; the rows
+  returned are unchanged. Each call logs the seconds its phases took. No graph rebuild is needed,
+  and the index fingerprint is unchanged.
+
 ### Added
 
 - AMQP exchange queries, at query time (no graph rebuild; the links need graphs whose publisher and

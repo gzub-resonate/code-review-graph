@@ -27,6 +27,21 @@ for _info in pkgutil.iter_modules(code_review_graph.tools.__path__):
 
 
 @pytest.fixture(autouse=True)
+def fresh_repo_memo():
+    """Start and end every test with an empty cross-repo cache.
+
+    The cache keeps what the joins read about a repo while its graph file looks the same. A
+    test that rewrites a small graph quickly can leave the same timestamp and size behind, so
+    nothing carries over from one test to the next.
+    """
+    from code_review_graph.repo_cache import MEMO
+
+    MEMO.clear()
+    yield
+    MEMO.clear()
+
+
+@pytest.fixture(autouse=True)
 def isolated_crg_home(tmp_path_factory, monkeypatch):
     """Redirect the per-user state directory into a temporary directory.
 

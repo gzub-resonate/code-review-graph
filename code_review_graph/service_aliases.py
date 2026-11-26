@@ -46,6 +46,7 @@ from .aws_config_names import _Values
 from .aws_terraform_wiring import _literal, top_attrs
 from .errors import GraphStoreError
 from .graph import GraphStore
+from .repo_cache import MEMO, parallel_map
 
 try:  # PyYAML is a hard dependency of the package; guard anyway
     import yaml as _yaml
@@ -378,8 +379,21 @@ class FactsCache:
 
     def get(self, index: int) -> RepoFacts:
         if index not in self._facts:
-            self._facts[index] = read_repo_facts(self.repos[index])
+            self._facts[index] = self._load(index)
         return self._facts[index]
+
+    def _load(self, index: int) -> RepoFacts:
+        entry = self.repos[index]
+        # Kept while the repo's graph is the same file; a failed read is not kept.
+        return MEMO.get(
+            "facts", entry, lambda: read_repo_facts(entry), cacheable=lambda f: f.readable,
+        )
+
+    def prefetch(self, indexes: Sequence[int], workers: int) -> None:
+        """Read the facts of *indexes* on up to *workers* threads, ahead of ``get``."""
+        todo = [i for i in indexes if i not in self._facts]
+        for index, facts in zip(todo, parallel_map(self._load, todo, workers)):
+            self._facts[index] = facts
 
 
 # -- The identity index --------------------------------------------------------------------------

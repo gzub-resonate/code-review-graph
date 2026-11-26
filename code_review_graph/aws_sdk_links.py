@@ -301,8 +301,14 @@ def resolve_links(
     all_repos: list[dict[str, Any]],
     defined_in_repo: Any,
     context_declarations: dict[int, list[dict[str, Any]]] | None = None,
+    keep: Any = None,
 ) -> list[dict[str, Any]]:
     """Resolve each call to the registered repo that defines its target.
+
+    *keep*, when given, is ``edge -> bool``: an edge it rejects gets no row and no owner
+    lookup. It is applied only when rows are built; the ``declare`` and ``notify`` facts that
+    other rows borrow are still read from every edge, so a kept row is the one an unfiltered
+    call would give.
 
     *defined_in_repo* is ``(repo index, (service, kind, name)) -> bool`` for the services the
     state machine join knows. *context_declarations* are the Terraform ``declare`` edges of
@@ -360,6 +366,8 @@ def resolve_links(
     for index, edges in edges_by_repo.items():
         source_path = Path(all_repos[index]["path"])
         for edge in edges:
+            if keep is not None and not keep(edge):
+                continue
             matched_profiles: list[str] = []
             names = edge["extra"].get("resolved_names")
             names = names if isinstance(names, dict) and edge["sdk"] != "terraform" else {}
