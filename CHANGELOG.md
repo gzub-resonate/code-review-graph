@@ -4,6 +4,11 @@
 
 ### Added
 
+- `query_graph_tool` `children_of` on a Step Functions definition file (`*.asl.json`) now lists the
+  states of its machine, nested Parallel and Map states included, with a `note` saying so; it used
+  to return only the machine node, whose qualified name (`<file>::<machine>`) had to be guessed. A
+  file with several machines lists them with `state_count`. Other files and `<file>::<machine>`
+  are unchanged. Query-time only.
 - `query_graph_tool` `next_states_of` and `previous_states_of` with `detail_level="minimal"` now
   return a compact `edges` list (`target`, `via`, `condition`, `line`) beside the names, so a
   Choice branch's test is no longer lost; it stays about a third of the standard reply.

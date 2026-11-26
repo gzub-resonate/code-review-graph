@@ -582,7 +582,9 @@ strict: bool = False             # handlers_of / references_to: keep the "ambigu
 **Step Functions patterns.** `next_states_of` and `previous_states_of` take a state. With
 `detail_level="minimal"` the names come with a compact `edges` list, one `{target, via, condition,
 line}` per state (`conditions` when several Choice rules reach it); `standard` keeps the full edge
-rows.
+rows. `children_of` on a `*.asl.json` file lists the states of its machine (nested ones too, in
+file order; several machines are listed with `state_count`) and says so in `note`;
+`children_of` on `<file>::<machine>` still lists the top-level states.
 
 **`endpoints`** lists `Endpoint` nodes as one line each,
 `METHOD route owner file:line dir` (space separated, `dir` is `in`, `out` or `sim`), sorted

@@ -1387,6 +1387,24 @@ def _attach_resolution_notes(
         response["note"] = java_importers["note"]
 
 
+def _asl_states_of(store: GraphStore, machine: GraphNode) -> list[GraphNode]:
+    """Every state of a machine in file order: top-level, and inside Parallel and Map."""
+    states: list[GraphNode] = []
+    pending = [machine.qualified_name]
+    seen = set(pending)
+    while pending:
+        for edge in store.iter_edges_by_source(pending.pop()):
+            if edge.kind != "CONTAINS" or edge.target_qualified in seen:
+                continue
+            seen.add(edge.target_qualified)
+            child = store.get_node(edge.target_qualified)
+            if child is not None and child.kind == "Function":
+                states.append(child)
+                pending.append(child.qualified_name)
+    states.sort(key=lambda n: (n.line_start or 0, n.name))
+    return states
+
+
 def _state_label(qualified: str) -> str:
     """``<machine>/<state path>`` of a state's qualified name, without the file path."""
     return qualified.split("::", 1)[1] if "::" in qualified else qualified
@@ -1481,6 +1499,9 @@ def query_graph(
         ``next_states_of`` and ``previous_states_of`` in minimal mode add a compact ``edges`` list
         (``target``, ``via``, ``condition``, ``line``).
 
+        ``children_of`` on a Step Functions ``*.asl.json`` file lists the states of its machine
+        (nested ones included) and adds a ``note``.
+
         ``tests_for`` also returns ``tests_direct`` and ``tests_inferred``: how many of the
         ``result_count`` tests are traced links and how many carry ``inferred_by`` (guessed
         from a callee's test, an ambiguous call or a naming convention).
@@ -1554,6 +1575,7 @@ def query_graph(
         edges_out: list[dict[str, Any]] = []
         total_results = 0
         handler_as_target = False
+        children_note: str | None = None
         # Results matched by a name or an unpinned call, not a traced edge.
         inferred_results = 0
         # (dedupe key, row, edge) for the call-site patterns, collected before
@@ -2069,11 +2091,37 @@ def query_graph(
                         }, e)
 
         elif pattern == "children_of":
+            machines: list[GraphNode] = []
             for e in store.iter_edges_by_source(qn):
                 if e.kind == "CONTAINS":
                     child = store.get_node(e.target_qualified)
                     if child:
-                        add_result(node_to_dict(child))
+                        if node.kind == "File" and node.language == "asl":
+                            machines.append(child)
+                        else:
+                            add_result(node_to_dict(child))
+            if machines:
+                # A state machine file holds one machine, and the machine holds the
+                # states: answer with the states, nested ones included.
+                machines.sort(key=lambda m: m.line_start or 0)
+                if len(machines) == 1:
+                    states = _asl_states_of(store, machines[0])
+                    for state in states:
+                        add_result(node_to_dict(state))
+                    children_note = (
+                        f"{len(states)} state(s) of machine '{_sanitize_name(machines[0].name)}'; "
+                        f"children_of on '{_sanitize_name(machines[0].qualified_name)}' "
+                        "lists its top-level states only."
+                    )
+                else:
+                    for machine in machines:
+                        row = node_to_dict(machine)
+                        row["state_count"] = len(_asl_states_of(store, machine))
+                        add_result(row)
+                    children_note = (
+                        f"{len(machines)} state machines in this file: run children_of "
+                        "on a machine's qualified_name to list its states."
+                    )
 
         elif pattern == "tests_for":
             # Keep the normal sanitized node response while adding the
@@ -2529,6 +2577,8 @@ def query_graph(
             _attach_resolution_notes(
                 minimal_response, ambiguity, route_endpoints, java_importers,
             )
+            if children_note:
+                minimal_response["note"] = children_note
             return minimal_response
 
         response: dict[str, Any] = {
@@ -2552,6 +2602,8 @@ def query_graph(
         if confidence:
             response["confidence"] = confidence
         _attach_resolution_notes(response, ambiguity, route_endpoints, java_importers)
+        if children_note:
+            response["note"] = children_note
         return response
     finally:
         store.close()
