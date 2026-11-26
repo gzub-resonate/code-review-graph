@@ -33,6 +33,8 @@ import time
 from starlette.middleware import Middleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .constants import env_float
+
 #: uvicorn configures this logger to stdout, which container platforms ship.
 logger = logging.getLogger("uvicorn.error")
 
@@ -49,10 +51,7 @@ _NOT_ACCEPTABLE = 406
 
 
 def _summary_interval() -> float:
-    try:
-        value = float(os.environ.get(PROBE_SUMMARY_ENV, ""))
-    except ValueError:
-        return _DEFAULT_PROBE_SUMMARY_SECONDS
+    value = env_float(PROBE_SUMMARY_ENV, _DEFAULT_PROBE_SUMMARY_SECONDS)
     return value if value >= 0 else _DEFAULT_PROBE_SUMMARY_SECONDS
 
 

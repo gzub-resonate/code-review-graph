@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
 
+from .constants import env_float
 from .errors import GraphStoreError
 
 logger = logging.getLogger(__name__)
@@ -67,12 +68,7 @@ def memo_entries() -> int:
 
 def single_flight_wait() -> float:
     """Seconds a waiter gives the computing call before it computes for itself."""
-    raw = os.environ.get(WAIT_ENV)
-    try:
-        value = float(raw) if raw is not None and raw.strip() else DEFAULT_WAIT_SECONDS
-    except ValueError:
-        logger.warning("Ignoring invalid %s=%r; using %s.", WAIT_ENV, raw, DEFAULT_WAIT_SECONDS)
-        return DEFAULT_WAIT_SECONDS
+    value = env_float(WAIT_ENV, DEFAULT_WAIT_SECONDS)
     return value if value >= 0 else DEFAULT_WAIT_SECONDS
 
 
