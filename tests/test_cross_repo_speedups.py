@@ -38,11 +38,15 @@ def graph_file(root: Path) -> Path:
     return root / ".code-review-graph" / "graph.db"
 
 
+_REBUILDS = iter(range(1, 10**6))
+
+
 def touch_graph(root: Path) -> None:
-    """Make the repo's graph file look rebuilt: a later modification time."""
-    path = graph_file(root)
-    later = path.stat().st_mtime_ns + 5_000_000_000
-    os.utime(path, ns=(later, later))
+    """Make the repo's graph really change: it was rebuilt (a newer build time is recorded)."""
+    from code_review_graph.graph import GraphStore
+
+    with GraphStore(graph_file(root)) as store:
+        store.set_metadata("last_updated", "2099-01-01T00:00:%06d" % next(_REBUILDS))
 
 
 @pytest.fixture
@@ -401,3 +405,65 @@ class TestAwsSdkJoin:
         second = cross_repo_requests_func(origin="awssdk", repos=["inventory-svc"])
         assert second == first
         assert facts == []
+
+
+class TestGraphStampIgnoresFileNoise:
+    """The stamp follows the graph, not the mtime or the ``-wal`` of its database file."""
+
+    def test_a_file_time_change_alone_keeps_the_stamp(self, world):
+        entry = {"path": str(world["machines"])}
+        first = graph_stamp(entry)
+        later = graph_file(world["machines"]).stat().st_mtime_ns + 7_000_000_000
+        os.utime(graph_file(world["machines"]), ns=(later, later))
+        assert graph_stamp(entry) == first
+
+    def test_a_wal_only_change_keeps_the_stamp(self, world):
+        import code_review_graph.repo_cache as rc
+        from code_review_graph.graph import GraphStore
+
+        entry = {"path": str(world["machines"])}
+        path = graph_file(world["machines"])
+        first = graph_stamp(entry)
+        before = rc._file_signature(path)
+        # A writer that changes nothing the graph holds still moves the WAL.
+        with GraphStore(path) as store:
+            store._conn.execute("INSERT INTO metadata (key, value) VALUES ('scratch', '1')")
+            store._conn.execute("DELETE FROM metadata WHERE key = 'scratch'")
+            assert rc._file_signature(path) != before
+            assert graph_stamp(entry) == first
+        assert graph_stamp(entry) == first
+
+    def test_a_real_graph_change_gives_a_new_stamp(self, world):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        entry = {"path": str(world["machines"])}
+        first = graph_stamp(entry)
+        touch_graph(world["machines"])
+        second = graph_stamp(entry)
+        assert second != first
+        with GraphStore(graph_file(world["machines"])) as store:
+            store.store_file_nodes_edges(
+                "/x/new.py",
+                [NodeInfo(kind="Function", name="fresh", file_path="/x/new.py",
+                          line_start=1, line_end=1, language="python")],
+                [],
+            )
+        assert graph_stamp(entry) not in (first, second)
+
+    def test_a_replaced_database_file_gives_a_new_stamp(self, world):
+        entry = {"path": str(world["machines"])}
+        first = graph_stamp(entry)
+        path = graph_file(world["machines"])
+        copy = path.with_name("graph.db.copy")
+        copy.write_bytes(path.read_bytes())
+        copy.replace(path)
+        assert graph_stamp(entry) != first
+
+    def test_a_unchanged_file_costs_no_database_open(self, world, monkeypatch):
+        import code_review_graph.repo_cache as rc
+
+        entry = {"path": str(world["machines"])}
+        graph_stamp(entry)
+        monkeypatch.setattr(rc, "_graph_marker", lambda p: pytest.fail("reopened"))
+        graph_stamp(entry)

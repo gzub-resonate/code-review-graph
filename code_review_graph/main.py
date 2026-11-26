@@ -2478,7 +2478,12 @@ def main(
     watch_store: GraphStore | None = None
     watch_thread: threading.Thread | None = None
     watch_stop = threading.Event()
+    warmer = None
     try:
+        if multi_repo:
+            from .cross_repo_warmup import start_warmup
+
+            warmer = start_warmup()
         if auto_watch and root is not None:
             from .postprocessing import run_post_processing
 
@@ -2531,6 +2536,8 @@ def main(
             raise ValueError(f"unsupported transport: {transport!r}")
     finally:
         try:
+            if warmer is not None:
+                warmer.stop()
             if watch_thread is not None:
                 watch_stop.set()
                 # watch() joins its debouncer before returning. A timed join

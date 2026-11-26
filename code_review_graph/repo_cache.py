@@ -46,7 +46,7 @@ R = TypeVar("R")
 #: What ``parallel_map_budget`` returns for an item it did not start because the time ran out.
 SKIPPED: Any = object()
 
-Stamp = tuple[tuple[int, int, int], ...]
+Stamp = tuple[tuple[Any, ...], ...]
 
 WAIT_ENV = "CRG_SINGLE_FLIGHT_WAIT_SECONDS"
 DEFAULT_WAIT_SECONDS = 240.0
@@ -172,27 +172,90 @@ class ResultCache:
             return len(self._data)
 
 
-def graph_stamp(entry: Mapping[str, Any]) -> Stamp | None:
-    """Identify the graph file of a registry entry as it is now, or ``None`` when unreadable.
+_STAMP_LOCK = threading.Lock()
+#: ``db path -> (file signature, stamp)``: the stamp last read for a graph file as it looked then.
+_STAMP_MEMO: dict[str, tuple[tuple[Any, ...], Stamp]] = {}
+_STAMP_MEMO_MAX = 8192
 
-    The stamp is the inode, modification time and size of the database file and of its
-    write-ahead log when there is one, so a rebuild that replaces the file, or writes to it,
-    gives a different stamp.
+
+def _file_signature(db_path: Path) -> tuple[Any, ...] | None:
+    """Inode, mtime and size of the database and of its ``-wal``; ``None`` without a database."""
+    parts: list[Any] = []
+    for path in (db_path, db_path.with_name(db_path.name + "-wal")):
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            if path is db_path:
+                return None
+            parts.append(None)
+            continue
+        parts.append((info.st_ino, info.st_mtime_ns, info.st_size))
+    return tuple(parts)
+
+
+def _graph_marker(db_path: Path) -> tuple[Any, ...] | None:
+    """What the graph holds, read from the file: build time, head sha, id high-water marks, counts.
+
+    Opened ``mode=ro`` and only ever read, so it adds no write to the database. ``None`` when
+    the file cannot be read as a graph (the caller then falls back to the file signature).
+    """
+    has_sidecar = any(
+        db_path.with_name(db_path.name + suffix).exists() for suffix in ("-wal", "-shm")
+    )
+    uri = f"{db_path.resolve().as_uri()}?mode=ro" + ("" if has_sidecar else "&immutable=1")
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=5, check_same_thread=False)
+    except sqlite3.Error:
+        return None
+    try:
+        meta = dict(conn.execute(
+            "SELECT key, value FROM metadata WHERE key IN ('last_updated', 'git_head_sha')"
+        ).fetchall())
+        counts = []
+        for table in ("nodes", "edges"):
+            high, rows = conn.execute(f"SELECT MAX(id), COUNT(*) FROM {table}").fetchone()
+            counts.extend((high, rows))
+        return (meta.get("last_updated"), meta.get("git_head_sha"), *counts)
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def graph_stamp(entry: Mapping[str, Any]) -> Stamp | None:
+    """Identify the graph of a registry entry as it is now, or ``None`` when unreadable.
+
+    The stamp is the database file's inode plus what the graph holds (build time, head sha, the
+    highest node and edge ids and their counts). It does not use the modification time or size
+    of the file or of its ``-wal``: an indexer writing, a checkpoint, or any reader opening the
+    database moves those without changing the graph, and each such move used to throw away every
+    cached cross-repo result. A rebuild that replaces the file changes the inode; an update
+    changes the build time or the ids and counts. The marker is only read again when the file
+    signature moved, so a call over 100+ repos costs ``stat`` calls. A graph whose marker cannot
+    be read falls back to the old file signature.
     """
     from .incremental import get_db_path
 
     try:
         db_path = get_db_path(Path(entry["path"]), read_only=True)
-        parts = []
-        for path in (db_path, db_path.with_name(db_path.name + "-wal")):
-            try:
-                info = path.stat()
-            except FileNotFoundError:
-                if path is db_path:
-                    return None
-                continue
-            parts.append((info.st_ino, info.st_mtime_ns, info.st_size))
-        return tuple(parts)
+        signature = _file_signature(db_path)
+        if signature is None:
+            return None
+        key = str(db_path)
+        with _STAMP_LOCK:
+            known = _STAMP_MEMO.get(key)
+        if known is not None and known[0] == signature:
+            return known[1]
+        marker = _graph_marker(db_path)
+        inode = signature[0][0]
+        stamp: Stamp = (("graph", inode, *marker),) if marker is not None else (
+            ("file", *signature),
+        )
+        with _STAMP_LOCK:
+            if len(_STAMP_MEMO) >= _STAMP_MEMO_MAX:
+                _STAMP_MEMO.clear()
+            _STAMP_MEMO[key] = (signature, stamp)
+        return stamp
     except (OSError, ValueError, KeyError, GraphStoreError, sqlite3.Error):
         return None
 
@@ -281,6 +344,11 @@ def _shared_pool() -> ThreadPoolExecutor:
                 max_workers=shared_pool_size(), thread_name_prefix="crg-xrepo",
             )
         return _POOL
+
+
+def submit_shared(fn: Callable[..., R], *args: Any) -> Any:
+    """Run ``fn(*args)`` on the shared pool and return its ``Future``."""
+    return _shared_pool().submit(fn, *args)
 
 
 def _reset_shared_pool() -> None:
