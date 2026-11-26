@@ -632,6 +632,24 @@ async def get_impact_radius_tool(
     )
 
 
+async def _route_across_repos(
+    target: str, cursor: Optional[str], detail_level: str, max_results: Optional[int],
+) -> dict:
+    """``handlers_of`` on a route, asked of every registered repo (no single graph's provenance)."""
+    if cursor:
+        raise ToolError("a route lookup across repos has no pages; pass repo_root for one repo")
+    from .tools.registry_tools import handlers_of_route_across_repos
+
+    return await _offload(
+        "query_graph_tool",
+        lambda: handlers_of_route_across_repos(
+            target, detail_level=detail_level, max_results=max_results,
+        ),
+        None,
+        provenance=False,
+    )
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 async def query_graph_tool(
     pattern: str,
@@ -752,20 +770,9 @@ async def query_graph_tool(
 
         is_route = pattern == "handlers_of" and parse_route_target(target) is not None
         if is_route:
-            if cursor:
-                raise ToolError(
-                    "a route lookup across repos has no pages; pass repo_root for one repo"
-                )
-            from .tools.registry_tools import handlers_of_route_across_repos
-
-            return await _offload(
-                "query_graph_tool",
-                lambda: handlers_of_route_across_repos(
-                    target, detail_level=detail_level,
-                    max_results=limit if limit is not None else max_results,
-                ),
-                None,
-                provenance=False,
+            return await _route_across_repos(
+                target, cursor, detail_level,
+                limit if limit is not None else max_results,
             )
         if repo_root == "*":
             raise ToolError(
