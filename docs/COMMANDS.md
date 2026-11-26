@@ -1402,7 +1402,52 @@ routing or binding key containing it as a substring, and `repos` limits the repo
 roles are those of the selected repos. `counts` covers every exchange that passed `route`. It
 pages like the other origins. With `service` the reply is unchanged.
 
-Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk` and `amqp` origins return at most
+### `origin="trigger"`: what invokes a resource
+
+Answers "what invokes this Lambda / queue / state machine / topic / bucket handler?" as a
+query-time join over the Terraform already in each graph; no rebuild and no parser change.
+`service` keeps rows whose invoked side (target) is that name, `service/name` (`lambda/worker`) or
+Terraform label; `route` keeps rows whose firing side (source) is that rule, queue, topic, bucket
+or route key. "What triggers X" is `service=X`; "what does X fire" is `route=X`. `status` is
+`resolved`, `source_unresolved` or `target_unresolved`. Pages like the other origins.
+
+| `trigger_kind` | Read from | Source | Target |
+| --- | --- | --- | --- |
+| `eventbridge_rule` | `aws_cloudwatch_event_rule` + `aws_cloudwatch_event_target` | rule, with its literal `schedule` and `event_pattern_sources` | lambda, sqs, sns, ecs cluster, state machine |
+| `eventbridge_scheduler` | `aws_scheduler_schedule` | schedule, with `schedule` | as above |
+| `event_source_mapping` | `aws_lambda_event_source_mapping` | sqs / kinesis / dynamodb | lambda |
+| `sns_subscription` | `aws_sns_topic_subscription` | topic | lambda, sqs, or the protocol (`https`, `email`) |
+| `s3_notification` | `aws_s3_bucket_notification` | bucket | lambda, sqs, sns |
+| `api_gateway` | `aws_apigatewayv2_route` + integration; `aws_api_gateway_integration` | route key (v2) or REST API label (v1) | lambda |
+| `lambda_permission` | `aws_lambda_permission` | rule / topic / bucket / API, with inferred `principal` | lambda |
+| `eventbridge_pipe` | `aws_pipes_pipe` | queue / stream / table | lambda, state machine |
+
+Each row has `source`, `source_service`, `target` (`service/name`), the declaring `repo`, `file`,
+`line`, `status` and `via` (`terraform` when read from the attributes the indexer recorded,
+`reference` when inferred from which resources a block mentions).
+
+Shapes it cannot resolve (these never get a guessed name):
+
+- A name built from a variable, local, `${...}` or `module.*` output: the row is
+  `source_unresolved` / `target_unresolved` and carries the Terraform label
+  (`aws_api_gateway_rest_api.public`). A reference to a resource in another directory of the
+  module is not followed.
+- State machines, REST APIs, Kinesis streams and ECS clusters are not named by the indexer, so a
+  reference to one is a label, not a deployed name.
+- `aws_lambda_permission`, `aws_pipes_pipe` and `aws_api_gateway_integration` are not recorded
+  attribute by attribute: the index holds only which resources the block references. The
+  `principal` is inferred from the referenced resource type; `source_arn` is not stored. A pipe
+  with zero or several candidate sources gets an unresolved source.
+- API Gateway v1 route paths and methods are not recorded; the row has no `route`.
+- Event patterns: only literal `source` values are kept, not `detail-type` or `detail`. Bucket
+  notification event types and filters are not kept. An SNS endpoint URL or address is a value
+  and is not stored.
+- Other triggers (CloudWatch Logs subscriptions, Cognito, Alexa, Config, DynamoDB Streams enabled
+  by `aws_lambda_event_source_mapping` with a computed ARN, ALB target groups) are not read.
+- Terragrunt-driven module inputs are not evaluated: a rule declared inside a module and wired
+  in a stack shows only the half each repo declares.
+
+Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk`, `amqp` and `trigger` origins return at most
 `max_results` rows (at most 100) per call. When rows remain, `truncated` is set and
 `next_cursor` is returned; pass it back as `cursor`, with the same other arguments, to read
 the next page. `limit` is not used by these origins. A page after the first has `offset`

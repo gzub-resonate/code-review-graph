@@ -27,7 +27,7 @@ QUERY_ONLY = {
     # cross-repo link passes, run at query time over finished graphs
     "aws_sdk_links", "stepfunction_links", "terraform_links", "workflow_links",
     "service_aliases", "infra_join", "amqp_join", "amqp_exchanges", "js_route_leads",
-    "repo_cache",
+    "repo_cache", "trigger_links",
     # MCP tool front-ends
     "tools.change_scope",
     "tools.analysis_tools", "tools.community_tools", "tools.context", "tools.flows_tools",

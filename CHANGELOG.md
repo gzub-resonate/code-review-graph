@@ -14,6 +14,11 @@
   last two path segments exist under a different prefix: a low-confidence lead, not a match).
   `status` accepts both and the summary counts them. `no_route_match` remains for calls nothing
   fits. Query-time only; the index fingerprint is unchanged.
+- `cross_repo_requests_tool` `origin="trigger"`: what invokes a Lambda, queue, state machine,
+  topic or bucket handler, joined at query time from the indexed Terraform (EventBridge rules and
+  schedules, event source mappings, SNS subscriptions, S3 notifications, API Gateway,
+  `aws_lambda_permission`, EventBridge Pipes). Filters by target (`service`) and source
+  (`route`); rows are `resolved`, `source_unresolved` or `target_unresolved`. No rebuild needed.
 
 ### Changed
 
