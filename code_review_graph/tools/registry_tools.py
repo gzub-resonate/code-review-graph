@@ -1748,6 +1748,7 @@ def cross_repo_requests_func(
         wanted_route = fl.normalize_route(route) if route else None
         counts: dict[str, int] = {}
         origin_counts: dict[str, int] = {}
+        multiple_total = 0
         rows_by_repo: list[list[dict[str, Any]]] = []
         searched: list[str] = []
         skipped: list[str] = []
@@ -1870,6 +1871,10 @@ def cross_repo_requests_func(
                         _candidate_row(c) for c in result.candidates[:_MAX_CANDIDATES_PER_ROW]
                     ]
                     row["candidates_total"] = len(result.candidates)
+                    if result.status == fl.MATCHED and len(result.candidates) > 1:
+                        # "matched" stays as is; this says the match is not a unique one.
+                        row["multiple_candidates"] = True
+                        multiple_total += 1
                 repo_rows.append(row)
             rows_by_repo.append(repo_rows)
 
@@ -1914,11 +1919,13 @@ def cross_repo_requests_func(
                     else f"{total} Feign call(s) in {len(searched)} repo(s)"
                 )
                 + (f": {ordered}" if ordered else "")
+                + (f"; {multiple_total} matched with several candidates" if multiple_total else "")
                 + shown_range(page)
                 + notes
             ),
             "results": results,
             "counts": counts,
+            "multiple_candidates_total": multiple_total,
             "total": total,
             "truncated": truncated,
             **page.fields(),

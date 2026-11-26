@@ -37,6 +37,9 @@
   another property of the same repo are expanded, per profile (default preferred; `config_profile` and
   `config_alternatives` say which), with Spring relaxed binding. Rows carry `target_source` (`config` or
   `config_key_unresolved`) and `via`. New module `config_values.py`.
+- `cross_repo_requests_tool` marks a `matched` row that has several `candidates` with
+  `multiple_candidates: true` and counts them in `multiple_candidates_total` and the summary. `status`
+  and `counts` are unchanged. Query-time only.
 
 ### Changed
 

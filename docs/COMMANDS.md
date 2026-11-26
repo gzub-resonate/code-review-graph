@@ -1160,6 +1160,9 @@ cursor: str | None           # next_cursor of the previous reply (see Result Bou
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
 ```
 
+A `matched` row whose `candidates_total` is above 1 also has `multiple_candidates: true` (the status value is
+unchanged); the reply's `multiple_candidates_total` and its summary count those rows.
+
 `origin="terraform"` lists the remote Terraform module sources (`git::...//modules/x`) the repos name and the
 registered repo and folder each one resolves to. `service` filters by module repo name, `route` by module folder
 prefix, and `status` is `matched`, `module_not_found`, `ambiguous` or `repo_not_registered`. Run it with

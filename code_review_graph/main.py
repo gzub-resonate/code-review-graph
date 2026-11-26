@@ -1961,6 +1961,9 @@ async def cross_repo_requests_tool(
     ``feign`` or ``js``. A match through a catch-all route such as a Next.js
     ``[...path]`` proxy, or through a naming convention, has ``confidence``
     ``low``.
+    A ``matched`` row with more than one entry in ``candidates`` (``candidates_total``
+    above 1) also has ``multiple_candidates: true``; ``status`` is unchanged.
+    ``multiple_candidates_total`` and the summary count such rows.
 
     A call has a time budget (``CRG_CROSS_REPO_BUDGET_SECONDS``, default 300,
     0 = unlimited). When it is spent no further client repo is started; those

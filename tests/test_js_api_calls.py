@@ -1150,3 +1150,31 @@ def test_query_keys_are_known_only_when_the_url_spells_them_out(folded, keys):
     from code_review_graph.js_api_extract import query_keys_of
 
     assert query_keys_of(folded) == keys
+
+
+def test_matched_rows_with_several_candidates_are_flagged(tmp_path, registry):
+    make_repo(tmp_path, registry, "notif-api", {
+        "server.js": (
+            "const express = require('express');\nconst app = express();\n"
+            "app.put('/v1/notifications/seen', (q, r) => r.end());\n"
+            "app.put('/v1/notifications/dismiss', (q, r) => r.end());\n"
+            "app.get('/v1/things/one', (q, r) => r.end());\n"
+        ),
+    })
+    make_repo(tmp_path, registry, "ui", {
+        "src/api.ts": (
+            "import axios from 'axios';\n"
+            "export const mark = (id: string) => axios.put(`/v1/notifications/${id}`);\n"
+            "export const one = (id: string) => axios.get(`/v1/things/${id}`);\n"
+        ),
+    })
+    reply = cross_repo_requests_func(repos=["ui"], origin="js")
+    by_line = {r["client_line"]: r for r in reply["results"]}
+    many, single = by_line[2], by_line[3]
+    # The status value is unchanged; the extra flag says the match is not unique.
+    assert many["status"] == "matched" and many["candidates_total"] == 2
+    assert many["multiple_candidates"] is True
+    assert single["status"] == "matched" and "multiple_candidates" not in single
+    assert reply["counts"] == {"matched": 2}
+    assert reply["multiple_candidates_total"] == 1
+    assert "1 matched with several candidates" in reply["summary"]
