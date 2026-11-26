@@ -1131,6 +1131,11 @@ cursor: str | None           # next_cursor of the previous reply (see Paging)
 case-sensitive; paths are not accepted. An alias match wins over a folder-name
 match.
 
+`limit` caps the rows of each repo. A repo that has more matches than `limit` is listed in `repos_capped`
+(`repos_capped_total`); `total` is then a lower bound (`total_is_lower_bound: true`, `Found N+` in the summary) and
+`truncated` is true even when there is no `next_cursor`: raise `limit` to see the rest. `max_results` still caps the
+rows returned.
+
 Scores are not comparable between repos, so results are ordered by match tier first,
 then by each repo's local rank, with registry order as the tie-breaker. Every row has a
 `match` field: `exact` (the name equals the query, case-sensitive), `exact_ci` (equal

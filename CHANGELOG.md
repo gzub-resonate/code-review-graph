@@ -922,6 +922,10 @@
 - `query_graph_tool` `requesters_of` with a route target (`GET /v2/attributevalues`) matches Endpoint
   nodes only, like `handlers_of`, instead of an `ambiguous` list that mixed in classes. Several
   matching endpoints are all answered (each row names its `endpoint`); no match is `not_found`.
+- `cross_repo_search_tool` no longer reads as complete when the per-repo `limit` cut matches off:
+  the repo is named in `repos_capped`, `total` is flagged `total_is_lower_bound` (`Found N+` in the
+  summary) and `truncated` is set. The row caps are unchanged; one row more than `limit` is fetched
+  per repo only to detect the cut.
 
 ## [2.4.0] - 2026-11-10
 

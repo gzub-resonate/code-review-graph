@@ -1918,7 +1918,10 @@ async def cross_repo_search_tool(
 
     Returns:
         Merged results. When more remain the reply carries ``next_cursor``; a
-        page after the first adds ``offset``.
+        page after the first adds ``offset``. A repo that has more matches than
+        ``limit`` is named in ``repos_capped`` (``repos_capped_total``); then
+        ``total`` is a lower bound (``total_is_lower_bound``, ``Found N+`` in the
+        summary) and ``truncated`` is set. Raise ``limit`` to see them.
     """
     return await _offload(
         "cross_repo_search_tool",
