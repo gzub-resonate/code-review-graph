@@ -573,7 +573,9 @@ repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
 limit: int | None                # Alias of max_results; wins when both are given
-resolution: str = "all"          # "all", "direct", or "unresolved"
+resolution: str | None           # "all", "direct", or "unresolved"; omitted: callees_of "direct",
+                                 # callers_of / references_to "all"
+hide_unresolved: bool = False    # callees_of: also hide bare-name and JDK/stream/builtin calls
 to: str | None                   # path_to only: the node or file to reach
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 direction: str | None            # endpoints only: "inbound", "outbound" or "simulator"
@@ -618,7 +620,13 @@ call is written outside the row's own `file_path`), and rows whose target was
 matched by bare name alone carry `target_resolution: "unresolved"`. The response
 adds `distinct_nodes` and a `resolution_split` of the whole answer. When some of
 the rows are only name matches and `resolution` is `"all"`, a short `confidence`
-sentence says how many. Call sites
+sentence says how many. `callees_of` answers `"direct"` when `resolution` is omitted, because a
+callee list is mostly bare-name noise (`map`, `stream`, `get`; on Python nearly every call is only
+name-matched). The reply never hides that silently: the summary says how many name-matched call
+sites were hidden (and how many of them are JDK, stream or builtin names), `hidden_call_sites`
+(`unresolved`, `well_known`) carries the counts, and a zero-row answer says it is not "no calls".
+Pass `resolution="all"` for the earlier behaviour. `hide_unresolved=true` hides every bare-name
+call site and every bare call to a well-known name even under `resolution="all"`. Call sites
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller. Within that order, calls bound to a node come
 before bare-name guesses.

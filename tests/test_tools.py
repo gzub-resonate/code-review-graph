@@ -713,7 +713,7 @@ class TestQueryGraphCallTargetFallbacks:
         result = query_graph(
             pattern="callees_of",
             target=f"{self.dispatch_file}::dispatcher",
-            repo_root=str(self.root),
+            repo_root=str(self.root), resolution="all",
         )
 
         assert result["status"] == "ok"

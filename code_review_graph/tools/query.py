@@ -143,6 +143,34 @@ _MAX_BARE_TARGET_CANDIDATES = 20
 #: the answer can be split by how certain that edge's target attribution is.
 _CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
 
+#: Bare call names that are the JDK, a stream pipeline or a language builtin
+#: rather than project code. ``callees_of`` counts them apart when it hides
+#: bare-name call sites, so the reader sees how much of the noise they were.
+_WELL_KNOWN_CALL_NAMES = frozenset(_BUILTIN_CALL_NAMES | {
+    # java.util.stream / Optional / collections / String
+    "stream", "parallelStream", "toList", "collect", "mapToInt", "mapToLong",
+    "mapToObj", "mapToDouble", "sorted", "distinct", "limit", "skip", "peek",
+    "anyMatch", "allMatch", "noneMatch", "findAny", "joining", "toSet", "toMap",
+    "groupingBy", "counting", "summingInt", "asList", "singletonList", "emptyList",
+    "emptyMap", "ofNullable", "orElse", "orElseGet", "orElseThrow", "ifPresent",
+    "isPresent", "isEmpty", "size", "length", "add", "addAll", "put", "putAll",
+    "putIfAbsent", "containsKey", "contains", "remove", "removeIf", "iterator",
+    "hasNext", "getKey", "getValue", "entrySet", "keySet", "equals", "hashCode",
+    "getClass", "append", "format", "valueOf", "compareTo", "isBlank",
+    "equalsIgnoreCase", "requireNonNull", "println", "print", "builder", "build",
+    "getOrDefault", "computeIfAbsent", "merge", "copyOf", "unmodifiableList",
+    # Python builtins and common container methods
+    "len", "str", "int", "float", "bool", "list", "dict", "tuple", "range",
+    "enumerate", "zip", "isinstance", "getattr", "setattr", "hasattr",
+    "sum", "open", "super", "extend", "items", "lower", "upper", "strip",
+    "lstrip", "rstrip", "isoformat", "dumps", "loads", "getLogger",
+})
+
+
+def _is_well_known_call(name: str) -> bool:
+    """Whether a bare call target is a JDK, stream or builtin name."""
+    return "::" not in name and name.rsplit(".", 1)[-1] in _WELL_KNOWN_CALL_NAMES
+
 #: Patterns that can ask who points at something outside the repository.
 _EXTERNAL_TARGET_PATTERNS = frozenset(
     {"callers_of", "references_to", "importers_of", "listeners_of", "publishers_of"}
@@ -1393,13 +1421,14 @@ def query_graph(
     repo_root: str | None = None,
     detail_level: str = "standard",
     max_results: int = 100,
-    resolution: str = RESOLUTION_ALL,
+    resolution: str | None = None,
     to: str | None = None,
     cursor: str | None = None,
     file_hint: str | None = None,
     direction: str | None = None,
     strict: bool = False,
     routing_key: str | None = None,
+    hide_unresolved: bool = False,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1417,9 +1446,15 @@ def query_graph(
         max_results: Maximum results to return. Minimal mode additionally caps
             visible results at five and reports the exact omitted count.
         resolution: For callers_of/callees_of/references_to, filter rows by how
-            certain the edge's target attribution is. "all" (default) keeps
-            both, "direct" keeps only calls bound to an indexed node, and
-            "unresolved" keeps only the bare-name matches.
+            certain the edge's target attribution is. "all" keeps both, "direct"
+            keeps only calls bound to an indexed node, and "unresolved" keeps only
+            the bare-name matches. Omitted, callees_of answers "direct" (a callee
+            list is mostly bare-name noise otherwise) and the reply says how many
+            call sites that hid; callers_of and references_to answer "all".
+        hide_unresolved: For callees_of: also hide every call site that is only a
+            bare-name match, and every bare call to a well-known JDK, stream or
+            builtin name (``map``, ``stream``, ``get``, ``len``...). The reply
+            counts what was hidden in ``hidden_call_sites``.
         to: For path_to, the node, qualified name or file to reach. A route is one
             answer, so max_results and the minimal cap do not cut it.
         cursor: ``next_cursor`` from the previous reply, to read the next page of
@@ -1464,10 +1499,15 @@ def query_graph(
     """
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
-    if resolution not in QUERY_RESOLUTIONS:
+    if resolution is not None and resolution not in QUERY_RESOLUTIONS:
         raise ValueError(
             f"resolution must be one of {list(QUERY_RESOLUTIONS)}, got {resolution!r}"
         )
+    # A callee list is mostly bare-name noise (``map``, ``get``, ``stream``), so
+    # an unstated resolution means "direct" there; every other pattern keeps "all".
+    resolution_defaulted = resolution is None and pattern == "callees_of"
+    if resolution is None:
+        resolution = RESOLUTION_DIRECT if resolution_defaulted else RESOLUTION_ALL
     if direction is not None and direction not in (*ENDPOINT_DIRECTIONS, "all"):
         raise ValueError(
             f"direction must be one of {[*ENDPOINT_DIRECTIONS, 'all']}, got {direction!r}"
@@ -1524,6 +1564,8 @@ def query_graph(
             scope_args["file_hint"] = file_hint
         if routing_key is not None:
             scope_args["routing_key"] = routing_key
+        if hide_unresolved:
+            scope_args["hide_unresolved"] = True
         page_scope = make_scope("query_graph_tool", **scope_args)
         page_stamp = graph_stamp(store)
         page_offset = _cursor_offset(cursor, page_scope, page_stamp)
@@ -1558,13 +1600,24 @@ def query_graph(
                 node_cache[qualified] = store.get_node(qualified)
             return node_cache[qualified]
 
+        # Call sites kept out of the answer, counted so the reply can say so.
+        hidden_sites = {"unresolved": 0, "well_known": 0}
+
         def add_call_site(
             key: str, result: dict[str, Any], edge: GraphEdge, certain: bool,
         ) -> None:
             """Stage one call site, marking the uncertain ones."""
             if not certain:
                 result["target_resolution"] = RESOLUTION_UNRESOLVED
-            if resolution == RESOLUTION_DIRECT and not certain:
+            if not certain and (
+                resolution == RESOLUTION_DIRECT
+                or (hide_unresolved and pattern == "callees_of")
+            ):
+                hidden_sites["unresolved"] += 1
+                if pattern == "callees_of" and _is_well_known_call(
+                    str(edge.target_qualified),
+                ):
+                    hidden_sites["well_known"] += 1
                 return
             if resolution == RESOLUTION_UNRESOLVED and certain:
                 return
@@ -2414,6 +2467,14 @@ def query_graph(
             ) + f", {results_omitted} omitted"
         elif results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
+        hidden_total = hidden_sites["unresolved"]
+        if hidden_total:
+            why = f"{hidden_total} name-matched call site(s) hidden" + (
+                " by default" if resolution_defaulted else ""
+            )
+            if hidden_sites["well_known"]:
+                why += f", {hidden_sites['well_known']} JDK/stream/builtin names among them"
+            summary += f" ({why}; pass resolution='all' to see them)"
         if routing_key is not None:
             summary += f" linked to routing key '{_sanitize_name(routing_key)}'"
         if same_name_tests:
@@ -2433,7 +2494,12 @@ def query_graph(
         # a reader when part of a non-empty answer is only name matches, unless
         # they filtered by resolution and so already know.
         confidence: str | None = None
-        if total_results == 0:
+        if total_results == 0 and hidden_total:
+            confidence = (
+                f"0 shown, but {hidden_total} name-matched call site(s) were hidden, so "
+                "this is not 'no calls': pass resolution='all' to see them"
+            )
+        elif total_results == 0:
             confidence = empty_query_confidence(store, root, pattern, target, node)
         elif handler_as_target:
             confidence = (
@@ -2495,6 +2561,8 @@ def query_graph(
             if resolution_split is not None:
                 minimal_response["distinct_nodes"] = distinct_nodes
                 minimal_response["resolution_split"] = resolution_split
+            if hidden_total:
+                minimal_response["hidden_call_sites"] = dict(hidden_sites)
             if confidence:
                 minimal_response["confidence"] = confidence
             _attach_resolution_notes(
@@ -2520,6 +2588,8 @@ def query_graph(
         if resolution_split is not None:
             response["distinct_nodes"] = distinct_nodes
             response["resolution_split"] = resolution_split
+        if hidden_total:
+            response["hidden_call_sites"] = dict(hidden_sites)
         if confidence:
             response["confidence"] = confidence
         _attach_resolution_notes(response, ambiguity, route_endpoints, java_importers)

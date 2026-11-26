@@ -40,6 +40,12 @@
 
 ### Changed
 
+- `query_graph_tool` `callees_of` answers `resolution="direct"` when `resolution` is omitted (it
+  was `"all"`): a callee list was mostly bare-name noise (`map`, `stream`, `get`). The summary and
+  `hidden_call_sites` say how many name-matched call sites were hidden and how many of them are
+  JDK, stream or builtin names; `resolution="all"` returns the earlier answer. New
+  `hide_unresolved` flag hides bare-name call sites and well-known names under any resolution.
+  `callers_of` and `references_to` are unchanged. Query-time only.
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or
   `amqp` now pages. A list cut at `max_results` carries `next_cursor`; passing it back as `cursor`
   returns the next page, until the last page has none. Before, those origins ended at

@@ -639,7 +639,7 @@ async def query_graph_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     max_results: int = 100,
-    resolution: str = "all",
+    resolution: Optional[str] = None,
     to: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: Optional[int] = None,
@@ -647,6 +647,7 @@ async def query_graph_tool(
     direction: Optional[str] = None,
     strict: bool = False,
     routing_key: Optional[str] = None,
+    hide_unresolved: bool = False,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -703,8 +704,14 @@ async def query_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
         max_results: Maximum results to return. Default: 100.
-        resolution: "all" (default), "direct" for only calls bound to an indexed
-            node, or "unresolved" for only the bare-name matches.
+        resolution: "all", "direct" for only calls bound to an indexed node, or
+            "unresolved" for only the bare-name matches. Omitted: callees_of answers
+            "direct" (a callee list is mostly bare-name noise: map, stream, get) and the
+            reply's summary/``hidden_call_sites`` say how many name-matched call sites that
+            hid; pass "all" for the old behaviour. callers_of and references_to default to "all".
+        hide_unresolved: For callees_of: also hide every bare-name call site and every bare call
+            to a well-known JDK, stream or builtin name. ``hidden_call_sites`` counts what was
+            hidden (``unresolved``, and ``well_known`` among them); the summary says why.
         to: For path_to, the node name, qualified name, or file path to reach.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             rows. Omit it for the first page. Not available for path_to.
@@ -740,6 +747,7 @@ async def query_graph_tool(
             max_results=limit if limit is not None else max_results,
             resolution=resolution, to=to, cursor=cursor, file_hint=file_hint,
             direction=direction, strict=strict, routing_key=routing_key,
+            hide_unresolved=hide_unresolved,
         ),
         root,
     )

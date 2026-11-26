@@ -168,7 +168,7 @@ def test_test_symbols_can_still_be_asked_about_by_name(tmp_path):
     finally:
         store.close()
 
-    result = query_graph("callees_of", "test_load", str(root))
+    result = query_graph("callees_of", "test_load", str(root), resolution="all")
 
     assert result["status"] == "ok"
     assert result["target"] == wanted
@@ -287,7 +287,7 @@ def test_resolved_callees_come_before_guesses(tmp_path, detail):
     finally:
         store.close()
 
-    result = query_graph("callees_of", caller, str(root), detail_level=detail)
+    result = query_graph("callees_of", caller, str(root), detail_level=detail, resolution="all")
 
     assert result["results"][0]["name"] == "real_callee"
     assert "target_resolution" not in result["results"][0]
@@ -315,7 +315,7 @@ def test_every_callee_is_seen_before_a_repeat(tmp_path):
     finally:
         store.close()
 
-    result = query_graph("callees_of", caller, str(root))
+    result = query_graph("callees_of", caller, str(root), resolution="all")
 
     assert [row["name"] for row in result["results"]] == [
         "real_callee", "len", "real_callee",
