@@ -607,6 +607,17 @@ route: `POST /v1/items`, `/v1/items/{id}`, `GET /items/{itemId}`. Path variables
 on a segment boundary matches when the full one does not, and the reply lists
 `matched_endpoints`.
 
+**`callers_of` on a shared name.** A name several nodes have (two classes called
+`VerticalRefreshMgr`, a method every subclass defines) still answers `ambiguous` with no rows, but
+the answer can no longer be read as "no callers": the summary starts `AMBIGUOUS, not 'no callers'`,
+the summary gives the `direct_callers` of the top candidates (distinct callers bound to it by a call
+edge; bare-name matches are not counted), standard-mode candidates carry `direct_callers` and the
+reply adds `total_direct_callers`. In minimal mode the rows stay two keys, with the counts in the
+summary.
+`file_hint` may also be written inside `target` as `path/File.java::name` when no node has that
+exact qualified name: the part before `::` is used as the file hint when it looks like a path (a
+separator or an extension), so `Foo::bar` is untouched.
+
 **Java importers.** Java imports are by class, so `importers_of` on a Java file path reads the
 classes the file declares: importers the build bound to the file, imports that kept the
 dotted class name (another source root, a nested or static member import), and `pkg.*` wildcards.
@@ -617,8 +628,9 @@ are not importers.
 `detail_level="minimal"` drops `edges` and shows 5 rows when `max_results` is omitted; an explicit
 `max_results` is honoured in minimal mode too. Whenever rows are cut, `results_omitted` counts them
 and `paging_hint` says how to read the rest (`next_cursor`, or a larger `max_results`). In standard
-mode `edges` are capped with the rows, and for the call-site patterns they no longer repeat the
-candidate lists a row already spells out (the `*_target_count` fields stay).
+mode `edges` are capped with the rows, and for `callees_of` only the first edge of each target
+keeps its `ambiguous_targets` / `unresolved_targets` list, as its row does (the `*_target_count`
+fields stay on every edge).
 
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the

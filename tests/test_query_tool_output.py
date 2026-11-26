@@ -146,9 +146,9 @@ def wide(tmp_path: Path) -> dict:
         qn = f"{svc}::handle"
         for index in range(40):
             store.upsert_edge(EdgeInfo(
-                kind="CALLS", source=qn, target=f"helper{index}", file_path=svc,
+                kind="CALLS", source=qn, target=f"helper{index % 4}", file_path=svc,
                 line=20 + index,
-                extra={"unresolved_targets": [f"cand{n}.helper{index}" for n in range(20)]},
+                extra={"unresolved_targets": [f"cand{n}.helper{index % 4}" for n in range(20)]},
             ))
         store.commit()
         store.refresh_target_resolution()
@@ -171,17 +171,17 @@ class TestOutputSize:
         assert len(result["results"]) == 7
         assert len(result["edges"]) == 7
 
-    def test_edges_do_not_repeat_the_candidate_lists_the_rows_carry(self, wide):
+    def test_repeat_call_sites_do_not_repeat_the_candidate_list(self, wide):
         result = query_graph(
             pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
             resolution="all",
         )
-        assert result["results"][0]["candidates"]
-        for edge in result["edges"]:
-            assert "unresolved_targets" not in edge
-            assert edge["unresolved_target_count"] == 20
-        # 40 call sites with 20 candidates apiece was ~90 KB when both lists were spelled out.
-        assert len(json.dumps(result)) < 60_000
+        spelled = [e for e in result["edges"] if "unresolved_targets" in e]
+        # One edge per distinct target keeps its list (its row spells it too).
+        assert len(spelled) == 4
+        assert all(e["unresolved_target_count"] == 20 for e in result["edges"])
+        # 40 call sites with 20 candidates apiece was ~100 KB with every list spelled out.
+        assert len(json.dumps(result)) < 45_000
 
 
 class TestMinimalHonoursMaxResults:
@@ -225,3 +225,96 @@ class TestMinimalHonoursMaxResults:
                 pattern="callees_of", target=wide["qn"], repo_root=wide["root"],
                 max_results=0,
             )
+
+
+@pytest.fixture()
+def overloads(tmp_path: Path) -> dict:
+    """Two classes of the same name in different files; only the second has a caller."""
+    root = tmp_path
+    (root / ".code-review-graph").mkdir()
+    first = (root / "a" / "VerticalRefreshMgr.java").as_posix()
+    second = (root / "b" / "VerticalRefreshMgr.java").as_posix()
+    user = (root / "User.java").as_posix()
+    with GraphStore(root / ".code-review-graph" / "graph.db") as store:
+        for path in (first, second, user):
+            _file(store, path)
+        for path in (first, second):
+            store.upsert_node(NodeInfo(
+                kind="Class", name="VerticalRefreshMgr", file_path=path, line_start=1,
+                line_end=90, language="java",
+            ))
+            _fn(store, path, "refresh", 10, parent="VerticalRefreshMgr")
+        _fn(store, user, "run", 5)
+        store.upsert_edge(EdgeInfo(
+            kind="CALLS", source=f"{user}::run",
+            target=f"{second}::VerticalRefreshMgr.refresh", file_path=user, line=7,
+        ))
+        store.commit()
+        store.refresh_target_resolution()
+    return {"root": str(root), "first": first, "second": second}
+
+
+class TestAmbiguousCallers:
+    def test_ambiguous_callers_report_a_caller_count_per_candidate(self, overloads):
+        result = query_graph(
+            pattern="callers_of", target="VerticalRefreshMgr.refresh",
+            repo_root=overloads["root"],
+        )
+        assert result["status"] == "ambiguous"
+        counts = {c["file_path"]: c["direct_callers"] for c in result["candidates"]}
+        assert counts == {overloads["first"]: 0, overloads["second"]: 1}
+        assert result["total_direct_callers"] == 1
+        assert "AMBIGUOUS" in result["summary"]
+        assert "not 'no callers'" in result["summary"]
+
+    def test_minimal_ambiguous_callers_carry_the_counts_too(self, overloads):
+        result = query_graph(
+            pattern="callers_of", target="refresh", repo_root=overloads["root"],
+            detail_level="minimal",
+        )
+        assert result["status"] == "ambiguous"
+        # The rows stay two keys each; the counts are in the summary and the total.
+        assert all(set(c) == {"qualified_name", "kind"} for c in result["candidates"])
+        assert result["total_direct_callers"] == 1
+        assert ": 1" in result["summary"] and ": 0" in result["summary"]
+        assert "AMBIGUOUS" in result["summary"]
+
+    def test_other_patterns_do_not_get_caller_counts(self, overloads):
+        result = query_graph(
+            pattern="callees_of", target="refresh", repo_root=overloads["root"],
+        )
+        assert result["status"] == "ambiguous"
+        assert all("direct_callers" not in c for c in result["candidates"])
+
+
+class TestFileHintInTarget:
+    def test_a_path_before_the_double_colon_acts_as_file_hint(self, overloads):
+        result = query_graph(
+            pattern="callers_of", target="b/VerticalRefreshMgr.java::refresh",
+            repo_root=overloads["root"],
+        )
+        assert result["status"] == "ok"
+        assert result["result_count"] == 1
+        assert result["target"] == f"{overloads['second']}::VerticalRefreshMgr.refresh"
+
+    def test_the_path_picks_the_other_file_too(self, overloads):
+        result = query_graph(
+            pattern="callers_of", target="a/VerticalRefreshMgr.java::refresh",
+            repo_root=overloads["root"],
+        )
+        assert result["status"] == "ok"
+        assert result["result_count"] == 0
+
+    def test_the_separate_parameter_still_works(self, overloads):
+        result = query_graph(
+            pattern="callers_of", target="refresh", file_hint="b/Vertical",
+            repo_root=overloads["root"],
+        )
+        assert result["status"] == "ok"
+        assert result["result_count"] == 1
+
+    def test_a_scoped_name_that_is_not_a_path_is_left_alone(self, overloads):
+        result = query_graph(
+            pattern="callers_of", target="Foo::refresh", repo_root=overloads["root"],
+        )
+        assert result["status"] == "not_found"

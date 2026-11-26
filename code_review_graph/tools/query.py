@@ -170,6 +170,41 @@ _WELL_KNOWN_CALL_NAMES = frozenset(_BUILTIN_CALL_NAMES | {
 })
 
 
+#: A ``path::name`` target whose left side reads as a file (a separator or an extension).
+_FILE_HINT_PREFIX = re.compile(r"[\\/]|\.[A-Za-z0-9]{1,8}$")
+
+
+def _direct_caller_counts(
+    store: GraphStore, candidates: list[GraphNode],
+) -> dict[str, int]:
+    """Distinct callers bound to each candidate by a CALLS edge (bare-name matches excluded)."""
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.qualified_name] = len({
+            edge.source_qualified
+            for edge in store.iter_edges_by_target(candidate.qualified_name)
+            if edge.kind == "CALLS"
+        })
+    return counts
+
+
+def _ambiguous_callers_summary(
+    target: str, candidate_count: int, counts: dict[str, int], ranked: list[dict[str, Any]],
+) -> str:
+    """One sentence that cannot be read as "no callers" when the name is shared."""
+    shown = ", ".join(
+        f"{_sanitize_name(str(row.get('qualified_name')))}: "
+        f"{counts.get(str(row.get('qualified_name')), 0)}"
+        for row in ranked[:5]
+    )
+    return (
+        f"AMBIGUOUS, not 'no callers': '{_sanitize_name(target)}' matches {candidate_count} "
+        f"node(s) and no rows are returned until one is chosen. Direct callers per candidate: "
+        f"{shown}{' ...' if len(ranked) > 5 else ''}. Re-run with a qualified_name from "
+        "candidates (or file_hint)."
+    )
+
+
 def _is_well_known_call(name: str) -> bool:
     """Whether a bare call target is a JDK, stream or builtin name."""
     return "::" not in name and name.rsplit(".", 1)[-1] in _WELL_KNOWN_CALL_NAMES
@@ -1598,10 +1633,11 @@ def query_graph(
             results.append(result)
             if edge is not None:
                 edge_dict = edge_to_dict(edge)
-                if pattern in _CALL_SITE_PATTERNS:
-                    # The row spells the candidates once per target; repeating
-                    # up to twenty names per call site is what made one answer
-                    # tens of kilobytes. The counts stay.
+                if pattern == "callees_of" and "candidates" not in result:
+                    # The first row of a target spells its candidates; every
+                    # repeat call site used to carry up to twenty names again,
+                    # which is what made one answer tens of kilobytes. The
+                    # counts stay on every edge.
                     edge_dict.pop("ambiguous_targets", None)
                     edge_dict.pop("unresolved_targets", None)
                 edges_out.append(edge_dict)
@@ -1685,6 +1721,12 @@ def query_graph(
                         }
                     route_endpoints = matched
                     node = matched[0]
+            if not node and not file_hint and "::" in target:
+                # ``path/File.java::name`` is the symbol written with its file: the
+                # path is the same hint the file_hint parameter takes.
+                hint_path, _, hint_symbol = target.partition("::")
+                if hint_symbol and _FILE_HINT_PREFIX.search(hint_path):
+                    file_hint, target = hint_path, hint_symbol
             if not node:
                 exact_candidates: list[GraphNode] = []
                 qualified_tail_candidates = []
@@ -1784,12 +1826,21 @@ def query_graph(
                             for row in ranked[:response_limit]
                         ]
                         truncated = candidate_count > len(shortlist)
+                        caller_fields: dict[str, Any] = {}
+                        summary_text = (
+                            f"'{target}' matches {candidate_count} node(s). "
+                            "Re-run with a qualified_name from candidates."
+                        )
+                        if pattern == "callers_of":
+                            counts = _direct_caller_counts(store, candidates)
+                            caller_fields["total_direct_callers"] = sum(counts.values())
+                            summary_text = _ambiguous_callers_summary(
+                                target, candidate_count, counts, ranked,
+                            )
                         return {
                             "status": "ambiguous",
-                            "summary": (
-                                f"'{target}' matches {candidate_count} node(s). "
-                                "Re-run with a qualified_name from candidates."
-                            ),
+                            "summary": summary_text,
+                            **caller_fields,
                             "candidates": shortlist,
                             "candidate_count": candidate_count,
                             "candidates_truncated": truncated,
@@ -1804,12 +1855,25 @@ def query_graph(
                             ),
                         }
                     if node is None:
+                        caller_fields = {}
+                        summary_text = (
+                            f"'{target}' matches {candidate_count} node(s). "
+                            "Re-run with a qualified_name from disambiguation."
+                        )
+                        if pattern == "callers_of":
+                            counts = _direct_caller_counts(store, candidates)
+                            for row in ranked:
+                                row["direct_callers"] = counts.get(
+                                    str(row.get("qualified_name")), 0,
+                                )
+                            caller_fields["total_direct_callers"] = sum(counts.values())
+                            summary_text = _ambiguous_callers_summary(
+                                target, candidate_count, counts, ranked,
+                            )
                         return {
                             "status": "ambiguous",
-                            "summary": (
-                                f"'{target}' matches {candidate_count} node(s). "
-                                "Re-run with a qualified_name from disambiguation."
-                            ),
+                            "summary": summary_text,
+                            **caller_fields,
                             # Preserve the established key while adding the clearer
                             # agent-facing name introduced by #458.
                             "candidates": ranked,
