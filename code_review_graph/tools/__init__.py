@@ -1,6 +1,6 @@
 """MCP tool definitions for the Code Review Graph server.
 
-Exposes 32 tools (each registered in main.py with a ``_tool`` suffix):
+Exposes 33 tools (each registered in main.py with a ``_tool`` suffix):
 1. build_or_update_graph  - full or incremental build
 2. get_impact_radius      - blast radius from changed files
 3. query_graph            - predefined graph queries
@@ -32,6 +32,7 @@ Exposes 32 tools (each registered in main.py with a ``_tool`` suffix):
 29. run_postprocess       - flows, communities and FTS for an existing graph
 30. get_minimal_context   - compact task-scoped entry point (call this first)
 31. cross_repo_requests   - join Spring Feign and JS/TS calls to the endpoints they reach
+32. transitions_of       - every transition of one Step Functions state machine
 """
 
 from __future__ import annotations

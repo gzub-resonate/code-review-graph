@@ -635,6 +635,7 @@ alias = "project-b"
 | `cross_repo_search_tool` | 搜索已注册的仓库；`repos` 可把搜索限定到一个子集 |
 | `cross_repo_requests_tool` | 把 Spring Feign 调用关联到其他已注册仓库中对应的端点；Feign 服务名通过可选的别名文件或仓库自身声明的名称（Spring 应用名、ECS 服务、ECR 仓库；见 [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md)）找到仓库；`origin="awssdk"` 关联 AWS SDK 调用，包括按配置档从 Spring 配置中读取的名称（只存储资源名称；见 [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration)） |
 | `pr_blast_radius_tool` | 从 Git 读取拉取请求的变更文件（包括新增文件），并通过基线图求出其影响范围 |
+| `transitions_of_tool` | 一次调用返回某个 Step Functions 状态机的全部转换（源状态、目标状态、类型、Choice 条件和行号） |
 
 **MCP 提示模板**（5 个工作流模板）：
 `review_changes`、`architecture_map`、`debug_issue`、`onboard_developer`、`pre_merge_check`

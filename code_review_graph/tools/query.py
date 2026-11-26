@@ -280,6 +280,26 @@ def _read_asl_conditions(
         return None
 
 
+def _choice_condition(
+    store: Any, root: Path, cache: dict[str, dict[tuple[int, int], str | None] | None],
+    edge: Any,
+) -> tuple[str | None, str | None]:
+    """``(test, reason)`` for a ``choice`` edge: one of the two is ``None``.
+
+    *cache* holds each file's table, so a file is read once however many edges ask.
+    """
+    index = edge.extra.get("index")
+    if edge.extra.get("via") != "choice" or not isinstance(index, int):
+        return None, None
+    if edge.file_path not in cache:
+        cache[edge.file_path] = _read_asl_conditions(store, root, edge.file_path)
+    table = cache[edge.file_path]
+    if table is None:
+        return None, "the file changed since it was indexed, or cannot be read"
+    text = table.get((edge.line, index))
+    return (text, None) if text else (None, "the rule's test is not readable")
+
+
 def _amqp_edge_fields(edge: Any) -> dict[str, Any]:
     """The AMQP keys of a publisher or listener edge, sanitised for output.
 
@@ -1454,6 +1474,44 @@ def _attach_resolution_notes(
         response["note"] = java_importers["note"]
 
 
+def _asl_states_of(store: GraphStore, machine: GraphNode) -> list[GraphNode]:
+    """Every state of a machine in file order: top-level, and inside Parallel and Map."""
+    states: list[GraphNode] = []
+    pending = [machine.qualified_name]
+    seen = set(pending)
+    while pending:
+        for edge in store.iter_edges_by_source(pending.pop()):
+            if edge.kind != "CONTAINS" or edge.target_qualified in seen:
+                continue
+            seen.add(edge.target_qualified)
+            child = store.get_node(edge.target_qualified)
+            if child is not None and child.kind == "Function":
+                states.append(child)
+                pending.append(child.qualified_name)
+    states.sort(key=lambda n: (n.line_start or 0, n.name))
+    return states
+
+
+def _state_label(qualified: str) -> str:
+    """``<machine>/<state path>`` of a state's qualified name, without the file path."""
+    return qualified.split("::", 1)[1] if "::" in qualified else qualified
+
+
+def _compact_state_edge(edge: dict[str, Any], forward: bool) -> dict[str, Any]:
+    """One transition for minimal mode: the other state, how it is reached, and where."""
+    row: dict[str, Any] = {
+        "target": _state_label(str(edge["target" if forward else "source"])),
+        "via": edge.get("via"),
+    }
+    if edge.get("condition"):
+        row["condition"] = edge["condition"]
+    if edge.get("conditions"):
+        row["conditions"] = edge["conditions"]
+    if edge.get("line") is not None:
+        row["line"] = edge["line"]
+    return row
+
+
 def query_graph(
     pattern: str,
     target: str,
@@ -1532,6 +1590,12 @@ def query_graph(
 
         handlers_of also takes a route (``POST /v1/items``, ``/v1/items/{id}``); importers_of
         on a Java file lists class-level importers (``import_level``).
+
+        ``next_states_of`` and ``previous_states_of`` in minimal mode add a compact ``edges`` list
+        (``target``, ``via``, ``condition``, ``line``).
+
+        ``children_of`` on a Step Functions ``*.asl.json`` file lists the states of its machine
+        (nested ones included) and adds a ``note``.
 
         ``tests_for`` also returns ``tests_direct`` and ``tests_inferred``: how many of the
         ``result_count`` tests are traced links and how many carry ``inferred_by`` (guessed
@@ -1617,6 +1681,7 @@ def query_graph(
         edges_out: list[dict[str, Any]] = []
         total_results = 0
         handler_as_target = False
+        children_note: str | None = None
         # Results matched by a name or an unpinned call, not a traced edge.
         inferred_results = 0
         # (dedupe key, row, edge) for the call-site patterns, collected before
@@ -2183,11 +2248,37 @@ def query_graph(
                         }, e)
 
         elif pattern == "children_of":
+            machines: list[GraphNode] = []
             for e in store.iter_edges_by_source(qn):
                 if e.kind == "CONTAINS":
                     child = store.get_node(e.target_qualified)
                     if child:
-                        add_result(node_to_dict(child))
+                        if node.kind == "File" and node.language == "asl":
+                            machines.append(child)
+                        else:
+                            add_result(node_to_dict(child))
+            if machines:
+                # A state machine file holds one machine, and the machine holds the
+                # states: answer with the states, nested ones included.
+                machines.sort(key=lambda m: m.line_start or 0)
+                if len(machines) == 1:
+                    states = _asl_states_of(store, machines[0])
+                    for state in states:
+                        add_result(node_to_dict(state))
+                    children_note = (
+                        f"{len(states)} state(s) of machine '{_sanitize_name(machines[0].name)}'; "
+                        f"children_of on '{_sanitize_name(machines[0].qualified_name)}' "
+                        "lists its top-level states only."
+                    )
+                else:
+                    for machine in machines:
+                        row = node_to_dict(machine)
+                        row["state_count"] = len(_asl_states_of(store, machine))
+                        add_result(row)
+                    children_note = (
+                        f"{len(machines)} state machines in this file: run children_of "
+                        "on a machine's qualified_name to list its states."
+                    )
 
         elif pattern == "tests_for":
             # Keep the normal sanitized node response while adding the
@@ -2309,18 +2400,7 @@ def query_graph(
 
             def rule_condition(edge: Any) -> tuple[str | None, str | None]:
                 """``(test, reason)`` for a ``choice`` edge: one of the two is ``None``."""
-                index = edge.extra.get("index")
-                if edge.extra.get("via") != "choice" or not isinstance(index, int):
-                    return None, None
-                if edge.file_path not in conditions_by_file:
-                    conditions_by_file[edge.file_path] = _read_asl_conditions(
-                        store, root, edge.file_path,
-                    )
-                table = conditions_by_file[edge.file_path]
-                if table is None:
-                    return None, "the file changed since it was indexed, or cannot be read"
-                text = table.get((edge.line, index))
-                return (text, None) if text else (None, "the rule's test is not readable")
+                return _choice_condition(store, root, conditions_by_file, edge)
 
             conditions_by_state: dict[str, list[str]] = {}
             for edge in edges:
@@ -2668,6 +2748,12 @@ def query_graph(
                 "results": minimal_results,
                 **page.fields(),
             }
+            if pattern in ("next_states_of", "previous_states_of"):
+                # The names alone say which states, not how they are reached: keep the
+                # branch's kind, test and line, without the ids, confidence and long paths.
+                minimal_response["edges"] = [
+                    _compact_state_edge(e, pattern == "next_states_of") for e in edges_out
+                ]
             if pattern == "tests_for":
                 minimal_response["tests_direct"] = tests_direct
                 minimal_response["tests_inferred"] = tests_inferred
@@ -2683,6 +2769,8 @@ def query_graph(
             _attach_resolution_notes(
                 minimal_response, ambiguity, route_endpoints, java_importers,
             )
+            if children_note:
+                minimal_response["note"] = children_note
             return minimal_response
 
         response: dict[str, Any] = {
@@ -2710,6 +2798,8 @@ def query_graph(
         if confidence:
             response["confidence"] = confidence
         _attach_resolution_notes(response, ambiguity, route_endpoints, java_importers)
+        if children_note:
+            response["note"] = children_note
         return response
     finally:
         store.close()

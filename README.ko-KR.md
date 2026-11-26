@@ -637,6 +637,7 @@ alias = "project-b"
 | `cross_repo_search_tool` | 등록된 저장소 검색. `repos`로 대상을 좁힐 수 있음 |
 | `cross_repo_requests_tool` | Spring Feign 호출을 다른 등록된 저장소에서 대응하는 엔드포인트와 연결. Feign 서비스 이름은 선택적 별칭 파일이나 저장소가 선언하는 이름(Spring 애플리케이션 이름, ECS 서비스, ECR 저장소; [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) 참고)으로 저장소에 닿습니다. `origin="awssdk"`는 AWS SDK 호출을 연결하며, 프로파일별로 Spring 설정에서 읽은 이름도 포함합니다(리소스 이름만 저장; [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration) 참고) |
 | `pr_blast_radius_tool` | 풀 리퀘스트의 변경 파일(새 파일 포함)을 Git에서 읽고 기준 그래프를 따라 영향 범위를 구합니다 |
+| `transitions_of_tool` | Step Functions 상태 머신 하나의 모든 전이를 한 번의 호출로 반환합니다 (출발, 도착, 종류, Choice 조건, 줄 번호) |
 
 **MCP 프롬프트**(워크플로 템플릿 5개):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`

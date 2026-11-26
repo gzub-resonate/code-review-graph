@@ -799,6 +799,49 @@ async def query_graph_tool(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def transitions_of_tool(
+    machine: str,
+    repo_root: Optional[str] = None,
+    detail_level: str = "standard",
+    max_results: int = 200,
+    cursor: Optional[str] = None,
+) -> dict:
+    """Every transition of one Step Functions state machine in a single call.
+
+    Use it instead of one ``query_graph_tool next_states_of`` call per state: it returns all
+    the edges of the machine, nested Parallel and Map states included, in file order.
+
+    Args:
+        machine: A machine name, its qualified name (``<file>::<machine>``) or its
+            ``*.asl.json`` definition file. A name that matches several machines answers
+            ``ambiguous`` with their qualified names.
+        repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" (default): rows ``{from, to, kind, condition?, line, errors?}``.
+            "minimal": the same rows as one string each, ``"from -> to | kind | condition |
+            Lline"``.
+        max_results: Rows per page. Default: 200, at most 500.
+        cursor: The ``next_cursor`` of the previous reply, to read the next page.
+
+    ``kind`` is Next, Choice, Default, Catch, Branch or Map. A Choice row's ``condition`` is
+    read from the file while it is the one that was indexed; otherwise the reply's ``note`` says
+    how many were left out. ``state_count`` and ``transition_count`` cover the whole machine.
+    """
+    # Imported here, not through the tools package: that package is on the index build's
+    # import path, and this is query-side only.
+    from .tools.asl_tools import transitions_of_func
+
+    root = _resolve_repo_root(repo_root)
+    return await _offload(
+        "transitions_of_tool",
+        lambda: transitions_of_func(
+            machine=machine, repo_root=root, detail_level=detail_level,
+            max_results=max_results, cursor=cursor,
+        ),
+        root,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_review_context_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,

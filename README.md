@@ -601,7 +601,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for th
 </details>
 
 <details>
-<summary><strong>32 MCP tools</strong></summary>
+<summary><strong>33 MCP tools</strong></summary>
 <br>
 
 The assistant uses these once the graph is built. The 25 tools that only read carry `readOnlyHint: true`, so a client can run them without asking; the five that write (`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`) do not.
@@ -640,6 +640,7 @@ The assistant uses these once the graph is built. The 25 tools that only read ca
 | `cross_repo_search_tool` | Search registered repositories; `repos` limits the search to a subset |
 | `cross_repo_requests_tool` | Join Spring Feign calls to the endpoints they reach in other registered repositories; Feign service names reach repositories through an optional alias file or the names a repo declares (Spring application name, ECS service, ECR repository; see [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md)); `origin="awssdk"` joins AWS SDK calls, including names read per profile from Spring configuration (only resource names are stored; see [docs/INFRASTRUCTURE_REFERENCES.md](docs/INFRASTRUCTURE_REFERENCES.md#aws-names-held-in-spring-configuration)) |
 | `pr_blast_radius_tool` | What a pull request's changed files reach, new files included, read from Git and reached through the base graph |
+| `transitions_of_tool` | Every transition of one Step Functions state machine in a single call: from, to, kind (Next, Choice, Default, Catch), Choice condition and line |
 
 The change tools (`detect_changes_tool`, `get_review_context_tool`, `get_impact_radius_tool`, `get_affected_flows_tool`, `pr_blast_radius_tool`) review the last commit when a call names no `pr`, `head`, `base` or `changed_files`, and label it in a `scope` object; see the tool reference in docs/COMMANDS.md.
 
@@ -757,7 +758,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### Tool Filtering
 
-CRG exposes 32 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
+CRG exposes 33 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
 
 ```bash
 # CLI flag

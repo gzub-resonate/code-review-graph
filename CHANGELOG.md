@@ -43,6 +43,20 @@
   repos or fewer, or with the new `include_repo_list=True`; the name list was ~2.5 KB of every
   reply on a 122-repo registry. `skipped_repos` is now listed in full instead of cut at 20
   (`skipped_repos_truncated` is always false). Query-time only.
+- `transitions_of_tool`: every transition of one Step Functions state machine (name, `<file>::<machine>`
+  or `*.asl.json` file) in a single call, with `from`, `to`, `kind` (Next, Choice, Default, Catch,
+  Branch, Map), the Choice `condition`, `line` and, for Catch, `errors`. It pages like the other
+  tools; `detail_level="minimal"` returns one string per transition. It replaces a
+  `next_states_of` call per state. Query-time only; the index fingerprint is unchanged.
+- `query_graph_tool` `children_of` on a Step Functions definition file (`*.asl.json`) now lists the
+  states of its machine, nested Parallel and Map states included, with a `note` saying so; it used
+  to return only the machine node, whose qualified name (`<file>::<machine>`) had to be guessed. A
+  file with several machines lists them with `state_count`. Other files and `<file>::<machine>`
+  are unchanged. Query-time only.
+- `query_graph_tool` `next_states_of` and `previous_states_of` with `detail_level="minimal"` now
+  return a compact `edges` list (`target`, `via`, `condition`, `line`) beside the names, so a
+  Choice branch's test is no longer lost; it stays about a third of the standard reply.
+  Query-time only; the index fingerprint is unchanged.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,

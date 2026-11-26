@@ -24,7 +24,7 @@ Claude Code is one supported client among several.
 │  ┌────────────────────────────────────────────┐              │
 │  │      MCP Server (stdio or localhost HTTP)  │              │
 │  │                                            │              │
-│  │  32 MCP tools + 5 MCP prompts              │              │
+│  │  33 MCP tools + 5 MCP prompts              │              │
 │  │  ├── Core: build, postprocess, impact,     │              │
 │  │  │   query, review, search, traverse,      │              │
 │  │  │   embed, stats, docs, minimal context,  │              │
@@ -74,7 +74,7 @@ All modules live in `code_review_graph/`.
 | `embeddings.py` | Embedding providers and the `embeddings` table |
 | `changes.py`, `change_details.py`, `refactor.py`, `analysis.py`, `hints.py`, `uncertainty.py`, `context_savings.py`, `context_history.py` | Change risk analysis, the `detect-changes --details` sections, refactoring helpers, hub/bridge/gap analysis, response hints, uncertainty markers, savings estimates and the opt-in savings log |
 | `tools/` | MCP tool implementations, split by domain |
-| `main.py`, `prompts.py` | FastMCP server (32 tools, 5 prompts). Tool modules load on first use |
+| `main.py`, `prompts.py` | FastMCP server (33 tools, 5 prompts). Tool modules load on first use |
 | `multi_worktree.py` | `serve --multi-worktree`: one child server per linked Git worktree |
 | `cli.py`, `daemon.py`, `daemon_cli.py`, `errors.py`, `stdio.py` | CLI, the multi-repo watch daemon, one-line CLI errors and text-stream setup |
 | `visualization.py`, `neighbourhood.py`, `exports.py`, `wiki.py`, `graph_diff.py`, `memory.py`, `forget.py` | HTML visualisation, seeded views and paths, export formats, wiki generation, snapshot diffing, Q&A memory, file removal |

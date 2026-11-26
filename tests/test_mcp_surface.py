@@ -4,7 +4,7 @@
 review journey across about seven tools. This module extends that idea to
 everything the server publishes:
 
-* every registered ``@mcp.tool()`` (the server advertises 32; the count is
+* every registered ``@mcp.tool()`` (the server advertises 33; the count is
   read from ``tools/list`` at run time, never hard-coded), called with
   realistic arguments against a real built graph, asserting on the CONTENT
   that comes back rather than on the absence of an exception;
@@ -466,7 +466,7 @@ class Walk:
 
 
 async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> None:
-    """Drive all 32 tools through one client session and assert on payloads.
+    """Drive all 33 tools through one client session and assert on payloads.
 
     The canary is at the bottom: the set of tools exercised here has to equal
     the set the server advertises over ``tools/list``. A tool added to
@@ -485,8 +485,8 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
         async with _client(fixture, embed_env) as session:
             listed = await asyncio.wait_for(session.list_tools(), timeout=CALL_TIMEOUT)
             registered = {tool.name for tool in listed.tools}
-            assert len(registered) == 32, (
-                f"expected the documented 32 tools, tools/list advertised {len(registered)}"
+            assert len(registered) == 33, (
+                f"expected the documented 33 tools, tools/list advertised {len(registered)}"
             )
 
             # --- 1. build -------------------------------------------------
@@ -931,6 +931,12 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             assert blast["total_files"] == 0 and blast["files"] == [], blast
             walk.verify("pr_blast_radius_tool", ["status", "total_files", "files"])
 
+            transitions = await _call(
+                session, "transitions_of_tool", {"machine": "no_such_machine"},
+            )
+            assert transitions["status"] == "not_found", transitions
+            walk.verify("transitions_of_tool", ["status", "summary"])
+
             # --- coverage canary -------------------------------------------
             missing = registered - set(walk.checked)
             assert not missing, f"registered tools never exercised: {sorted(missing)}"
@@ -1041,6 +1047,7 @@ MISSING_ARG_CASES: dict[str, dict[str, Any]] = {
     "apply_refactor_tool": {},
     "get_wiki_page_tool": {},
     "traverse_graph_tool": {},
+    "transitions_of_tool": {},
     "cross_repo_search_tool": {},
 }
 
@@ -1078,6 +1085,7 @@ WRONG_TYPE_CASES: dict[str, dict[str, Any]] = {
     "cross_repo_search_tool": {"query": "x", "repos": "not-a-list"},
     "cross_repo_requests_tool": {"repos": "not-a-list"},
     "pr_blast_radius_tool": {"pr": "not-a-number"},
+    "transitions_of_tool": {"machine": "m", "max_results": "many"},
 }
 
 # Out-of-range cases the server refuses today. "Refuses" means a protocol
@@ -1103,6 +1111,7 @@ OUT_OF_RANGE_REFUSED: dict[str, dict[str, Any]] = {
     "cross_repo_search_tool": {"query": "x", "limit": 0},
     "cross_repo_requests_tool": {"limit": 0},
     "pr_blast_radius_tool": {"head": "HEAD", "depth": 0},
+    "transitions_of_tool": {"machine": "m", "max_results": 0},
     "embed_graph_tool": {"provider": "no_such_provider"},
     "get_docs_section_tool": {"section_name": "no_such_section"},
     "list_graph_stats_tool": {"repo_root": "/nonexistent-surface-root"},
@@ -1253,6 +1262,7 @@ REPO_ROOT_TOOLS: dict[str, dict[str, Any]] = {
     "list_graph_stats_tool": {},
     "find_large_functions_tool": {},
     "list_flows_tool": {},
+    "transitions_of_tool": {"machine": "m"},
     "get_flow_tool": {"flow_id": 1},
     "get_affected_flows_tool": {},
     "pr_blast_radius_tool": {"head": "HEAD", "base": "HEAD"},
@@ -1636,7 +1646,7 @@ def test_spec_conformance_requirements_from_issue_919(built: Fixture) -> None:
         # The modern path serves the real tool list with no handshake at all.
         tools = server.request("tools/list", _envelope(), req_id=3)
         assert tools is not None and "result" in tools, tools
-        assert len(tools["result"]["tools"]) == 32, len(tools["result"]["tools"])
+        assert len(tools["result"]["tools"]) == 33, len(tools["result"]["tools"])
 
         # An unknown method gets the JSON-RPC 2.0 code for one (section 5.1).
         unknown = server.request("surface/no-such-method", _envelope(), req_id=4)
@@ -1668,7 +1678,7 @@ def test_spec_conformance_requirements_from_issue_919(built: Fixture) -> None:
 
         tools = server.request("tools/list", {}, req_id=2)
         assert tools is not None and "result" in tools, tools
-        assert len(tools["result"]["tools"]) == 32, len(tools["result"]["tools"])
+        assert len(tools["result"]["tools"]) == 33, len(tools["result"]["tools"])
 
         # The checker's SHOULD-level finding on the older revision: an
         # unrecognised pagination cursor is answered with a first page rather

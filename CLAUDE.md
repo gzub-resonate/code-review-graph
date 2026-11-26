@@ -14,13 +14,13 @@ When using code-review-graph MCP tools:
 4. Follow the `next_tool_suggestions` field in each response.
 5. Target: about 5 tool calls per task. Source snippets stand in for file reads.
 
-All registered tool names end in `_tool`. The 32 tools are defined in `main.py`.
+All registered tool names end in `_tool`. The 33 tools are defined in `main.py`.
 
 ## Architecture
 
 Core package `code_review_graph/` (Python 3.10+):
 
-- `main.py`: FastMCP server entry point. Registers 32 tools and 5 prompts.
+- `main.py`: FastMCP server entry point. Registers 33 tools and 5 prompts.
 - `tools/`: tool implementations by domain: `build.py`, `query.py`, `review.py`, `context.py`, `flows_tools.py`, `community_tools.py`, `refactor_tools.py`, `docs.py`, `registry_tools.py`, `analysis_tools.py`, `pr_tools.py`; shared helpers in `_common.py`.
 - `prompts.py`: 5 MCP prompts (review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check).
 - `cli.py`: the `code-review-graph` command. `doctor.py`: the read-only `doctor` command (every copy on PATH and its version, the version each MCP entry runs, the graph's schema and freshness, the hooks). `stdio.py`: UTF-8 output on consoles with an older encoding. `errors.py`: errors the CLI prints as one `Error:` line and MCP tools return as `status: error`. `daemon.py` and `daemon_cli.py`: the `crg-daemon` multi-repo watch daemon. `multi_worktree.py`: `serve --multi-worktree`, one child server per linked Git worktree. `hook_update.py`: the `hook-update` and `hook-status` commands, which act on the repository that holds the edited file.
