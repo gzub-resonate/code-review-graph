@@ -157,3 +157,113 @@ def test_cursor_is_refused_for_a_different_match_mode(tmp_path, registry, fake_s
         query=HYPHEN, max_results=3, include_fuzzy=True, match="exact", cursor=first["next_cursor"],
     )
     assert other["status"] == "error"
+
+
+# ---- B: awssdk is_test / include_tests / path_prefix / source, stepfunction machine ----------
+
+from .test_asl_cross_repo_links import MACHINES  # noqa: E402
+from .test_asl_cross_repo_links import make_repo as make_asl_repo  # noqa: E402
+from .test_cross_repo_requests_paging import make_repo as make_plain_repo  # noqa: E402
+
+
+def boto(bucket: str, func: str = "f") -> str:
+    return (
+        "import boto3\ns3 = boto3.client('s3')\n"
+        f"def {func}():\n    s3.get_object(Bucket='{bucket}', Key='k')\n"
+    )
+
+
+@pytest.fixture
+def sdk_repo(tmp_path, registry):
+    """Five files with one S3 call each. The parser emits no AWS SDK edge from a test path
+    (graphs built before that rule do hold them, as the live one does), so the test rows
+    are parsed under a plain name and then moved into test paths in the graph."""
+    root = make_plain_repo(tmp_path, registry, "svc", {
+        "app/main.py": boto("prod-bkt", "load"),
+        "mcp/server.py": boto("mcp-bkt", "serve"),
+        "mcp/tools/more.py": boto("mcp-bkt2", "more"),
+        "app/t_a.py": boto("test-bkt", "check"),
+        "app/t_b.py": boto("test-bkt2", "check_b"),
+    })
+    import sqlite3
+
+    conn = sqlite3.connect(root / ".code-review-graph" / "graph.db")
+    for old, new in (("app/t_a.py", "src/test/py/test_a.py"), ("app/t_b.py", "tests/test_b.py")):
+        conn.execute(
+            "UPDATE edges SET file_path = ? WHERE file_path = ?",
+            (str(root / new), str(root / old)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def sdk(**args):
+    reply = cross_repo_requests_func(origin="awssdk", **args)
+    assert reply["status"] == "ok", reply
+    return reply
+
+
+def files_of(reply):
+    return sorted(r["file"] for r in reply["results"])
+
+
+def test_awssdk_rows_carry_is_test_and_tests_are_kept_by_default(sdk_repo):
+    reply = sdk()
+    flags = {r["file"]: r["is_test"] for r in reply["results"]}
+    assert flags == {
+        "app/main.py": False, "mcp/server.py": False, "mcp/tools/more.py": False,
+        "src/test/py/test_a.py": True, "tests/test_b.py": True,
+    }
+    assert reply["total"] == 5 and reply["tests_hidden"] == 0
+
+
+def test_include_tests_false_hides_them_and_counts_them(sdk_repo):
+    reply = sdk(include_tests=False)
+    assert files_of(reply) == ["app/main.py", "mcp/server.py", "mcp/tools/more.py"]
+    assert reply["total"] == 3 and reply["tests_hidden"] == 2
+    assert "2 test row(s) hidden" in reply["summary"]
+    assert sum(reply["counts"].values()) == 3
+
+
+def test_path_prefix_and_source_filters(sdk_repo):
+    assert files_of(sdk(path_prefix="mcp/")) == ["mcp/server.py", "mcp/tools/more.py"]
+    assert files_of(sdk(path_prefix="mcp/server.py")) == ["mcp/server.py"]
+    assert files_of(sdk(source="serve")) == ["mcp/server.py"]
+    assert files_of(sdk(path_prefix="mcp", source="more")) == ["mcp/tools/more.py"]
+    assert sdk(path_prefix="nothing/")["results"] == []
+
+
+def test_filters_apply_before_paging_and_cursors_are_tied_to_them(sdk_repo):
+    first = sdk(path_prefix="mcp/", max_results=1)
+    assert first["total"] == 2 and len(first["results"]) == 1 and first["next_cursor"]
+    second = sdk(path_prefix="mcp/", max_results=1, cursor=first["next_cursor"])
+    assert files_of(first) + files_of(second) == ["mcp/server.py", "mcp/tools/more.py"]
+    assert "next_cursor" not in second
+    for other in ({"path_prefix": "app/"}, {"include_tests": False}, {"source": "serve"}, {}):
+        with pytest.raises(Exception, match="different query"):
+            sdk(max_results=1, cursor=first["next_cursor"], **other)
+
+
+def test_new_filters_are_refused_for_other_origins():
+    with pytest.raises(ValueError, match="machine"):
+        cross_repo_requests_func(origin="awssdk", machine="orders")
+    with pytest.raises(ValueError, match="path_prefix"):
+        cross_repo_requests_func(origin="trigger", path_prefix="x")
+    with pytest.raises(ValueError, match="include_tests"):
+        cross_repo_requests_func(origin="stepfunction", include_tests=False)
+
+
+def test_stepfunction_machine_filter(tmp_path, registry):
+    make_asl_repo(tmp_path, registry, "machines", MACHINES)
+    everything = cross_repo_requests_func(origin="stepfunction")
+    only = cross_repo_requests_func(origin="stepfunction", machine="orders")
+    assert only["total"] == everything["total"] > 0
+    assert {r["machine"] for r in only["results"]} == {"orders"}
+    none = cross_repo_requests_func(origin="stepfunction", machine="nope")
+    assert none["results"] == [] and none["total"] == 0
+    first = cross_repo_requests_func(origin="stepfunction", machine="orders", max_results=1)
+    assert first["next_cursor"]
+    with pytest.raises(Exception, match="different query"):
+        cross_repo_requests_func(
+            origin="stepfunction", machine="nope", max_results=1, cursor=first["next_cursor"],
+        )

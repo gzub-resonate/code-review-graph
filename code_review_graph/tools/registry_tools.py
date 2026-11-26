@@ -41,6 +41,7 @@ from ..paging import (
 )
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
 from ..repo_cache import INFRASTRUCTURE_RESULTS, MEMO, SKIPPED, parallel_map_budget
+from ..parser import is_test_file
 from ..search import hybrid_search
 from ._common import _bounded, _validate_positive_int
 
@@ -801,6 +802,8 @@ def _stepfunction_links(
     status: str | None,
     max_results: int,
     cursor: str | None = None,
+    path_prefix: str | None = None,
+    machine: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="stepfunction"`` branch: what state machines call, joined to its owner."""
     definitions = sl.Definitions()
@@ -809,6 +812,7 @@ def _stepfunction_links(
         definitions.defines, sl.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
+        path_prefix=path_prefix, machine=machine,
     )
     for row in result["results"]:
         for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
@@ -826,6 +830,9 @@ def _awssdk_links(
     status: str | None,
     max_results: int,
     cursor: str | None = None,
+    path_prefix: str | None = None,
+    source: str | None = None,
+    include_tests: bool = True,
 ) -> dict[str, Any]:
     """The ``origin="awssdk"`` branch: AWS resources application code calls, joined to owners."""
     definitions = sl.Definitions()
@@ -835,6 +842,7 @@ def _awssdk_links(
         repos, target_name, target, status, max_results, infrastructure=True,
         read_context=al.read_declare_edges,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
+        path_prefix=path_prefix, source=source, include_tests=include_tests,
     )
     for row in result["results"]:
         # Every string here was read from a repository's files: none is passed on as written.
@@ -1237,6 +1245,15 @@ def _edge_target_filter(
     return keep
 
 
+def _source_matches(row_source: str, wanted: str) -> bool:
+    """Whether a row's ``source`` symbol is *wanted*, its last segment, or lies below it."""
+    return (
+        row_source == wanted
+        or row_source.rsplit(".", 1)[-1] == wanted
+        or row_source.startswith(wanted + ".")
+    )
+
+
 def _infra_links(
     origin: str,
     noun: str,
@@ -1256,6 +1273,10 @@ def _infra_links(
     edge_filter: Any = None,
     prefetch: Any = None,
     cursor: str | None = None,
+    path_prefix: str | None = None,
+    source: str | None = None,
+    machine: str | None = None,
+    include_tests: bool = True,
 ) -> dict[str, Any]:
     """Shared body of the ``terraform``, ``workflow``, ``stepfunction`` and ``awssdk`` origins.
 
@@ -1272,6 +1293,9 @@ def _infra_links(
     The rows are paged: *max_results* (at most 100) is the page size, and a cut list carries
     ``next_cursor``, which returns the next page when passed back as *cursor*. A cursor is
     tied to the query and to the rows it was made on, so it is refused when either changed.
+
+    *path_prefix*, *source*, *machine* and *include_tests* filter the rows before ``counts``,
+    ``total`` and paging, so a page and its cursor only ever hold rows that passed them.
     """
     from ..registry import Registry
 
@@ -1393,6 +1417,25 @@ def _infra_links(
             if (r[path_key] or "") == wanted
             or (r[path_key] or "").startswith(wanted + "/")
         ]
+    if origin == "awssdk":
+        for r in rows:
+            r["is_test"] = is_test_file(r.get("file") or "")
+    if path_prefix:
+        wanted_path = path_prefix.strip("/")
+        rows = [
+            r for r in rows
+            if (r.get("file") or "") == wanted_path
+            or (r.get("file") or "").startswith(wanted_path + "/")
+        ]
+    if source:
+        rows = [r for r in rows if _source_matches(str(r.get("source") or ""), source)]
+    if machine:
+        rows = [r for r in rows if r.get("machine") == machine]
+    tests_hidden = 0
+    if not include_tests:
+        kept_rows = [r for r in rows if not r.get("is_test")]
+        tests_hidden = len(rows) - len(kept_rows)
+        rows = kept_rows
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
@@ -1404,6 +1447,8 @@ def _infra_links(
             "cross_repo_requests_tool", origin=origin,
             repos=sorted(repos) if repos else None,
             target_repo=target_repo, target_path=target_path, status=status,
+            path_prefix=path_prefix, source=source, machine=machine,
+            include_tests=include_tests,
         ),
         # The repos left out of a partial answer are part of the stamp, as for Feign.
         stamp=content_stamp([rows, skipped]),
@@ -1415,7 +1460,11 @@ def _infra_links(
                 r[key] = _sanitize_name(r[key])
     result: dict[str, Any] = {
         "status": "ok",
-        "summary": f"{total} {noun} across {len(selected)} repo(s)" + shown_range(page),
+        "summary": (
+            f"{total} {noun} across {len(selected)} repo(s)" + shown_range(page)
+            + (f"; {tests_hidden} test row(s) hidden (include_tests=True shows them)"
+               if tests_hidden else "")
+        ),
         "origin": origin,
         "results": shown,
         "counts": counts,
@@ -1425,6 +1474,8 @@ def _infra_links(
         "unreadable": unreadable,
         **page.fields(),
     }
+    if origin == "awssdk":
+        result["tests_hidden"] = tests_hidden
     if skipped:
         result["skipped_repos"] = skipped
     if unknown_shown:
@@ -1531,6 +1582,10 @@ def cross_repo_requests_func(
     origin: str | None = None,
     cursor: str | None = None,
     include_repo_list: bool = False,
+    path_prefix: str | None = None,
+    source: str | None = None,
+    machine: str | None = None,
+    include_tests: bool = True,
 ) -> dict[str, Any]:
     """Join outbound Spring Feign and JavaScript/TypeScript calls to server endpoints.
 
@@ -1567,6 +1622,15 @@ def cross_repo_requests_func(
             filters, not just the rows shown.
         include_repo_list: Feign/JS only: return ``repos_searched`` (the names) even when more
             than 10 repos were read. ``repos_searched_total`` is always the count.
+        path_prefix: ``awssdk`` and ``stepfunction`` only: keep rows whose ``file`` is this
+            path or lies below it (repo-relative, e.g. ``mcp/``).
+        source: ``awssdk`` only: keep rows whose ``source`` symbol equals this, ends with it
+            after a ``.``, or lies below it.
+        machine: ``stepfunction`` only: keep rows of this state machine (exact name).
+        include_tests: ``awssdk`` only. Every row has ``is_test``. Default True keeps test
+            rows (counts are unchanged); False hides them and ``tests_hidden`` says how many.
+            All four filters apply before ``counts``, ``total`` and paging, and a cursor is
+            refused for different values.
         cursor: ``next_cursor`` from the previous reply, to read the next page of
             the same query. Each page takes up to ``limit`` more rows from every
             client repo, then keeps the first ``max_results``. Omit it for the
@@ -1674,6 +1738,14 @@ def cross_repo_requests_func(
             "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp, "
             "trigger, external, consumers"
         )
+    for name, given, allowed in (
+        ("path_prefix", path_prefix, ("awssdk", "stepfunction")),
+        ("source", source, ("awssdk",)),
+        ("machine", machine, ("stepfunction",)),
+        ("include_tests", None if include_tests else False, ("awssdk",)),
+    ):
+        if given is not None and origin not in allowed:
+            raise ValueError(f"{name} applies only to origin={' or '.join(allowed)}")
     if origin == "trigger":
         return _trigger_links(repos, service, route, status, max_results, cursor)
     if origin in ("external", "consumers"):
@@ -1685,9 +1757,15 @@ def cross_repo_requests_func(
     if origin == "amqp":
         return _amqp_links(repos, service, route, status, max_results, cursor)
     if origin == "awssdk":
-        return _awssdk_links(repos, service, route, status, max_results, cursor)
+        return _awssdk_links(
+            repos, service, route, status, max_results, cursor,
+            path_prefix=path_prefix, source=source, include_tests=include_tests,
+        )
     if origin == "stepfunction":
-        return _stepfunction_links(repos, service, route, status, max_results, cursor)
+        return _stepfunction_links(
+            repos, service, route, status, max_results, cursor,
+            path_prefix=path_prefix, machine=machine,
+        )
     if origin == "terraform":
         return _terraform_links(repos, service, route, status, max_results, cursor)
     if origin == "workflow":

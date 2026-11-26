@@ -1948,6 +1948,10 @@ async def cross_repo_requests_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     include_repo_list: bool = False,
+    path_prefix: Optional[str] = None,
+    source: Optional[str] = None,
+    machine: Optional[str] = None,
+    include_tests: bool = True,
 ) -> dict:
     """Join outbound Spring Feign and JS/TS HTTP calls to the endpoints they reach in other repos.
 
@@ -2074,6 +2078,16 @@ async def cross_repo_requests_tool(
         include_repo_list: Feign/JS: ``repos_searched_total`` is always the count of repos read;
             ``repos_searched`` (the names) is returned only for 10 repos or fewer, or when this
             is True. ``skipped_repos`` is always listed in full. Default: False.
+        path_prefix: ``awssdk`` and ``stepfunction`` only. Keep rows whose ``file`` is this
+            repo-relative path or lies below it (``mcp/``). Applied before paging.
+        source: ``awssdk`` only. Keep rows whose ``source`` symbol equals this, ends with it
+            after a ``.``, or lies below it. Applied before paging.
+        machine: ``stepfunction`` only. Keep rows of this state machine (exact name), applied
+            before paging.
+        include_tests: ``awssdk`` only. Every row has ``is_test`` (a test directory or file
+            name). Default True keeps them and changes no count; False hides them and the
+            reply's ``tests_hidden`` and summary say how many. A cursor is tied to all four
+            filters. The four are refused for other origins.
     """
     if repo_root and not repos:
         repos = [Path(repo_root).name]
@@ -2082,7 +2096,8 @@ async def cross_repo_requests_tool(
         lambda: cross_repo_requests_func(
             repos=repos, service=service, route=route, status=status,
             limit=limit, max_results=max_results, origin=origin, cursor=cursor,
-            include_repo_list=include_repo_list,
+            include_repo_list=include_repo_list, path_prefix=path_prefix, source=source,
+            machine=machine, include_tests=include_tests,
         ),
         None,
         provenance=False,

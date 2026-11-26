@@ -1171,7 +1171,17 @@ origin: str | None           # feign | js | terraform | workflow | stepfunction 
 cursor: str | None           # next_cursor of the previous reply (see Result Bounds)
 repo_root: str | None        # Shorthand for repos=[<folder name>] when repos is not given
 include_repo_list: bool = False  # Feign/js: return repos_searched (names) even for more than 10 repos
+path_prefix: str | None      # awssdk, stepfunction: only rows whose file is this repo-relative path or below it
+source: str | None           # awssdk: only rows whose source symbol equals this, ends with it after "." or lies below it
+machine: str | None          # stepfunction: only rows of this state machine (exact name)
+include_tests: bool = True   # awssdk: False hides rows from test files; every row has is_test
 ```
+
+`awssdk` rows carry `is_test` (a test directory or test file name). `include_tests` defaults to True, so counts
+are as before; with `include_tests=false` the reply gives `tests_hidden` and the summary says how many rows were
+hidden. `path_prefix`, `source`, `machine` and `include_tests` filter before `counts`, `total` and paging (they
+reach rows a path-sorted page of 100 never got to) and a cursor is refused for different values. Each is refused
+for an origin it does not apply to.
 
 For the Feign and JS/TS origins `repos_searched_total` is the number of repos read and `repos_searched`
 (the names) is returned only for 10 repos or fewer, or with `include_repo_list=true`. `skipped_repos` is

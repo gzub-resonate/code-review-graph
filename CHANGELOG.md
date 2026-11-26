@@ -4,6 +4,12 @@
 
 ### Added
 
+- `cross_repo_requests_tool` `origin="awssdk"` rows carry `is_test`, and there are new filters
+  that apply before counts and paging (a cursor is refused for different values): `path_prefix`
+  (awssdk, stepfunction), `source` (awssdk), `machine` (stepfunction, exact state machine name)
+  and `include_tests` (awssdk; default True so counts do not change; False hides test rows and
+  reports `tests_hidden`). Agents could not reach rows under a late directory because the list is
+  path-sorted in pages of 100. Query-time only.
 - `cross_repo_search_tool` takes `match="exact"` (only `exact`, `exact_ci` and `qualified` rows) and
   its reply carries `exact: "found"|"none"`; the summary says `exact: none` when no row is an exact
   name. With the default `match="fuzzy"` and no exact hit, `fuzzy` rows that share fewer than half
