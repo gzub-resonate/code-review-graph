@@ -181,7 +181,10 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
             key, defined = _config_key(
                 values.get(), prefixes, info["config_getter"], module_root(file_path),
             )
-            if key:
+            # A nested chain (``a.getB().getC()``) is a property path only when the repo's
+            # configuration defines it; otherwise it may be any method chain.
+            nested = "." in str(info["config_getter"].get("property", ""))
+            if key and (defined or not nested):
                 out[-1]["placeholder"] = key
                 out[-1]["extra"]["config_defined"] = defined
     _resolve_config_values(out, values)
