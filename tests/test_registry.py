@@ -31,6 +31,24 @@ class TestRegistry:
         import shutil
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    def test_save_replaces_the_file_in_one_step_and_leaves_no_temp_file(self):
+        """A save writes a sibling file and renames it, so no reader sees a cut-off registry."""
+        self.registry.register(str(self.repo1), alias="r1")
+        before = self.registry_path.stat().st_ino
+        self.registry.register(str(self.repo2), alias="r2")
+        assert self.registry_path.stat().st_ino != before  # a new file took its place
+        assert [p.name for p in Path(self.tmp_dir).glob(".registry.json*")] == []
+        assert len(Registry(path=self.registry_path).list_repos()) == 2
+
+    def test_a_failed_save_keeps_the_old_registry_and_removes_the_temp_file(self):
+        self.registry.register(str(self.repo1), alias="r1")
+        good = self.registry_path.read_text(encoding="utf-8")
+        with patch("code_review_graph.registry.os.replace", side_effect=OSError("disk")):
+            with pytest.raises(OSError):
+                self.registry.register(str(self.repo2), alias="r2")
+        assert self.registry_path.read_text(encoding="utf-8") == good
+        assert [p.name for p in Path(self.tmp_dir).glob(".registry.json*")] == []
+
     def test_register_and_list(self):
         """Register repos and list them back."""
         self.registry.register(str(self.repo1), alias="r1")
