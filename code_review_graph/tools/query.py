@@ -1387,6 +1387,26 @@ def _attach_resolution_notes(
         response["note"] = java_importers["note"]
 
 
+def _state_label(qualified: str) -> str:
+    """``<machine>/<state path>`` of a state's qualified name, without the file path."""
+    return qualified.split("::", 1)[1] if "::" in qualified else qualified
+
+
+def _compact_state_edge(edge: dict[str, Any], forward: bool) -> dict[str, Any]:
+    """One transition for minimal mode: the other state, how it is reached, and where."""
+    row: dict[str, Any] = {
+        "target": _state_label(str(edge["target" if forward else "source"])),
+        "via": edge.get("via"),
+    }
+    if edge.get("condition"):
+        row["condition"] = edge["condition"]
+    if edge.get("conditions"):
+        row["conditions"] = edge["conditions"]
+    if edge.get("line") is not None:
+        row["line"] = edge["line"]
+    return row
+
+
 def query_graph(
     pattern: str,
     target: str,
@@ -1457,6 +1477,9 @@ def query_graph(
 
         handlers_of also takes a route (``POST /v1/items``, ``/v1/items/{id}``); importers_of
         on a Java file lists class-level importers (``import_level``).
+
+        ``next_states_of`` and ``previous_states_of`` in minimal mode add a compact ``edges`` list
+        (``target``, ``via``, ``condition``, ``line``).
 
         ``tests_for`` also returns ``tests_direct`` and ``tests_inferred``: how many of the
         ``result_count`` tests are traced links and how many carry ``inferred_by`` (guessed
@@ -2489,6 +2512,12 @@ def query_graph(
                 "results": minimal_results,
                 **page.fields(),
             }
+            if pattern in ("next_states_of", "previous_states_of"):
+                # The names alone say which states, not how they are reached: keep the
+                # branch's kind, test and line, without the ids, confidence and long paths.
+                minimal_response["edges"] = [
+                    _compact_state_edge(e, pattern == "next_states_of") for e in edges_out
+                ]
             if pattern == "tests_for":
                 minimal_response["tests_direct"] = tests_direct
                 minimal_response["tests_inferred"] = tests_inferred

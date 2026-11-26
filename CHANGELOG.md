@@ -4,6 +4,10 @@
 
 ### Added
 
+- `query_graph_tool` `next_states_of` and `previous_states_of` with `detail_level="minimal"` now
+  return a compact `edges` list (`target`, `via`, `condition`, `line`) beside the names, so a
+  Choice branch's test is no longer lost; it stays about a third of the standard reply.
+  Query-time only; the index fingerprint is unchanged.
 - `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
   (it used to be an error): publisher and listener counts and repos, routing and binding keys,
   and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,

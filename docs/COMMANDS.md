@@ -579,6 +579,11 @@ cursor: str | None               # next_cursor of the previous reply (see Paging
 direction: str | None            # endpoints only: "inbound", "outbound" or "simulator"
 strict: bool = False             # handlers_of / references_to: keep the "ambiguous" answer
 ```
+**Step Functions patterns.** `next_states_of` and `previous_states_of` take a state. With
+`detail_level="minimal"` the names come with a compact `edges` list, one `{target, via, condition,
+line}` per state (`conditions` when several Choice rules reach it); `standard` keeps the full edge
+rows.
+
 **`endpoints`** lists `Endpoint` nodes as one line each,
 `METHOD route owner file:line dir` (space separated, `dir` is `in`, `out` or `sim`), sorted
 by route, with `direction_counts` over everything the `target` substring matches, whatever its
