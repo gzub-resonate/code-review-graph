@@ -734,6 +734,11 @@ as `.yml` or `.json`, a dotted key such as `spring.datasource.url`, or one of th
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
 says there may be more.
 
+A `ConfigProperty` hit (standard detail) carries `value`, plus `value_truncated` and `doc_profiles` when present: the
+literal stored at index time, at most 200 characters. Values of secret-looking keys, credentials, tokens and long
+random strings are dropped at parse time and filtered again on the way out, so they never appear. `query_graph_tool`
+`file_summary` rows of a configuration file carry the same fields.
+
 `include_source=True` lets you answer from the reply instead of opening the
 files. All snippets share one budget of 240 lines, or 700 with
 `expand_neighbors=True`, which adds up to four callers and callees for each of

@@ -679,7 +679,8 @@ async def query_graph_tool(
     - requesters_of: Find client methods that request an outbound endpoint; the target may be
       a route such as "GET /v2/items", matched against Endpoint nodes only
     - consumers_of: Find classes that consume a Spring configuration property
-    - file_summary: Get all nodes in a file
+    - file_summary: Get all nodes in a file; a ``ConfigProperty`` row also carries ``value``,
+      ``value_truncated`` and ``doc_profiles`` where present (never a secret-looking one)
     - path_to: Find how the target reaches ``to``, one row per hop
     - endpoints: List Endpoint nodes, one compact line each (method, path, owner, file:line,
       direction) plus ``direction_counts``. ``target`` is an optional substring of
@@ -860,6 +861,9 @@ async def semantic_search_nodes_tool(
             first page.
 
     Returns ranked nodes; ``next_cursor`` is present when ranked rows remain.
+    A ``ConfigProperty`` hit also carries ``value`` (as stored at index time: at most 200
+    characters, ``value_truncated`` when cut; secret-looking keys and values are never shown)
+    and ``doc_profiles`` when its YAML document is profile-bound; not with ``minimal``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(

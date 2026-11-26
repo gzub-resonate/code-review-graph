@@ -12,6 +12,7 @@ from ..amqp_join import EXCHANGE_PREFIX, PUBLISH_KINDS, link_kind
 from ..analysis import is_generated_file
 from ..aws_sdk_links import merge_resolved_names
 from ..config_keys import normalize_spring_config_key
+from ..config_values import config_value_fields
 from ..constants import (
     IMPORT_CONTEXT_KEY,
     IMPORT_CONTEXT_TYPE_ONLY,
@@ -2391,7 +2392,10 @@ def query_graph(
             graph_paths = _resolve_graph_file_paths(store, root, [target])
             for graph_path in graph_paths:
                 for n in store.iter_nodes_by_file(graph_path):
-                    add_result(node_to_dict(n))
+                    row_out = node_to_dict(n)
+                    if n.kind == "ConfigProperty":
+                        row_out.update(config_value_fields(n.name, n.extra))
+                    add_result(row_out)
 
         resolution_split: dict[str, int] | None = None
         distinct_nodes = 0
@@ -2816,6 +2820,13 @@ def semantic_search_nodes(
             bounds["total_is_lower_bound"] = True
 
         search_mode = mode_out[0] if mode_out else "keyword"
+
+        if detail_level != "minimal":
+            for hit in results:
+                if hit.get("kind") == "ConfigProperty":
+                    config_node = store.get_node(hit["qualified_name"])
+                    if config_node is not None:
+                        hit.update(config_value_fields(config_node.name, config_node.extra))
 
         source_omitted = 0
         if include_source and results and detail_level != "minimal":

@@ -43,6 +43,10 @@
 - `list_flows_tool` reports the count before merging when `group_duplicates` (default true)
   removed flows: `total_before_grouping` and the summary ("329 execution flow(s) (594 before
   merging duplicates; ...)"). The default and `total` are unchanged.
+- `semantic_search_nodes_tool` hits and `query_graph_tool` `file_summary` rows of a `ConfigProperty`
+  now carry `value` (at most 200 characters), `value_truncated` and `doc_profiles` where present.
+  Values of secret-looking keys and credential-looking values stay hidden (the parse-time filter is
+  applied again on output); `detail_level="minimal"` is unchanged. Query-time only.
 
 ### Changed
 
