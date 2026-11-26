@@ -92,6 +92,13 @@ def test_a_page_size_may_change_between_pages():
     assert second.items == items[4:13] and second.offset == 4
 
 
+def test_a_cursor_from_before_a_reindex_says_so():
+    page = paging.paginate(list(range(10)), 3, 100, scope=SCOPE, stamp=STAMP)
+    with pytest.raises(paging.CursorError, match="re-index or update") as caught:
+        paging.paginate(list(range(10)), 3, 100, page.next_cursor, scope=SCOPE, stamp="stamp-2")
+    assert "without a cursor" in str(caught.value)
+
+
 def test_a_cursor_from_another_query_is_refused():
     page = paging.paginate(list(range(10)), 3, 100, scope=SCOPE, stamp=STAMP)
     other = paging.make_scope("t", sort_by="size")
