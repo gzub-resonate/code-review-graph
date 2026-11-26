@@ -2272,7 +2272,10 @@ def query_graph(
                             amqp_fields["matched_via"] = how
                     source = store.get_node(edge.source_qualified)
                     if source:
-                        add_result({**node_to_dict(source), **amqp_fields}, edge)
+                        add_result(
+                            _attach_call_site({**node_to_dict(source), **amqp_fields}, edge),
+                            edge,
+                        )
                     else:
                         edges_out.append({**edge_to_dict(edge), **amqp_fields})
 
@@ -2466,7 +2469,9 @@ def query_graph(
             if pattern == "handlers_of":
                 result_fields += ("endpoint",)
             if pattern in ("publishers_of", "listeners_of"):
-                result_fields += ("matched_via", "routing_key", "binding_key", "queue")
+                result_fields += (
+                    "matched_via", "routing_key", "binding_key", "queue", "call_site",
+                )
             minimal_results = [
                 {
                     k: r[k]

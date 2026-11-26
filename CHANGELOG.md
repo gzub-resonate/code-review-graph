@@ -909,6 +909,9 @@
   hostile-input bounds) and `test_ember_resolver.py`, over the synthetic apps in
   `tests/fixtures/ember/`. `ember_resolved` is a resolver-bound key in
   `graph.py`, so Ember edges are `INFERRED`.
+- `query_graph_tool` `publishers_of` and `listeners_of` rows now carry `call_site` (the call-site
+  `line`, and `file` when it differs), so `detail_level="minimal"` keeps the line the exchange
+  form of `cross_repo_requests_tool` returns. Additive.
 
 ## [2.4.0] - 2026-11-10
 

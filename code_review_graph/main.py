@@ -668,7 +668,8 @@ async def query_graph_tool(
       (``external:rabbitmq:<exchange>``) rows carry ``routing_key``
     - listeners_of: Find methods that listen for an event; for an AMQP exchange rows carry
       ``binding_key`` and ``queue``. ``routing_key`` links the two sides with AMQP topic
-      matching (see below)
+      matching (see below). Rows of both carry ``call_site`` (``line``, and ``file`` when
+      it is not the row's ``file_path``), also with ``detail_level="minimal"``
     - advises: Find methods an AOP advice targets via its pointcut
     - advised_by: Find AOP advice methods that intercept the target
     - handlers_of: Find methods that handle an endpoint; the target may be a route such as

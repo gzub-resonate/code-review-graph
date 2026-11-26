@@ -623,6 +623,9 @@ are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller. Within that order, calls bound to a node come
 before bare-name guesses.
 
+`publishers_of` and `listeners_of` rows carry `call_site` (`line`, plus `file` when it differs from the row's
+`file_path`) in every detail level, `minimal` included.
+
 A target written `external:<kind>:<name>`, such as `external:aws-lambda:order-validator`
 or `external:github-actions:actions/checkout`, names code outside the repository. No node
 has that name, so `callers_of`, `references_to` and `importers_of` read the edges that end
