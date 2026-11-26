@@ -1447,7 +1447,51 @@ Shapes it cannot resolve (these never get a guessed name):
 - Terragrunt-driven module inputs are not evaluated: a rule declared inside a module and wired
   in a stack shows only the half each repo declares.
 
-Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk`, `amqp` and `trigger` origins return at most
+`origin="external"` lists the HTTP calls that reach no registered service, grouped by host, to
+show which third-party vendors each repo depends on. One row per (host group, repo), the
+busiest host first: `host`, `vendor` and `vendor_basis` (`host_table` or `service_name`; an
+unknown host has none), `status` (`known_vendor`, `unknown_vendor`, `host_unresolved`), `calls`,
+`host_calls`, `files` (up to 5), `samples` (up to 3 `method`/`path`/`file`/`line`), `sources`
+(counts by how the host was found) and, for a collapsed vendor, `hosts_seen`. Sources:
+JavaScript/TypeScript calls with an absolute URL, `baseURL` or Ember adapter `host`
+(`js_absolute_url`, `js_base_url`, `ember_adapter_host`), a route that starts with a `${KEY}`
+placeholder (`host_unresolved`, with `unresolved_key`), and Feign clients whose service name
+resolves to no registered repo (`feign_service`, grouped as `service:<name>`; a literal `url=` in
+the annotation gives the host, read from that annotation's lines). A `${...}` service name is
+`host_unresolved` with the first configuration key. Hosts are lower-cased; scheme, credentials,
+port, query, fragment and a leading `www.` are dropped; query strings and credentials never
+appear. A vendor entry such as `*.auth0.com` or `*.salesforce.com` collapses tenant subdomains.
+`service` filters by host, domain, vendor or Feign service name, `route` by path prefix. Limits:
+the graph keeps a Feign service name and the keys of its placeholders, never the value, so a
+Feign client configured by property shows the service name, not a host; Python and Java clients
+(`requests`, `RestTemplate`, `HttpClient`) leave no `Endpoint` node and are not seen; an absolute
+URL to the company's own domain is listed like any other host.
+
+`origin="consumers"` is the reverse lookup of a named resource. `service` is a queue, bucket,
+SSM parameter, table, topic or secret name. Rows are the Terraform declarations (`role`
+`declaration`: `aws_sqs_queue`, `aws_sns_topic`, `aws_s3_bucket`, `aws_dynamodb_table`,
+`aws_lambda_function`, and `aws_ssm_parameter` / `aws_secretsmanager_secret`, whose `name` is read
+from the block's lines; a `${...}` name is a template, `declared_as: template`) and every repo
+that uses it (`role` `consumer`) with `match`: `exact` (a name in code, a Spring property
+resolved in a profile with `via: resolved_name`, or Terraform wiring of another repo), `prefix`
+(an SSM `GetParametersByPath` path above the parameter) or `config_key` (a property or
+environment variable called as asked). `route` filters by AWS service or kind (`sqs`, `queue`,
+`ssm`), `status` by `declaration`, `consumer`, `exact`, `prefix` or `config_key`. Matching is
+case-sensitive equality; an SSM name matches with or without its leading `/`. False positives: a
+name shorter than 4 characters, or a generic one (`logs`, `test`, `events`, `prod` ...), is
+refused (`refused`, `min_name_length` in the reply) and a `GetParametersByPath` path that short
+or generic is not used for prefix matching; equal names in different accounts or regions are not
+told apart. Not joined, because the graphs hold no values: environment variable and task
+definition values, and string literals other than AWS call targets (`not_joined` in the reply).
+With no `service` it lists the SSM reads (`role` `undeclared_read`) that match no declared
+parameter of any registered repo; "undeclared" means no registered Terraform declares it by a
+literal or templated name, not that it is missing in AWS. Reads whose name is unknown are counted
+in `unresolved_ssm_reads`, and SSM/secret blocks whose name is computed in
+`declarations_with_computed_name`. The existing `terraform` origin is unrelated: it joins
+remote module sources to repos and has no resource names.
+
+Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk`, `amqp`, `trigger`, `external`
+and `consumers` origins return at most
 `max_results` rows (at most 100) per call. When rows remain, `truncated` is set and
 `next_cursor` is returned; pass it back as `cursor`, with the same other arguments, to read
 the next page. `limit` is not used by these origins. A page after the first has `offset`

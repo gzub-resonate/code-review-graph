@@ -1492,6 +1492,24 @@ def cross_repo_requests_func(
     an ``infrastructure`` object relating each selected repo to the ECR, ECS, stack and declared
     resources that belong to it (see ``docs/SERVICE_ALIASES.md``).
 
+    ``external`` groups the HTTP calls that reach no registered service by host, to show which
+    third-party vendors each repo depends on: one row per (host, repo) with ``vendor`` (a small
+    static table; unknown hosts stay as they are), ``calls``, ``files``, ``samples`` and
+    ``sources``. Sources are JavaScript/TypeScript absolute URLs, ``baseURL`` and Ember adapter
+    hosts, and Feign clients whose service name is registered nowhere (grouped as
+    ``service:<name>``; a literal ``url=`` in the annotation gives its host). A placeholder host
+    is ``host_unresolved`` with its key. ``service`` filters by host, domain, vendor or Feign
+    service name, ``route`` by path prefix, ``status`` is ``known_vendor``, ``unknown_vendor`` or
+    ``host_unresolved``. Never shows query strings, credentials or ports. ``consumers`` is a
+    reverse lookup: ``service`` is the name of a queue, bucket, SSM parameter, table, topic or
+    secret, and the rows are its Terraform declarations and every repo that references it, each
+    with ``match`` ``exact``, ``prefix`` (an SSM ``GetParametersByPath`` path above it) or
+    ``config_key`` (a property or environment variable of that name). ``route`` filters by AWS
+    service or kind, ``status`` by ``declaration``, ``consumer`` or a match. Names under 4
+    characters or generic ones (``logs``, ``test``) are refused. Without ``service`` it lists the
+    SSM reads that match no declared ``aws_ssm_parameter``. Environment variable values and
+    string literals are not in the graphs and are not joined. Both page like the other origins.
+
     The call has a time budget, ``CRG_CROSS_REPO_BUDGET_SECONDS`` (default 300,
     0 = unlimited). Once spent, no further client repo is started; those left are
     named in ``skipped_repos`` (with ``skipped_repos_total``), ``truncated`` is set,
@@ -1513,16 +1531,25 @@ def cross_repo_requests_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
-    infra_origins = ("terraform", "workflow", "stepfunction", "awssdk", "amqp", "trigger")
+    infra_origins = (
+        "terraform", "workflow", "stepfunction", "awssdk", "amqp", "trigger", "external",
+        "consumers",
+    )
     if status is not None and origin not in infra_origins and status not in jl.ALL_STATUSES:
         raise ValueError(f"status must be one of: {', '.join(jl.ALL_STATUSES)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
         raise ValueError(
             "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp, "
-            "trigger"
+            "trigger, external, consumers"
         )
     if origin == "trigger":
         return _trigger_links(repos, service, route, status, max_results, cursor)
+    if origin in ("external", "consumers"):
+        from . import cross_repo_origins as cro
+
+        if origin == "external":
+            return cro.external_links(repos, service, route, status, max_results, cursor)
+        return cro.consumers_links(repos, service, route, status, max_results, cursor)
     if origin == "amqp":
         return _amqp_links(repos, service, route, status, max_results, cursor)
     if origin == "awssdk":
