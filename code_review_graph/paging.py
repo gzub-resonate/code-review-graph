@@ -141,7 +141,10 @@ def _decode(cursor: str, scope: str, stamp: str) -> Any:
             + _RESTART
         )
     if payload.get("g") != stamp:
-        raise CursorError("the graph changed since this cursor was made; " + _RESTART)
+        raise CursorError(
+            "the graph changed since this cursor was made (a re-index or update "
+            "invalidates every earlier cursor); " + _RESTART
+        )
     return payload.get("o")
 
 
