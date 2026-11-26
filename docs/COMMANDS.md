@@ -1152,7 +1152,7 @@ summary reports the counts rather than echoing the names.
 repos: list[str] | None      # Calling repos (aliases or folder names); default: every registered repo
 service: str | None          # Only calls to this Feign service name (exact)
 route: str | None            # Only calls whose route equals this or lies below it
-status: str | None           # matched | ambiguous | case_mismatch | no_route_match | no_target_repo | unmatchable
+status: str | None           # matched | ambiguous | case_mismatch | method_not_served | prefix_mismatch | no_route_match | no_target_repo | unmatchable
 limit: int = 20              # Rows per calling repo
 max_results: int = 50        # Rows overall (max 100)
 origin: str | None           # feign | js | terraform | workflow | stepfunction | awssdk; default: feign and js
@@ -1250,6 +1250,19 @@ How a call is classified:
   The call needs the same segment count, an equal method and at least two segments it
   spells out, and more than 10 matching server routes is too open to report. Only a
   call that would otherwise be `no_route_match` can change.
+- For a JavaScript or TypeScript call that is still `no_route_match`, two more leads are
+  looked for (the caller's own repository first, then the others; the first beats the second).
+  `method_not_served`: the normalised route exists on a registered server but only with other
+  HTTP methods. The row's `candidates` are those endpoints (repo, file, line, method) and
+  `served_methods` lists the methods that are served; `reason` is
+  `route_served_with_other_method`. The Ember Data parser infers all five CRUD verbs per
+  model, so many of these are calls the client never makes. `prefix_mismatch`: no route of the
+  right method fits, but one has the same last two path segments under a different prefix
+  (client `/v1/admin/projects/{id}`, server `/admin/projects/{id}`). It is a lead, not a match:
+  `confidence` is `low`, `reason` is `same_last_two_segments_under_other_prefix`, `candidates`
+  are the routes that share the tail, and more than 10 distinct routes is too open to report.
+  Both `status` values filter, are counted in `counts` and the summary, and `no_route_match`
+  remains for a call nothing fits. Only a call that would otherwise be `no_route_match` can change.
 
 Every row has an `origin`: `feign` for a Spring client method, `js` for a
 JavaScript or TypeScript call. Feign rows are classified exactly as above.
@@ -1377,6 +1390,17 @@ limit). When it is spent no further client repo is read; those left are listed i
 `skipped_repos` / `skipped_repos_total`, `truncated` is set, and `counts` and `total` leave
 them out. A cursor made on such a partial answer is refused unless the same repos are
 skipped again.
+
+AMQP list mode. `origin: "amqp"` with no `service` lists every exchange instead of one
+exchange's rows: one row per exchange, sorted by name, with `publisher_count`, `listener_count`,
+`publisher_repos`, `listener_repos`, the `routing_keys` publishers use and the `binding_keys`
+listeners bind with (each list cut at 20, with a `*_total` when longer) and a `status`:
+`unlistened` (publishers, no listener), `unpublished` (listeners, no publisher) or `matched`
+(both; the keys are not compared). `status` filters on those three values (`publisher` and
+`listener` belong to the one-exchange form and are refused), `route` keeps the exchanges with a
+routing or binding key containing it as a substring, and `repos` limits the repos read, so the
+roles are those of the selected repos. `counts` covers every exchange that passed `route`. It
+pages like the other origins. With `service` the reply is unchanged.
 
 Paging. The `terraform`, `workflow`, `stepfunction`, `awssdk` and `amqp` origins return at most
 `max_results` rows (at most 100) per call. When rows remain, `truncated` is set and

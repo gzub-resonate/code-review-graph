@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- `cross_repo_requests_tool` with `origin="amqp"` and no `service` lists every RabbitMQ exchange
+  (it used to be an error): publisher and listener counts and repos, routing and binding keys,
+  and a `status` of `unlistened`, `unpublished` or `matched`. `status` filters on those,
+  `route` is a key substring, and the rows page. With an exchange the reply is unchanged.
+- A JavaScript or TypeScript call that was `no_route_match` can now be `method_not_served` (the
+  route exists on a registered server, but only with other methods; the row names them in
+  `served_methods` and the serving repo and file in `candidates`) or `prefix_mismatch` (the same
+  last two path segments exist under a different prefix: a low-confidence lead, not a match).
+  `status` accepts both and the summary counts them. `no_route_match` remains for calls nothing
+  fits. Query-time only; the index fingerprint is unchanged.
+
 ### Changed
 
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or
