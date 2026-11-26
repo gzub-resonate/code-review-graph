@@ -691,6 +691,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_SERVICE_ALIASES_FILE` | Feign のサービス名を登録済みリポジトリに対応付ける JSON または YAML ファイルのパス（`{"alias": "repo", "prefix:billing-api-": "billing-api"}`）。[docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) を参照 | 未設定 |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` または `cross_repo_requests_tool` の1回の呼び出しが、新しいリポジトリの開始を止めて残りを `skipped_repos` に列挙するまでの秒数。`0` は無制限 | `300` |
 | `CRG_CROSS_REPO_WORKERS` | `cross_repo_search_tool` の1回の呼び出しが同時に検索するリポジトリ数。`1` は1つずつ検索します。32 を超える値は 32 になります | `4` |
+| `CRG_CROSS_REPO_WARMUP` | `1` を設定すると、マルチリポジトリサーバー上でバックグラウンドスレッドが起動し、`CRG_CROSS_REPO_WARMUP_ORIGINS`（カンマ区切り）の各 origin について範囲指定なしの `cross_repo_requests_tool` 呼び出しを、起動後とリポジトリのグラフが変化した後に実行します。最初のクライアント呼び出しはキャッシュから返されます。共有プールで1つの origin ずつ処理し、`CRG_CROSS_REPO_WARMUP_MAX_SECONDS`（1800）を過ぎると新しい origin を開始しません。`CRG_CROSS_REPO_WARMUP_INTERVAL_SECONDS`（60）ごとにポーリングします | オフ。origin は `awssdk,feign,js` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` のコミット数を数える期間 | `90` |
 | `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数、ツール名、タイムスタンプ、詳細レベル、ファイル数と深さで、ファイル名、パス、ソースコードは記録せず、外部にも送信しません | - |
