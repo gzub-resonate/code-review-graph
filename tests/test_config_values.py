@@ -314,3 +314,38 @@ def test_multi_document_profile_is_recorded(tmp_path: Path) -> None:
         assert cv.resolve("a.q").profile == "default"
     finally:
         s.close()
+
+
+class TestCredentialShapesInsideValues:
+    """Security review: a value that carries a credential pair or userinfo is never stored."""
+
+    @pytest.mark.parametrize("raw", [
+        "jdbc:postgresql://db.internal:5432/app?user=app&password=hunter2",
+        "jdbc:mysql://db/app?user=a&pwd=b",
+        "Server=db;User Id=a;Password=b;",
+        "host=db;db_password=x",
+        "https://api.example.com/v1?api_key=abc",
+        "https://api.example.com/v1?access-key=abc",
+        "clientSecret: abc",
+        "token=abc",
+        "jdbc:oracle:thin:@db.internal:1521/ORCL",
+        "jdbc:oracle:thin:scott/tiger@db.internal:1521/ORCL",
+        "scott/tiger@db.internal",
+        "svc:pass@db.internal",
+    ])
+    def test_a_value_with_a_credential_shape_is_not_stored(self, raw):
+        assert storable_config_value("spring.datasource.url", raw) is None
+
+    @pytest.mark.parametrize("raw", [
+        "orders-queue",
+        "my-bucket-prod",
+        "https://sqs.us-east-1.amazonaws.com/ACCOUNT/orders",
+        "arn:aws:sns:us-east-1:ACCOUNT:order-events",
+        "jdbc:postgresql://db.internal:5432/app",
+        "redis://cache.internal:6379",
+        "us-east-1",
+        "${ORDERS_QUEUE:orders-queue}",
+    ])
+    def test_ordinary_resource_names_are_still_stored(self, raw):
+        got = storable_config_value("app.target", raw)
+        assert got is not None and got[1] is False

@@ -53,6 +53,18 @@ _TOKEN_PREFIX = re.compile(
     r"(?:ghp_|gho_|ghs_|github_pat_|xox[abprs]-|sk-|AIza|AKIA|ASIA|glpat-)[A-Za-z0-9_\-]{8,}",
 )
 _USERINFO_URL = re.compile(r"://[^/\s@]*@")
+# A credential pair inside a larger string: ``jdbc:...?password=x``, ``user=a;pwd=b``,
+# ``token: abc``. The key part is matched loosely (``db_password=``, ``clientSecret=``).
+_CREDENTIAL_PAIR = re.compile(
+    r"(?:pass(?:word|wd)?|pwd|secret|token|api[-_]?key|access[-_]?key|credential|auth)"
+    r"[A-Za-z0-9_.\-]*\s*[=:]\s*\S",
+    re.IGNORECASE,
+)
+# ``user/pass@host`` (Oracle thin and similar), and ``user:pass@host`` without a scheme.
+_BARE_USERINFO = re.compile(r"(?<![\w.\-])[^\s/@:]+[/:][^\s/@]+@[A-Za-z0-9._\-]+")
+# An ``@`` inside a JDBC-style URL: Oracle ``jdbc:oracle:thin:@host`` carries credentials or a
+# bare host, and neither is a resource name worth keeping.
+_JDBC_AT = re.compile(r"\bjdbc:[^\s]*@", re.IGNORECASE)
 _HEX_RUN = re.compile(r"[0-9a-fA-F]{32,}")
 _RANDOM_RUN = re.compile(r"[A-Za-z0-9+/=_\-]{24,}")
 _ACCOUNT_ID = re.compile(r"(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])")
@@ -82,6 +94,8 @@ def value_looks_secret(value: str) -> bool:
     if "-----BEGIN" in value or _JWT.search(value) or _TOKEN_PREFIX.search(value):
         return True
     if _USERINFO_URL.search(value) or _HEX_RUN.search(value):
+        return True
+    if _CREDENTIAL_PAIR.search(value) or _JDBC_AT.search(value) or _BARE_USERINFO.search(value):
         return True
     return any(_looks_random(run) for run in re.split(r"[\s,;]+", value))
 
