@@ -9,6 +9,8 @@ import pytest
 
 from code_review_graph.http_access_log import (
     ClientAccessLog,
+    _quiet_uvicorn_probe_lines,
+    _UvicornProbeFilter,
     build_client_log_middleware,
     resolve_client,
     sanitize,
@@ -261,3 +263,100 @@ def test_health_route_answers_200_without_graph_or_headers(records):
         assert reply.status_code == 200
         assert reply.json() == {"status": "ok"}
     assert _lines(records) == []
+
+
+# --- uvicorn's own access line for probes -------------------------------------------------
+
+
+def _uvicorn_record(client, method, path, status, version="1.1"):
+    return logging.LogRecord(
+        "uvicorn.access", logging.INFO, "", 0,
+        '%s - "%s %s HTTP/%s" %d', (client, method, path, version, status), None,
+    )
+
+
+@pytest.fixture
+def uvicorn_access():
+    """uvicorn's access logger with no probe filter, restored afterwards.
+
+    Constructing ``ClientAccessLog`` attaches the filter globally, so earlier tests in this
+    module may have left one behind.
+    """
+    access = logging.getLogger("uvicorn.access")
+    before = list(access.filters)
+    for f in before:
+        if isinstance(f, _UvicornProbeFilter):
+            access.removeFilter(f)
+    yield access
+    for f in list(access.filters):
+        access.removeFilter(f)
+    for f in before:
+        access.addFilter(f)
+
+
+def test_uvicorn_get_mcp_406_from_a_proxy_is_dropped():
+    flt = _UvicornProbeFilter()
+    assert flt.filter(_uvicorn_record("10.215.45.183:34142", "GET", "/mcp", 406)) is False
+    assert flt.filter(_uvicorn_record("[::1]:5000", "GET", "/mcp/", 406)) is False
+
+
+def test_uvicorn_get_health_is_dropped_whatever_the_peer_or_status():
+    flt = _UvicornProbeFilter()
+    assert flt.filter(_uvicorn_record("8.8.4.4:4000", "GET", "/health", 200)) is False
+    assert flt.filter(_uvicorn_record("10.0.0.5:4000", "GET", "/health?x=1", 503)) is False
+
+
+def test_uvicorn_lines_that_are_not_probes_are_kept():
+    flt = _UvicornProbeFilter()
+    # A public peer's 406 is a real client mistake, not a load balancer probe.
+    assert flt.filter(_uvicorn_record("8.8.4.4:4000", "GET", "/mcp", 406)) is True
+    # Real traffic, including a POST that was answered 406, stays visible.
+    assert flt.filter(_uvicorn_record("10.0.0.5:4000", "POST", "/mcp", 200)) is True
+    assert flt.filter(_uvicorn_record("10.0.0.5:4000", "POST", "/mcp", 406)) is True
+    assert flt.filter(_uvicorn_record("10.0.0.5:4000", "GET", "/mcp", 200)) is True
+    assert flt.filter(_uvicorn_record("10.0.0.5:4000", "GET", "/other", 406)) is True
+
+
+def test_uvicorn_record_of_an_unexpected_shape_is_kept():
+    flt = _UvicornProbeFilter()
+    odd = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "plain message", None, None)
+    assert flt.filter(odd) is True
+    short = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "%s %s", ("a", "b"), None)
+    assert flt.filter(short) is True
+
+
+def test_uvicorn_filter_follows_the_trusted_proxy_setting(monkeypatch):
+    monkeypatch.setenv("CRG_TRUSTED_PROXIES", "192.0.2.0/24")
+    flt = _UvicornProbeFilter()
+    assert flt.filter(_uvicorn_record("192.0.2.7:1", "GET", "/mcp", 406)) is False
+    # Private, but not in the configured list: not a trusted proxy, so it is kept.
+    assert flt.filter(_uvicorn_record("10.0.0.5:1", "GET", "/mcp", 406)) is True
+
+
+def test_the_filter_is_attached_once(uvicorn_access):
+    _quiet_uvicorn_probe_lines()
+    _quiet_uvicorn_probe_lines()
+    ours = [f for f in uvicorn_access.filters if isinstance(f, _UvicornProbeFilter)]
+    assert len(ours) == 1
+
+
+def test_building_the_middleware_attaches_the_filter(uvicorn_access, monkeypatch):
+    monkeypatch.delenv("CRG_HTTP_CLIENT_LOG", raising=False)
+    build_client_log_middleware()
+    assert any(isinstance(f, _UvicornProbeFilter) for f in uvicorn_access.filters)
+
+
+def test_a_disabled_client_log_leaves_uvicorn_alone(uvicorn_access, monkeypatch):
+    monkeypatch.setenv("CRG_HTTP_CLIENT_LOG", "0")
+    assert build_client_log_middleware() == []
+    assert not any(isinstance(f, _UvicornProbeFilter) for f in uvicorn_access.filters)
+
+
+def test_a_real_uvicorn_access_record_is_filtered_end_to_end(uvicorn_access, caplog):
+    caplog.set_level(logging.INFO, logger="uvicorn.access")
+    _quiet_uvicorn_probe_lines()
+    access = logging.getLogger("uvicorn.access")
+    access.info('%s - "%s %s HTTP/%s" %d', "10.215.1.1:9", "GET", "/mcp", "1.1", 406)
+    access.info('%s - "%s %s HTTP/%s" %d', "10.215.1.1:9", "POST", "/mcp", "1.1", 200)
+    lines = [r.getMessage() for r in caplog.records if r.name == "uvicorn.access"]
+    assert lines == ['10.215.1.1:9 - "POST /mcp HTTP/1.1" 200']

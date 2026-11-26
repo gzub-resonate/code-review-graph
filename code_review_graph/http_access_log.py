@@ -160,6 +160,10 @@ class ClientAccessLog:
         self.enabled = is_enabled()
         self.trusted = trusted_proxy_networks()
         self.probes = _ProbeCounter()
+        if self.enabled:
+            # uvicorn configures its loggers after the middleware is built, so attach
+            # the filter again here, when the app starts, to be sure it is in place.
+            _quiet_uvicorn_probe_lines()
 
     def _is_probe(self, scope: Scope, status: object, peer: str) -> bool:
         """A ``GET /health``, or a ``GET /mcp`` a proxy peer got 406 for (no streaming Accept)."""
@@ -234,6 +238,46 @@ class ClientAccessLog:
                 emit("-")
 
 
+class _UvicornProbeFilter(logging.Filter):
+    """Drop uvicorn's own access line for the requests ``ClientAccessLog`` treats as probes.
+
+    uvicorn logs ``peer - "GET /mcp HTTP/1.1" 406`` for every request on its own logger,
+    so a load balancer's probes kept filling the log even after this middleware stopped
+    logging them. Same rule as ``ClientAccessLog._is_probe``: ``GET /health`` always, and
+    ``GET /mcp`` answered 406 only when the peer is a trusted proxy. Everything else,
+    including every POST, is kept.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trusted = trusted_proxy_networks()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        client, method, target, _http_version, status = args
+        if method != "GET":
+            return True
+        path = str(target).split("?", 1)[0]
+        if path == "/health":
+            return False
+        if status != _NOT_ACCEPTABLE or path.rstrip("/") != "/mcp":
+            return True
+        peer = str(client).rsplit(":", 1)[0].strip("[]")
+        return not _is_trusted_proxy(_parse_ip(peer), self.trusted)
+
+
+def _quiet_uvicorn_probe_lines() -> None:
+    """Attach the probe filter to uvicorn's access logger once."""
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _UvicornProbeFilter) for f in access.filters):
+        access.addFilter(_UvicornProbeFilter())
+
+
 def build_client_log_middleware() -> list[Middleware]:
     """Return the client-logging middleware (empty when disabled)."""
-    return [Middleware(ClientAccessLog)] if is_enabled() else []
+    if not is_enabled():
+        return []
+    _quiet_uvicorn_probe_lines()
+    return [Middleware(ClientAccessLog)]
