@@ -280,6 +280,25 @@ def count_calls(monkeypatch, owner, name: str) -> list[int]:
     return calls
 
 
+class TestSelectionDoesNotChangeOwners:
+    """Any registered repo may own a target, so a selection must not narrow the owner lookup."""
+
+    def test_rows_of_a_selected_repo_match_the_all_repo_call(self, world):
+        everyone = cross_repo_requests_func(origin="stepfunction")["results"]
+        alone = cross_repo_requests_func(origin="stepfunction", repos=["machines"])["results"]
+        assert alone and {r["repo"] for r in alone} == {"machines"}
+        assert alone == [r for r in everyone if r["repo"] == "machines"]
+        # The owners are in repos that were not selected, and still resolve.
+        assert any(r["status"] == "matched" and r["target_repo"] != "machines" for r in alone)
+
+    def test_every_repo_is_asked_for_its_definitions_whatever_the_selection(
+        self, world, monkeypatch,
+    ):
+        reads = count_calls(monkeypatch, sl.Definitions, "_read")
+        cross_repo_requests_func(origin="stepfunction", repos=["machines"])
+        assert len(reads) == len(world)
+
+
 class TestStepFunctionJoinIsKept:
     def test_each_repo_is_read_once_across_calls(self, world, monkeypatch):
         definitions = count_calls(monkeypatch, sl.Definitions, "_read")
