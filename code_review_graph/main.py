@@ -1931,7 +1931,9 @@ async def cross_repo_requests_tool(
     repo's stored endpoint index (or its graph when it has none).
     A call is ``matched`` (one endpoint), ``ambiguous`` (several),
     ``case_mismatch`` (no exact route, but one that differs only in letter
-    case: a low-confidence lead, not a match), ``no_route_match``,
+    case: a low-confidence lead, not a match), ``method_not_served`` (JS/TS: the route is
+    served only with other HTTP methods), ``prefix_mismatch`` (JS/TS: same last two segments
+    under another prefix, a lead), ``no_route_match``,
     ``no_target_repo`` (no registered repo carries the service name) or
     ``unmatchable`` with a ``reason`` (placeholder service name, absolute
     ``url``, ``URI`` argument, or a route piece that could not be resolved).

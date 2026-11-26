@@ -345,9 +345,10 @@ class TestCrossRepoAmqp:
         with pytest.raises(ValueError, match="status"):
             cross_repo_requests_func(origin="amqp", service="orders.exchange", status="x")
 
-    def test_the_exchange_is_required(self, two_repos):
-        with pytest.raises(ValueError, match="exchange"):
-            cross_repo_requests_func(origin="amqp")
+    def test_without_an_exchange_every_exchange_is_listed(self, two_repos):
+        reply = cross_repo_requests_func(origin="amqp")
+        assert reply["status"] == "ok"
+        assert [r["exchange"] for r in reply["results"]] == ["orders.exchange"]
 
     def test_unknown_repos_are_reported_and_results_are_bounded(self, two_repos):
         reply = cross_repo_requests_func(

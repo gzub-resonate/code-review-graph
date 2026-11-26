@@ -183,7 +183,8 @@ def test_an_edit_after_the_build_is_not_hidden_by_the_stored_index(repos):
     reply = ask()
     assert reply["endpoint_index"] == {"stored": 1, "computed": 1}
     assert {r["route"]: r["status"] for r in reply["results"] if r["http_method"] == "GET"} == {
-        "/api/items": "no_route_match", "/api/gone": "no_route_match",
+        # /api/items is still served, but only with another HTTP method.
+        "/api/items": "method_not_served", "/api/gone": "no_route_match",
     }
 
 

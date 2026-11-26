@@ -13,10 +13,12 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Optional
 
+from .. import amqp_exchanges as ax
 from .. import amqp_join as aj
 from .. import aws_sdk_links as al
 from .. import feign_links as fl
 from .. import infra_join as ij
+from .. import js_route_leads as jl
 from .. import service_aliases as sa
 from .. import stepfunction_links as sl
 from .. import terraform_links as tl
@@ -774,6 +776,121 @@ def _awssdk_links(
     return result
 
 
+def _amqp_exchange_list(
+    repos: list[str] | None,
+    routing_key: str | None,
+    status: str | None,
+    max_results: int,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """``origin="amqp"`` with no exchange: every exchange, with who publishes and who listens.
+
+    One row per exchange (sorted by name): ``publisher_count``, ``listener_count``,
+    ``publisher_repos``, ``listener_repos``, the ``routing_keys`` publishers use and the
+    ``binding_keys`` listeners bind with, and a ``status``: ``unlistened`` (publishers, no
+    listener), ``unpublished`` (listeners, no publisher) or ``matched`` (both; the keys are not
+    compared). ``status`` filters on those values; ``routing_key`` (``route``) keeps the
+    exchanges with a routing or binding key containing it as a substring. ``repos`` limits the
+    repos read, so the roles are those of the selected repos only. Pages like the other origins.
+    """
+    from ..registry import Registry
+
+    if status is not None and status not in ax.LIST_STATUSES:
+        raise ValueError(
+            f"without service (exchange), status must be one of: {', '.join(ax.LIST_STATUSES)}"
+        )
+    all_repos = Registry().list_repos()
+    selected: list[dict[str, Any]] = all_repos
+    unknown_shown: list[str] = []
+    if repos:
+        selected, unknown, _ambiguous = _select_repos(all_repos, repos)
+        unknown_shown, _total, _cut = _echoed(unknown)
+    budget = cross_repo_budget_seconds()
+    started = _now()
+    skipped: list[str] = []
+    unreadable: list[str] = []
+    without_amqp: list[str] = []
+    exchanges: dict[str, ax.Exchange] = {}
+    for entry in selected:
+        label = _sanitize_name(_repo_label(entry))
+        if budget and _now() - started > budget:
+            skipped.append(label)
+            continue
+        store = tl.open_store(entry)
+        if store is None:
+            unreadable.append(label)
+            continue
+        try:
+            if not aj.has_amqp_edges(store):
+                without_amqp.append(label)
+                continue
+            for name in ax.list_exchange_names(store):
+                edges = [
+                    {**e, "routing_key": _sanitize_name(e["routing_key"])
+                     if isinstance(e.get("routing_key"), str) else None,
+                     "binding_key": _sanitize_name(e["binding_key"])
+                     if isinstance(e.get("binding_key"), str) else None}
+                    for e in aj.read_channel_edges(store, name)
+                ]
+                ax.add_edges(
+                    exchanges.setdefault(_sanitize_name(name), ax.new_exchange()), label, edges,
+                )
+        except (sqlite3.Error, GraphStoreError) as exc:
+            logger.warning("Cannot read AMQP edges of %s: %s", entry["path"], exc)
+            unreadable.append(label)
+            continue
+        finally:
+            store.close()
+    counts: dict[str, int] = {}
+    rows: list[dict[str, Any]] = []
+    for name in sorted(exchanges):
+        entry_data = exchanges[name]
+        if routing_key and not ax.has_key_containing(entry_data, routing_key):
+            continue
+        row = ax.render(name, entry_data)
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+        if status and row["status"] != status:
+            continue
+        rows.append(row)
+    page = paginate(
+        rows, max_results, 100, cursor,
+        scope=make_scope(
+            "cross_repo_requests_tool", origin="amqp", mode="exchange_list",
+            repos=sorted(repos) if repos else None, routing_key=routing_key, status=status,
+        ),
+        stamp=content_stamp([rows, skipped]),
+    )
+    ordered = ", ".join(f"{counts[s]} {s}" for s in ax.LIST_STATUSES if s in counts)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "summary": (
+            f"{sum(counts.values())} AMQP exchange(s)"
+            + (f" with a key containing '{_sanitize_name(routing_key)}'" if routing_key else "")
+            + f" across {len(selected)} repo(s)"
+            + (f": {ordered}" if ordered else "")
+            + shown_range(page)
+        ),
+        "origin": "amqp",
+        "results": page.items,
+        "counts": counts,
+        "total": page.total,
+        "truncated": page.truncated or bool(skipped),
+        "repos_searched": len(selected) - len(skipped),
+        "unreadable": unreadable,
+        **page.fields(),
+    }
+    if without_amqp:
+        result["repos_without_amqp"] = _bounded(
+            without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,
+        )[0]
+        result["repos_without_amqp_total"] = len(without_amqp)
+    if skipped:
+        result["skipped_repos"] = skipped
+    if unknown_shown:
+        result["unknown"] = unknown_shown
+    return result
+
+
 def _amqp_links(
     repos: list[str] | None,
     exchange: str | None,
@@ -794,7 +911,7 @@ def _amqp_links(
     from ..registry import Registry
 
     if not exchange or not exchange.strip():
-        raise ValueError("origin=amqp needs service: the exchange name")
+        return _amqp_exchange_list(repos, routing_key, status, max_results, cursor)
     roles = ("publisher", "listener")
     if status is not None and status not in roles:
         raise ValueError(f"status must be one of: {', '.join(roles)}")
@@ -1212,7 +1329,10 @@ def cross_repo_requests_func(
         route: Only calls whose route equals this or lies below it, compared
             after normalisation.
         status: Only rows with this status: ``matched``, ``ambiguous``,
-            ``case_mismatch``, ``no_route_match``, ``no_target_repo`` or
+            ``case_mismatch``, ``method_not_served`` (a JS/TS call whose route is served
+            only with other HTTP methods; ``served_methods`` lists them),
+            ``prefix_mismatch`` (a JS/TS lead: the same last two path segments under another
+            prefix, low confidence, not a match), ``no_route_match``, ``no_target_repo`` or
             ``unmatchable``.
         limit: Maximum rows per client repo (default 20).
         max_results: Maximum rows returned overall (default 50, capped at
@@ -1240,8 +1360,11 @@ def cross_repo_requests_func(
             kind (``lambda``) or ``kind/name``, and ``status`` is one of ``matched``,
             ``not_found`` or ``ambiguous``.
 
-    ``amqp`` lists the publishers and listeners of one RabbitMQ exchange across the selected
-    repos: ``service`` is the exchange (required), ``route`` an optional key and ``status``
+    ``amqp`` without ``service`` lists every exchange (one row each: publisher and listener
+    counts and repos, routing and binding keys, ``status`` ``unlistened``, ``unpublished`` or
+    ``matched``; ``status`` filters on those, ``route`` is a key substring). With ``service`` it
+    lists the publishers and listeners of one RabbitMQ exchange across the selected
+    repos: ``service`` is the exchange, ``route`` an optional key and ``status``
     ``publisher`` or ``listener``. With ``route`` a listener row is kept when its ``binding_key``
     matches that key and a publisher row when its ``routing_key`` matches it, using AMQP topic
     wildcards (``*`` one word, ``#`` zero or more) only in a binding key that holds one;
@@ -1281,8 +1404,8 @@ def cross_repo_requests_func(
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
     infra_origins = ("terraform", "workflow", "stepfunction", "awssdk", "amqp")
-    if status is not None and origin not in infra_origins and status not in fl.STATUSES:
-        raise ValueError(f"status must be one of: {', '.join(fl.STATUSES)}")
+    if status is not None and origin not in infra_origins and status not in jl.ALL_STATUSES:
+        raise ValueError(f"status must be one of: {', '.join(jl.ALL_STATUSES)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
         raise ValueError(
             "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp"
@@ -1494,6 +1617,10 @@ def cross_repo_requests_func(
                         result = fl.link_call(call, pool)
                         if missing and result.status == fl.NO_ROUTE_MATCH:
                             result = fl.LinkResult(fl.NO_TARGET_REPO, "target_unreadable")
+                if reason is None and call.origin == "js":
+                    result = jl.refine_no_route_match(
+                        call, result, js_index_for(index), own_index_for(index),
+                    )
                 if status is not None and result.status != status:
                     continue
 
@@ -1521,8 +1648,10 @@ def cross_repo_requests_func(
                     if row_notes and result.status in (fl.MATCHED, fl.AMBIGUOUS):
                         row["confidence"] = _js_confidence(call, result, row_notes)
                         row["confidence_notes"] = row_notes
-                if result.status == fl.CASE_MISMATCH:
+                if result.status in (fl.CASE_MISMATCH, jl.PREFIX_MISMATCH):
                     row["confidence"] = "low"
+                if result.status == jl.METHOD_NOT_SERVED:
+                    row["served_methods"] = jl.served_methods(result.candidates)
                 if result.reason:
                     row["reason"] = result.reason
                 if resolution is not None and resolution.how:
@@ -1573,7 +1702,7 @@ def cross_repo_requests_func(
                 "(see skipped_repos; counts and total leave them out; "
                 "raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
             )
-        ordered = ", ".join(f"{counts[s]} {s}" for s in fl.STATUSES if s in counts)
+        ordered = ", ".join(f"{counts[s]} {s}" for s in jl.ALL_STATUSES if s in counts)
         response: dict[str, Any] = {
             "status": "ok",
             "summary": (
