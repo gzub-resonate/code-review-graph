@@ -222,12 +222,15 @@ def parse_route_target(target: str) -> tuple[str | None, str] | None:
     return (method.upper() if method else None), found.group(2)
 
 
-def match_route_endpoints(store: GraphStore, target: str) -> list[GraphNode] | None:
+def match_route_endpoints(
+    store: GraphStore, target: str, *, any_role: bool = False,
+) -> list[GraphNode] | None:
     """Server ``Endpoint`` nodes a route string such as ``POST /v1/items`` names.
 
     ``None`` when *target* is not a route string; ``[]`` when it is one that matches
     nothing. A route written in full wins; otherwise a route that ends with the given path
-    on a segment boundary (``/items/{id}`` for ``/v1/items/{id}``) is taken.
+    on a segment boundary (``/items/{id}`` for ``/v1/items/{id}``) is taken. Outbound
+    (``role == "client"``) endpoints are left out unless *any_role* is set.
     """
     parsed = parse_route_target(target)
     if parsed is None:
@@ -239,7 +242,7 @@ def match_route_endpoints(store: GraphStore, target: str) -> list[GraphNode] | N
     for node in store.get_nodes_by_kind(["Endpoint"]):
         extra = node.extra if isinstance(node.extra, dict) else {}
         route = extra.get("route")
-        if not isinstance(route, str) or extra.get("role") == "client":
+        if not isinstance(route, str) or (extra.get("role") == "client" and not any_role):
             continue
         verb = str(extra.get("http_method") or "").upper()
         if method and verb not in _METHOD_ANY and verb != method:

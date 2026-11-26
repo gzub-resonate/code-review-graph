@@ -12,6 +12,7 @@ from ..amqp_join import EXCHANGE_PREFIX, PUBLISH_KINDS, link_kind
 from ..analysis import is_generated_file
 from ..aws_sdk_links import merge_resolved_names
 from ..config_keys import normalize_spring_config_key
+from ..config_values import config_value_fields
 from ..constants import (
     IMPORT_CONTEXT_KEY,
     IMPORT_CONTEXT_TYPE_ONLY,
@@ -1711,8 +1712,12 @@ def query_graph(
                 target_path, separator, symbol = target.partition("::")
                 abs_target = f"{normalize_file_path(root / target_path)}{separator}{symbol}"
                 node = store.get_node(abs_target)
-            if not node and pattern == "handlers_of":
-                matched = match_route_endpoints(store, target)
+            if not node and pattern in ("handlers_of", "requesters_of"):
+                # A route-shaped target names Endpoint nodes only. requesters_of reads the
+                # outbound (client) ones too, which are what requests point at.
+                matched = match_route_endpoints(
+                    store, target, any_role=pattern == "requesters_of",
+                )
                 if matched is not None:
                     if not matched:
                         return {
@@ -2404,7 +2409,10 @@ def query_graph(
                             amqp_fields["matched_via"] = how
                     source = store.get_node(edge.source_qualified)
                     if source:
-                        add_result({**node_to_dict(source), **amqp_fields}, edge)
+                        add_result(
+                            _attach_call_site({**node_to_dict(source), **amqp_fields}, edge),
+                            edge,
+                        )
                     else:
                         edges_out.append({**edge_to_dict(edge), **amqp_fields})
 
@@ -2479,14 +2487,25 @@ def query_graph(
                     edges_out.append(edge_to_dict(edge))
 
         elif pattern == "requesters_of":
-            for edge in store.get_edges_by_target(qn):
-                if edge.kind != SPRING_FEIGN_EDGE_KIND:
-                    continue
-                requester = store.get_node(edge.source_qualified)
-                if requester:
-                    add_result(node_to_dict(requester), edge)
-                else:
-                    edges_out.append(edge_to_dict(edge))
+            seen_requesters: set[str] = set()
+            for endpoint_node in route_endpoints or [None]:
+                requested = endpoint_node.qualified_name if endpoint_node else qn
+                for edge in store.get_edges_by_target(requested):
+                    if edge.kind != SPRING_FEIGN_EDGE_KIND:
+                        continue
+                    if route_endpoints:
+                        key = f"{edge.source_qualified}|{requested}"
+                        if key in seen_requesters:
+                            continue
+                        seen_requesters.add(key)
+                    requester = store.get_node(edge.source_qualified)
+                    if requester:
+                        row_out = node_to_dict(requester)
+                        if endpoint_node is not None and len(route_endpoints) > 1:
+                            row_out["endpoint"] = endpoint_label(endpoint_node)
+                        add_result(row_out, edge)
+                    else:
+                        edges_out.append(edge_to_dict(edge))
 
         elif pattern == "consumers_of":
             raw_key = node.name if node else target.removeprefix("config:")
@@ -2505,7 +2524,10 @@ def query_graph(
             graph_paths = _resolve_graph_file_paths(store, root, [target])
             for graph_path in graph_paths:
                 for n in store.iter_nodes_by_file(graph_path):
-                    add_result(node_to_dict(n))
+                    row_out = node_to_dict(n)
+                    if n.kind == "ConfigProperty":
+                        row_out.update(config_value_fields(n.name, n.extra))
+                    add_result(row_out)
 
         resolution_split: dict[str, int] | None = None
         distinct_nodes = 0
@@ -2618,10 +2640,12 @@ def query_graph(
                 result_fields += ("import_target", "import_target_kind")
             elif pattern == "importers_of":
                 result_fields += ("importer", "file", "import_level")
-            if pattern == "handlers_of":
+            if pattern in ("handlers_of", "requesters_of"):
                 result_fields += ("endpoint",)
             if pattern in ("publishers_of", "listeners_of"):
-                result_fields += ("matched_via", "routing_key", "binding_key", "queue")
+                result_fields += (
+                    "matched_via", "routing_key", "binding_key", "queue", "call_site",
+                )
             minimal_results = [
                 {
                     k: r[k]
@@ -2959,6 +2983,13 @@ def semantic_search_nodes(
             bounds["total_is_lower_bound"] = True
 
         search_mode = mode_out[0] if mode_out else "keyword"
+
+        if detail_level != "minimal":
+            for hit in results:
+                if hit.get("kind") == "ConfigProperty":
+                    config_node = store.get_node(hit["qualified_name"])
+                    if config_node is not None:
+                        hit.update(config_value_fields(config_node.name, config_node.extra))
 
         source_omitted = 0
         if include_source and results and detail_level != "minimal":

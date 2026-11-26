@@ -66,7 +66,9 @@ def list_flows(
         group_duplicates: When true (default), flows whose call tree below the entry is
                 the same set of nodes (a public and an admin controller calling one
                 service method) are one flow: the most critical stands for the group and
-                lists every entry point under ``entry_points``. ``total`` counts groups.
+                lists every entry point under ``entry_points``. ``total`` counts groups. When
+                merging removed flows, ``total_before_grouping`` and the summary give the
+                count without it; ``group_duplicates=false`` lists one row per entry point.
 
     Returns:
         Flows with criticality scores, plus ``total`` and ``truncated``. When more
@@ -90,18 +92,25 @@ def list_flows(
         )
         if entry_kind:
             flows = [f for f in flows if f.get("entry_kind") == entry_kind]
-        if group_duplicates:
-            flows = group_duplicate_flows(flows)
-
-        if kind:
+        def _of_kind(items: list[dict]) -> list[dict]:
+            if not kind:
+                return items
             filtered = []
-            for f in flows:
+            for f in items:
                 ep_id = f.get("entry_point_id")
                 if ep_id is not None:
                     node_kind = store.get_node_kind_by_id(ep_id)
                     if node_kind == kind:
                         filtered.append(f)
-            flows = filtered
+            return filtered
+
+        raw_total: int | None = None
+        if group_duplicates:
+            ungrouped = flows
+            flows = group_duplicate_flows(flows)
+            if len(flows) != len(ungrouped):
+                raw_total = len(_of_kind(ungrouped))
+        flows = _of_kind(flows)
 
         page = paginate(
             flows, limit, _MAX_FLOWS, cursor,
@@ -138,10 +147,17 @@ def list_flows(
                 for f in flows
             ]
 
+        merged_note = ""
+        if raw_total is not None and raw_total != total:
+            merged_note = (
+                f" ({raw_total} before merging duplicates; "
+                "group_duplicates=false lists one per entry point)"
+            )
         result: dict[str, object] = {
             "status": "ok",
             "summary": (
                 f"Found {total} execution flow(s)"
+                + merged_note
                 + shown_range(page)
             ),
             "flows": flows,
@@ -149,6 +165,8 @@ def list_flows(
             "truncated": page.truncated,
             **page.fields(),
         }
+        if raw_total is not None and raw_total != total:
+            result["total_before_grouping"] = raw_total
         result["_hints"] = generate_hints(
             "list_flows_tool", result, get_session()
         )

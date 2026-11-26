@@ -276,6 +276,12 @@ def _lookup_rows(
     ]
 
 
+class _RepoRows(list[tuple[int, str, dict[str, Any]]]):
+    """A repo's search rows, and whether the per-repo ``limit`` left matches out (``more``)."""
+
+    more: bool = False
+
+
 def _search_repo(
     store: GraphStore, query: str, kind: str | None, limit: int,
 ) -> list[tuple[int, str, dict[str, Any]]]:
@@ -287,7 +293,11 @@ def _search_repo(
     so an exact match always survives it. ``local_rank`` is the position the
     row had in the search (lookup-only rows follow the last one).
     """
-    rows = hybrid_search(store, query, kind=kind, limit=limit)
+    # One row more than the limit is asked for, only to learn whether the limit cut anything;
+    # the ranking below sees exactly the rows it always did.
+    fetched = hybrid_search(store, query, kind=kind, limit=limit + 1)
+    more = len(fetched) > limit
+    rows = fetched[:limit]
     seen = {row.get("qualified_name") for row in rows}
     for row in _lookup_rows(store, query, kind, limit):
         if row["qualified_name"] not in seen:
@@ -295,7 +305,15 @@ def _search_repo(
             rows.append(row)
     tiered = [(rank, _match_tier(query, row), row) for rank, row in enumerate(rows)]
     tiered.sort(key=lambda item: (_TIER_ORDER[item[1]], item[0]))
-    return tiered[:limit]
+    kept = _RepoRows(tiered[:limit])
+    kept.more = more or len(tiered) > limit
+    return kept
+
+
+class _SearchedRows(list[tuple[int, int, int, dict[str, Any]]]):
+    """The rows one repo contributed; ``more`` is set when ``limit`` cut matches off."""
+
+    more: bool = False
 
 
 def _search_one_repo(
@@ -315,8 +333,10 @@ def _search_one_repo(
         store = GraphStore(str(db_path))
         try:
             alias = repo_entry.get("alias", repo_path.name)
-            rows: list[tuple[int, int, int, dict[str, Any]]] = []
-            for local_rank, match, row in _search_repo(store, query, kind, limit):
+            rows: list[tuple[int, int, int, dict[str, Any]]] = _SearchedRows()
+            found = _search_repo(store, query, kind, limit)
+            rows.more = bool(getattr(found, "more", False))  # type: ignore[attr-defined]
+            for local_rank, match, row in found:
                 row["repo"] = alias
                 row["repo_path"] = str(repo_path)
                 row["match"] = match
@@ -560,11 +580,14 @@ def cross_repo_search_func(
                 in_flight[future] = repo_index
             reap(wait(in_flight).done)
 
+        capped: list[str] = []
         # Whatever order the searches finished in, the rows go in registry order.
         for repo_index in sorted(outcomes):
             alias, rows = outcomes[repo_index]
             searched_repos.append(alias)
             ranked_results.extend(rows)
+            if getattr(rows, "more", False):
+                capped.append(alias)
 
         # The repos the budget kept out of the full search still get the cheap exact-name
         # lookup, so an exact match in a late repo is not lost to the time limit.
@@ -618,7 +641,8 @@ def cross_repo_search_func(
             stamp=make_scope("cross_repo_search_rows", rows=merged, skipped=skipped),
         )
         all_results, total = page.items, page.total
-        truncated = page.truncated or bool(skipped)
+        truncated = page.truncated or bool(skipped) or bool(capped)
+        capped_shown, capped_total, _capped_truncated = _echoed(capped)
 
         # A dropped or duplicated name reaches the summary too. The
         # all-unknown branch already said so there, and CLAUDE.md trains
@@ -642,6 +666,11 @@ def cross_repo_search_func(
                 f"; {fuzzy_dropped} fuzzy row(s) dropped (fewer than half of the query's words, "
                 f"or beyond {_FUZZY_CAP_NO_EXACT}; pass include_fuzzy=True to see them)"
             )
+        if capped_total:
+            notes += (
+                f"; {capped_total} repo(s) have more matches than limit={limit} "
+                "(see repos_capped; total is a lower bound, raise limit to see them)"
+            )
         if skipped_total:
             notes += (
                 f"; time budget of {budget:g}s spent, {skipped_total} repo(s) not searched "
@@ -652,7 +681,7 @@ def cross_repo_search_func(
         response = {
             "status": "ok",
             "summary": (
-                f"Found {total} result(s) across "
+                f"Found {total}{'+' if capped_total else ''} result(s) across "
                 f"{len(searched_repos)} repo(s) for '{query}'"
                 + shown_range(page)
                 + notes
@@ -667,8 +696,12 @@ def cross_repo_search_func(
             "skipped_repos_total": skipped_total,
             "skipped_repos_truncated": skipped_truncated,
             "exact_lookup_repos_total": len(exact_looked_in),
+            "repos_capped": capped_shown,
+            "repos_capped_total": capped_total,
             **page.fields(),
         }
+        if capped_total:
+            response["total_is_lower_bound"] = True
         if repos:
             response["unknown"] = unknown_shown
             response["unknown_total"] = unknown_total
@@ -2077,6 +2110,7 @@ def cross_repo_requests_func(
         wanted_route = fl.normalize_route(route) if route else None
         counts: dict[str, int] = {}
         origin_counts: dict[str, int] = {}
+        multiple_total = 0
         rows_by_repo: list[list[dict[str, Any]]] = []
         searched: list[str] = []
         skipped: list[str] = []
@@ -2199,6 +2233,10 @@ def cross_repo_requests_func(
                         _candidate_row(c) for c in result.candidates[:_MAX_CANDIDATES_PER_ROW]
                     ]
                     row["candidates_total"] = len(result.candidates)
+                    if result.status == fl.MATCHED and len(result.candidates) > 1:
+                        # "matched" stays as is; this says the match is not a unique one.
+                        row["multiple_candidates"] = True
+                        multiple_total += 1
                 repo_rows.append(row)
             rows_by_repo.append(repo_rows)
 
@@ -2248,12 +2286,14 @@ def cross_repo_requests_func(
                     else f"{total} Feign call(s) in {len(searched)} repo(s)"
                 )
                 + (f": {ordered}" if ordered else "")
+                + (f"; {multiple_total} matched with several candidates" if multiple_total else "")
                 + shown_range(page)
                 + notes
             ),
             "origin": origin or "all",
             "results": results,
             "counts": counts,
+            "multiple_candidates_total": multiple_total,
             "total": total,
             "truncated": truncated,
             **page.fields(),

@@ -28,12 +28,43 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .config_keys import is_secret_key, normalize_spring_config_key
+from .config_keys import is_secret_key, normalize_spring_config_key, storable_config_value
 
 # Text from a repository that may appear in the ``via`` trail an MCP client reads: only the
 # characters of a resource name, so free text (an instruction aimed at a model), control
 # characters and bidi marks never reach the reply.
 _SHOWN = re.compile(r"[A-Za-z0-9._:/${}\-]{1,128}")
+
+
+_MAX_SHOWN_PROFILES = 10
+
+
+def config_value_fields(name: str, extra: object) -> dict[str, object]:
+    """``value``, ``value_truncated`` and ``doc_profiles`` of a ``ConfigProperty``, for a reply.
+
+    The stored value is passed through :func:`storable_config_value` again, so a value an older
+    index kept before a filter existed is never shown, and one the parse-time filters dropped
+    is simply absent. Text is stripped of control characters.
+    """
+    from .graph import _sanitize_name  # imported late: graph does not import this module
+
+    if not isinstance(extra, dict):
+        return {}
+    out: dict[str, object] = {}
+    raw = extra.get("value")
+    kept = storable_config_value(name, raw) if isinstance(raw, str) else None
+    if kept is not None:
+        out["value"] = _sanitize_name(kept[0])
+        if kept[1] or extra.get("value_truncated"):
+            out["value_truncated"] = True
+    profiles = extra.get("doc_profiles")
+    if isinstance(profiles, list):
+        shown = [
+            _sanitize_name(p, 64) for p in profiles[:_MAX_SHOWN_PROFILES] if isinstance(p, str)
+        ]
+        if shown:
+            out["doc_profiles"] = shown
+    return out
 
 
 def _shown(text: str) -> str:

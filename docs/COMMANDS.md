@@ -606,6 +606,9 @@ route: `POST /v1/items`, `/v1/items/{id}`, `GET /items/{itemId}`. Path variables
 `<id>`) are equal, case and a trailing slash do not matter, a route that ends with the given path
 on a segment boundary matches when the full one does not, and the reply lists
 `matched_endpoints`.
+`requesters_of` takes the same route targets and matches Endpoint nodes only (outbound client endpoints
+included), so a route no longer resolves to classes or methods that share its words; with several matching
+endpoints each row names its `endpoint`, and a route no endpoint has is `not_found`.
 
 **`callers_of` on a shared name.** A name several nodes have (two classes called
 `VerticalRefreshMgr`, a method every subclass defines) still answers `ambiguous` with no rows, but
@@ -657,6 +660,9 @@ call site and every bare call to a well-known name even under `resolution="all"`
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller. Within that order, calls bound to a node come
 before bare-name guesses.
+
+`publishers_of` and `listeners_of` rows carry `call_site` (`line`, plus `file` when it differs from the row's
+`file_path`) in every detail level, `minimal` included.
 
 A target written `external:<kind>:<name>`, such as `external:aws-lambda:order-validator`
 or `external:github-actions:actions/checkout`, names code outside the repository. No node
@@ -763,6 +769,11 @@ as `.yml` or `.json`, a dotted key such as `spring.datasource.url`, or one of th
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
 says there may be more.
 
+A `ConfigProperty` hit (standard detail) carries `value`, plus `value_truncated` and `doc_profiles` when present: the
+literal stored at index time, at most 200 characters. Values of secret-looking keys, credentials, tokens and long
+random strings are dropped at parse time and filtered again on the way out, so they never appear. `query_graph_tool`
+`file_summary` rows of a configuration file carry the same fields.
+
 `include_source=True` lets you answer from the reply instead of opening the
 files. All snippets share one budget of 240 lines, or 700 with
 `expand_neighbors=True`, which adds up to four callers and callees for each of
@@ -849,7 +860,9 @@ targets, each with `via`: `listener` or `poll`), `event` (`@EventListener`), `ma
 Flows whose call tree below the entry is the same set of nodes (a public and an admin
 controller calling one service method) are one row: the most critical stands for the group and
 `entry_points` lists every entry (`flow_id`, `name`, `entry_kind`, `route`), `group_size` counts
-them, and `total` counts groups. Pass `group_duplicates=false` for one row per entry.
+them, and `total` counts groups. When merging removed flows, `total_before_grouping` and the summary
+(`329 execution flow(s) (594 before merging duplicates; ...)`) give the unmerged count. Pass
+`group_duplicates=false` for one row per entry.
 `get_flow_tool` lists the other flows with the same call tree under `same_call_tree_as`.
 
 #### `get_flow_tool`
@@ -977,6 +990,7 @@ detail_level: str = "standard"   # "minimal" drops file paths
 cursor: str | None               # next_cursor of the previous reply (see Paging)
 include_tests: bool = False       # Tests are left out before ranking, totals and paging
 include_non_code: bool = False   # also report docs, lockfiles, tooling as gaps
+exclude_data_types: bool = False # leave enums, records, Lombok/accessor-only classes out of untested_hotspots
 ```
 Documentation sections (`DocSection`), lockfile entries (`package-lock.json`,
 `.terraform.lock.hcl`, `uv.lock` and the like), Dockerfile stages and anything
@@ -1000,6 +1014,10 @@ shows no covering test for: no direct test and none reaching it through test
 helpers. A test of something it only calls does not count, so the two tools
 agree. A community made only of JSON or YAML paths is a config document and is
 not reported as `thin_communities` or `single_file_communities`.
+
+`exclude_data_types=true` leaves data carriers (enums, records, Lombok or accessor-only Java classes, dataclasses,
+data-only TS types) out of `untested_hotspots` before ranking, with the same meaning and the same default (`false`) as
+on `get_hub_nodes_tool`; `data_types_excluded` counts them. A cursor made with one value is refused for the other.
 
 An `import_cycles` row is one group of files that import each other: `size` is
 how many files, `name` and `cycle` spell out one loop with its import lines, and
@@ -1172,6 +1190,11 @@ for 10 repos or fewer, or with `include_repo_list=true`; it was ~2.5 KB on a 122
 case-sensitive; paths are not accepted. An alias match wins over a folder-name
 match.
 
+`limit` caps the rows of each repo. A repo that has more matches than `limit` is listed in `repos_capped`
+(`repos_capped_total`); `total` is then a lower bound (`total_is_lower_bound: true`, `Found N+` in the summary) and
+`truncated` is true even when there is no `next_cursor`: raise `limit` to see the rest. `max_results` still caps the
+rows returned.
+
 Scores are not comparable between repos, so results are ordered by match tier first,
 then by each repo's local rank, with registry order as the tie-breaker. Every row has a
 `match` field: `exact` (the name equals the query, case-sensitive), `exact_ci` (equal
@@ -1228,6 +1251,9 @@ for an origin it does not apply to.
 For the Feign and JS/TS origins `repos_searched_total` is the number of repos read and `repos_searched`
 (the names) is returned only for 10 repos or fewer, or with `include_repo_list=true`. `skipped_repos` is
 always listed in full.
+
+A `matched` row whose `candidates_total` is above 1 also has `multiple_candidates: true` (the status value is
+unchanged); the reply's `multiple_candidates_total` and its summary count those rows.
 
 `origin="terraform"` lists the remote Terraform module sources (`git::...//modules/x`) the repos name and the
 registered repo and folder each one resolves to. `service` filters by module repo name, `route` by module folder

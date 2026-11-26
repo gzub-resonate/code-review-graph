@@ -501,3 +501,17 @@ class TestAmqpPages:
                 origin="amqp", service="other.exchange", max_results=3,
                 cursor=first["next_cursor"],
             )
+
+
+class TestMinimalKeepsTheCallSiteLine:
+    @pytest.mark.parametrize("pattern", ["publishers_of", "listeners_of"])
+    def test_minimal_rows_carry_the_call_site_line(self, repo, pattern):
+        edges = {
+            e["source"].rsplit("::", 1)[-1]: e["line"]
+            for e in query_graph(pattern, EXCHANGE, repo_root=str(repo))["edges"]
+        }
+        assert edges
+        reply = query_graph(pattern, EXCHANGE, repo_root=str(repo), detail_level="minimal")
+        assert reply["result_count"] == len(edges)
+        for row in reply["results"]:
+            assert row["call_site"]["line"] == edges[row["name"]], row

@@ -549,3 +549,51 @@ def test_feign_method_with_uri_argument_is_flagged(tmp_path: Path) -> None:
     assert routes["qualified"]["route"] == "/q"
     assert "url_from_argument" not in routes["ordinary"]
     assert "url_from_argument" not in routes["notUri"]
+
+
+AV_SOURCE = """
+package com.example.av;
+
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.*;
+
+@FeignClient(name = "attributes-service", path = "/v2")
+public interface AttributeClient {
+    @GetMapping("/attributevalues")
+    AttributeValues list();
+}
+
+@FeignClient(name = "attributes-service", contextId = "other", path = "/v2")
+public interface AttributeAdminClient {
+    @GetMapping("/attributevalues")
+    AttributeValues listAll();
+}
+
+class AttributeValues {}
+class AttributeValuesRequest {}
+class GetAttributeValuesResponse {}
+"""
+
+
+def test_requesters_of_a_route_matches_endpoints_only(tmp_path: Path) -> None:
+    # A route-shaped target names an Endpoint; classes that merely share words with it are
+    # not rivals, so the answer is never "ambiguous" between them.
+    path, nodes, edges = _parse(tmp_path, AV_SOURCE, "Av.java")
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges, "hash")
+    base = path.as_posix()
+
+    for target in ("GET /v2/attributevalues", "/v2/attributevalues"):
+        found = query_graph("requesters_of", target, repo_root=str(tmp_path))
+        assert found["status"] == "ok", (target, found)
+        assert sorted(r["qualified_name"] for r in found["results"]) == [
+            f"{base}::AttributeAdminClient.listAll", f"{base}::AttributeClient.list",
+        ], target
+        assert found["matched_endpoints"] == ["GET /v2/attributevalues"] * 2
+    other = query_graph("requesters_of", "DELETE /v2/attributevalues", repo_root=str(tmp_path))
+    assert other["status"] == "not_found"
+    # A name that is not route-shaped keeps its old resolution.
+    by_name = query_graph("requesters_of", f"{base}::AttributeClient.list", repo_root=str(tmp_path))
+    assert by_name["status"] != "not_found"

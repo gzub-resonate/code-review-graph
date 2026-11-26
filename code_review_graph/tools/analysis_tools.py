@@ -339,6 +339,7 @@ def get_knowledge_gaps_func(
     include_tests: bool = False,
     include_non_code: bool = False,
     include_generated: bool = False,
+    exclude_data_types: bool = False,
 ) -> dict[str, Any]:
     """Identify structural weaknesses in the codebase.
 
@@ -375,6 +376,11 @@ def get_knowledge_gaps_func(
             ``generated_excluded`` reports the isolated nodes and hotspot candidates that
             removed (candidates are counted before their test coverage is looked up).
             A cursor is only valid for the value it was made with.
+        exclude_data_types: Leave data carriers (enums, records, Lombok or
+            accessor-only Java classes, dataclasses, TS interfaces and type aliases
+            with no methods) out of ``untested_hotspots`` before ranking, as
+            ``get_hub_nodes_tool`` does; ``data_types_excluded`` counts them. Default
+            False. A cursor is only valid for the value it was made with.
 
     Returns:
         Gaps by category. ``summary`` maps each category to its untruncated
@@ -391,6 +397,7 @@ def get_knowledge_gaps_func(
             store, repo_root=root, max_isolated=None, max_untested=None,
             include_tests=include_tests, include_non_code=include_non_code,
             include_generated=include_generated, stats=stats,
+            exclude_data_types=exclude_data_types,
         )
         # Totals must come from the untruncated lists: the summary counts are
         # the whole point of the tool, and capping them would hide the gap.
@@ -401,6 +408,7 @@ def get_knowledge_gaps_func(
             scope=make_scope(
                 "get_knowledge_gaps_tool", include_tests=include_tests,
                 include_non_code=include_non_code, include_generated=include_generated,
+                exclude_data_types=exclude_data_types,
             ),
             stamp=graph_stamp(store),
         )
@@ -420,6 +428,7 @@ def get_knowledge_gaps_func(
                     "generated_hotspot_candidates_excluded", 0,
                 ),
             },
+            "data_types_excluded": stats.get("data_types_excluded", 0),
             "truncated": truncated,
             **page.fields(),
             "next_tool_suggestions": [

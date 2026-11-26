@@ -687,16 +687,19 @@ async def query_graph_tool(
       (``external:rabbitmq:<exchange>``) rows carry ``routing_key``
     - listeners_of: Find methods that listen for an event; for an AMQP exchange rows carry
       ``binding_key`` and ``queue``. ``routing_key`` links the two sides with AMQP topic
-      matching (see below)
+      matching (see below). Rows of both carry ``call_site`` (``line``, and ``file`` when
+      it is not the row's ``file_path``), also with ``detail_level="minimal"``
     - advises: Find methods an AOP advice targets via its pointcut
     - advised_by: Find AOP advice methods that intercept the target
     - handlers_of: Find methods that handle an endpoint; the target may be a route such as
       "POST /v1/items" or "/v1/items/{id}"
     - endpoints_for: Find endpoints handled by a method
     - requests_of: Find outbound HTTP endpoints a client method requests
-    - requesters_of: Find client methods that request an outbound endpoint
+    - requesters_of: Find client methods that request an outbound endpoint; the target may be
+      a route such as "GET /v2/items", matched against Endpoint nodes only
     - consumers_of: Find classes that consume a Spring configuration property
-    - file_summary: Get all nodes in a file
+    - file_summary: Get all nodes in a file; a ``ConfigProperty`` row also carries ``value``,
+      ``value_truncated`` and ``doc_profiles`` where present (never a secret-looking one)
     - path_to: Find how the target reaches ``to``, one row per hop
     - endpoints: List Endpoint nodes, one compact line each (method, path, owner, file:line,
       direction) plus ``direction_counts``. ``target`` is an optional substring of
@@ -908,6 +911,9 @@ async def semantic_search_nodes_tool(
             first page.
 
     Returns ranked nodes; ``next_cursor`` is present when ranked rows remain.
+    A ``ConfigProperty`` hit also carries ``value`` (as stored at index time: at most 200
+    characters, ``value_truncated`` when cut; secret-looking keys and values are never shown)
+    and ``doc_profiles`` when its YAML document is profile-bound; not with ``minimal``.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1099,7 +1105,9 @@ async def list_flows_tool(
             queue_listener, event, main or other.
         group_duplicates: Merge flows with the same call tree below the entry
             (a public and an admin controller calling one service method) into
-            one flow that lists every entry point. Default: True.
+            one flow that lists every entry point. Default: True. When merging removed
+            flows, ``total_before_grouping`` and the summary give the count without it;
+            False lists one row per entry point.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1726,6 +1734,7 @@ async def get_knowledge_gaps_tool(
     include_tests: bool = False,
     include_non_code: bool = False,
     include_generated: bool = False,
+    exclude_data_types: bool = False,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1758,6 +1767,11 @@ async def get_knowledge_gaps_tool(
             Default: false, so generated files are left out before ranking, totals
             and paging; ``generated_excluded`` says how many that removed. A cursor
             made with one value is refused for the other.
+        exclude_data_types: Leave data carriers (enums, records, Lombok or accessor-only
+            Java classes, dataclasses, data-only TS types) out of the untested hotspots,
+            as ``get_hub_nodes_tool`` does; ``data_types_excluded`` counts them.
+            Default: false (the same default as ``get_hub_nodes_tool``). A cursor made
+            with one value is refused for the other.
 
     Returns:
         Gaps by category. When any category has more rows the reply carries
@@ -1770,7 +1784,7 @@ async def get_knowledge_gaps_tool(
             repo_root=root, max_per_category=max_per_category,
             detail_level=detail_level, cursor=cursor,
             include_tests=include_tests, include_non_code=include_non_code,
-            include_generated=include_generated,
+            include_generated=include_generated, exclude_data_types=exclude_data_types,
         ),
         root,
     )
@@ -1978,7 +1992,10 @@ async def cross_repo_search_tool(
 
     Returns:
         Merged results. When more remain the reply carries ``next_cursor``; a
-        page after the first adds ``offset``.
+        page after the first adds ``offset``. A repo that has more matches than
+        ``limit`` is named in ``repos_capped`` (``repos_capped_total``); then
+        ``total`` is a lower bound (``total_is_lower_bound``, ``Found N+`` in the
+        summary) and ``truncated`` is set. Raise ``limit`` to see them.
     """
     return await _offload(
         "cross_repo_search_tool",
@@ -2035,6 +2052,9 @@ async def cross_repo_requests_tool(
     ``feign`` or ``js``. A match through a catch-all route such as a Next.js
     ``[...path]`` proxy, or through a naming convention, has ``confidence``
     ``low``.
+    A ``matched`` row with more than one entry in ``candidates`` (``candidates_total``
+    above 1) also has ``multiple_candidates: true``; ``status`` is unchanged.
+    ``multiple_candidates_total`` and the summary count such rows.
 
     A call has a time budget (``CRG_CROSS_REPO_BUDGET_SECONDS``, default 300,
     0 = unlimited). When it is spent no further client repo is started; those

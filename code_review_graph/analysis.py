@@ -843,6 +843,7 @@ def find_knowledge_gaps(
     edges: list[GraphEdge] | None = None,
     include_generated: bool = True,
     stats: dict[str, int] | None = None,
+    exclude_data_types: bool = False,
 ) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
 
@@ -874,6 +875,9 @@ def find_knowledge_gaps(
 
     Isolated nodes and untested hotspots are cut at *max_isolated* and *max_untested*
     (``None`` keeps every row, for a caller that pages). Every list has a fixed order.
+
+    With *exclude_data_types*, data carriers (see ``data_type_label``) are left out of
+    ``untested_hotspots`` before ranking; ``stats['data_types_excluded']`` counts them.
     """
     if edges is None:
         edges = store.get_all_edges()
@@ -988,6 +992,22 @@ def find_knowledge_gaps(
         kept = [n for n in candidates if not is_generated_file(n.file_path, repo)]
         generated_candidates = len(candidates) - len(kept)
         candidates = kept
+    data_types_excluded = 0
+    if exclude_data_types:
+        methods_of, bases_of = _class_members(all_nodes, edges)
+        kept = [
+            n for n in candidates
+            if not (
+                n.kind == "Class" and data_type_label(
+                    n,
+                    methods_of.get((n.file_path, f"{n.parent_name}.{n.name}" if n.parent_name
+                                    else n.name)),
+                    bases_of.get(n.qualified_name),
+                )
+            )
+        ]
+        data_types_excluded = len(candidates) - len(kept)
+        candidates = kept
     candidates.sort(key=lambda n: (-named.get(n.qualified_name, 0), n.qualified_name))
     untested_hotspots: list[dict] = []
     for n in candidates:
@@ -1022,6 +1042,7 @@ def find_knowledge_gaps(
     if stats is not None:
         stats["generated_isolated_excluded"] = generated_isolated
         stats["generated_hotspot_candidates_excluded"] = generated_candidates
+        stats["data_types_excluded"] = data_types_excluded
     return {
         "isolated_nodes": isolated[:max_isolated],
         "thin_communities": thin,

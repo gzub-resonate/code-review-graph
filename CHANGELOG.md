@@ -76,6 +76,19 @@
   another property of the same repo are expanded, per profile (default preferred; `config_profile` and
   `config_alternatives` say which), with Spring relaxed binding. Rows carry `target_source` (`config` or
   `config_key_unresolved`) and `via`. New module `config_values.py`.
+- `cross_repo_requests_tool` marks a `matched` row that has several `candidates` with
+  `multiple_candidates: true` and counts them in `multiple_candidates_total` and the summary. `status`
+  and `counts` are unchanged. Query-time only.
+- `list_flows_tool` reports the count before merging when `group_duplicates` (default true)
+  removed flows: `total_before_grouping` and the summary ("329 execution flow(s) (594 before
+  merging duplicates; ...)"). The default and `total` are unchanged.
+- `semantic_search_nodes_tool` hits and `query_graph_tool` `file_summary` rows of a `ConfigProperty`
+  now carry `value` (at most 200 characters), `value_truncated` and `doc_profiles` where present.
+  Values of secret-looking keys and credential-looking values stay hidden (the parse-time filter is
+  applied again on output); `detail_level="minimal"` is unchanged. Query-time only.
+- `get_knowledge_gaps_tool` takes `exclude_data_types` (default false, as on `get_hub_nodes_tool`):
+  enums, records, Lombok or accessor-only classes and other data carriers leave `untested_hotspots`
+  before ranking, and `data_types_excluded` counts them.
 
 ### Changed
 
@@ -957,6 +970,16 @@
   hostile-input bounds) and `test_ember_resolver.py`, over the synthetic apps in
   `tests/fixtures/ember/`. `ember_resolved` is a resolver-bound key in
   `graph.py`, so Ember edges are `INFERRED`.
+- `query_graph_tool` `publishers_of` and `listeners_of` rows now carry `call_site` (the call-site
+  `line`, and `file` when it differs), so `detail_level="minimal"` keeps the line the exchange
+  form of `cross_repo_requests_tool` returns. Additive.
+- `query_graph_tool` `requesters_of` with a route target (`GET /v2/attributevalues`) matches Endpoint
+  nodes only, like `handlers_of`, instead of an `ambiguous` list that mixed in classes. Several
+  matching endpoints are all answered (each row names its `endpoint`); no match is `not_found`.
+- `cross_repo_search_tool` no longer reads as complete when the per-repo `limit` cut matches off:
+  the repo is named in `repos_capped`, `total` is flagged `total_is_lower_bound` (`Found N+` in the
+  summary) and `truncated` is set. The row caps are unchanged; one row more than `limit` is fetched
+  per repo only to detect the cut.
 
 ## [2.4.0] - 2026-11-10
 
