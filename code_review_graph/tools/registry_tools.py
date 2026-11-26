@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Optional
@@ -34,6 +35,7 @@ from ..paging import (
     shown_range,
 )
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
+from ..repo_cache import MEMO, SKIPPED, parallel_map_budget
 from ..search import hybrid_search
 from ._common import _bounded, _validate_positive_int
 
@@ -724,6 +726,7 @@ def _stepfunction_links(
         "stepfunction", "Step Functions target(s)", sl.STATUSES, sl.read_target_edges,
         definitions.defines, sl.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
+        edge_filter=_edge_target_filter, prefetch=definitions.prefetch,
     )
     for row in result["results"]:
         for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
@@ -748,6 +751,7 @@ def _awssdk_links(
         definitions.defines, al.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         read_context=al.read_declare_edges,
+        edge_filter=_edge_target_filter, prefetch=definitions.prefetch,
     )
     for row in result["results"]:
         # Every string here was read from a repository's files: none is passed on as written.
@@ -884,6 +888,28 @@ def _relative_to(file_path: str, root: Path) -> str:
         return file_path
 
 
+def _edge_target_filter(
+    target_name: str | None, target: str | None,
+) -> Callable[[dict[str, Any]], bool]:
+    """``edge -> bool`` that keeps what the ``target_name`` and ``target`` filters keep.
+
+    The ``stepfunction`` and ``awssdk`` rows carry ``target_name`` and ``target`` straight from
+    the edge (``service/name``), so rejecting an edge here leaves exactly the rows the filters
+    leave on the finished rows. Checking early saves the owner lookup of the rest.
+    """
+    wanted = target.strip("/") if target else ""
+
+    def keep(edge: dict[str, Any]) -> bool:
+        if target_name and edge["name"] != target_name:
+            return False
+        if wanted:
+            full = f"{edge['service']}/{edge['name']}"
+            return full == wanted or full.startswith(wanted + "/")
+        return True
+
+    return keep
+
+
 def _infra_links(
     origin: str,
     noun: str,
@@ -900,12 +926,20 @@ def _infra_links(
     max_results: int,
     infrastructure: bool = False,
     read_context: Any = None,
+    edge_filter: Any = None,
+    prefetch: Any = None,
 ) -> dict[str, Any]:
     """Shared body of the ``terraform``, ``workflow``, ``stepfunction`` and ``awssdk`` origins.
 
     One read-only join each. *exists_in_repo* is ``(store, repo path, what) -> bool``.
     *read_context*, when given, reads from the registered repos that were not selected what
     only helps to find an owner (``resolve`` then gets it as its fourth argument).
+
+    Repos are read on up to ``CRG_CROSS_REPO_WORKERS`` threads and what is read about a repo is
+    kept while its graph file is unchanged (``repo_cache``). *edge_filter*, when given, is
+    ``(target_name, target) -> (edge -> bool)``; it lets ``resolve`` skip the owner lookup of an
+    edge the two filters would drop. *prefetch*, when given, is ``(all repos, workers) -> None``
+    and reads ahead what ``exists_in_repo`` needs from every repo.
     """
     from ..registry import Registry
 
@@ -920,68 +954,104 @@ def _infra_links(
     by_id = {id(e): i for i, e in enumerate(all_repos)}
     budget = cross_repo_budget_seconds()
     started = _now()
+    workers = cross_repo_workers()
+    timings: dict[str, float] = {}
+
+    def out_of_budget() -> bool:
+        return bool(budget) and _now() - started > budget
+
+    def read_one(entry: dict[str, Any], reader: Any, what: str) -> Optional[list[dict[str, Any]]]:
+        """What *reader* finds in one repo's graph, or ``None`` when it cannot be read."""
+        store = tl.open_store(entry)
+        if store is None:
+            return None
+        try:
+            return reader(store)  # type: ignore[no-any-return]
+        except (sqlite3.Error, GraphStoreError) as exc:
+            logger.warning("Cannot read %s %s of %s: %s", origin, what, entry["path"], exc)
+            return None
+        finally:
+            store.close()
+
+    def edges_of(entry: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+        return MEMO.get(
+            f"{origin}-edges", entry, lambda: read_one(entry, read_edges, "references"),
+            cacheable=lambda found: found is not None,
+        )
+
     edges_by_repo: dict[int, list[dict[str, Any]]] = {}
     skipped: list[str] = []
     unreadable: list[str] = []
-    for entry in selected:
-        if budget and _now() - started > budget:
+    phase = _now()
+    for entry, found in zip(
+        selected, parallel_map_budget(edges_of, selected, workers, out_of_budget),
+    ):
+        if found is SKIPPED:
             skipped.append(_sanitize_name(_repo_label(entry)))
-            continue
-        store = tl.open_store(entry)
-        if store is None:
+        elif found is None:
             unreadable.append(_sanitize_name(_repo_label(entry)))
-            continue
-        try:
-            found = read_edges(store)
-        except (sqlite3.Error, GraphStoreError) as exc:
-            logger.warning("Cannot read %s references of %s: %s", origin, entry["path"], exc)
-            unreadable.append(_sanitize_name(_repo_label(entry)))
-            continue
-        finally:
-            store.close()
-        if found:
+        elif found:
             edges_by_repo[by_id[id(entry)]] = found
+    timings["read"] = _now() - phase
 
     stores: dict[int, Optional[GraphStore]] = {}
+    # ``Definitions`` can answer from what ``prefetch`` read, without opening the repo's graph.
+    knows = getattr(getattr(exists_in_repo, "__self__", None), "knows", None)
 
     def folder_exists(index: int, subdir: Optional[str]) -> bool:
+        repo_path = Path(all_repos[index]["path"])
+        if knows is not None and knows(repo_path):
+            return bool(exists_in_repo(None, repo_path, subdir))
         if index not in stores:
             stores[index] = tl.open_store(all_repos[index])
         store = stores[index]
         if store is None:
             return False
         try:
-            return exists_in_repo(store, Path(all_repos[index]["path"]), subdir)
+            return bool(exists_in_repo(store, repo_path, subdir))
         except sqlite3.Error:
             return False
 
     context: dict[int, list[dict[str, Any]]] = {}
+    phase = _now()
     if read_context is not None:
         chosen = {id(e) for e in selected}
-        for entry in all_repos:
-            if id(entry) in chosen or (budget and _now() - started > budget):
-                continue
-            store = tl.open_store(entry)
-            if store is None:
-                continue
-            try:
-                found = read_context(store)
-            except (sqlite3.Error, GraphStoreError) as exc:
-                logger.warning("Cannot read %s context of %s: %s", origin, entry["path"], exc)
-                continue
-            finally:
-                store.close()
-            if found:
+        others = [e for e in all_repos if id(e) not in chosen]
+
+        def context_of(entry: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+            return MEMO.get(
+                f"{origin}-context", entry, lambda: read_one(entry, read_context, "context"),
+                cacheable=lambda found: found is not None,
+            )
+
+        for entry, found in zip(
+            others, parallel_map_budget(context_of, others, workers, out_of_budget),
+        ):
+            if found is not SKIPPED and found:
                 context[by_id[id(entry)]] = found
+    timings["context"] = _now() - phase
+
+    keep = (
+        edge_filter(target_repo, target_path)
+        if edge_filter is not None and (target_repo or target_path) else None
+    )
+    phase = _now()
+    if prefetch is not None and any(
+        keep is None or keep(edge) for found in edges_by_repo.values() for edge in found
+    ):
+        prefetch(all_repos, workers)
+    timings["prefetch"] = _now() - phase
+    phase = _now()
+    resolve_args: tuple[Any, ...] = (edges_by_repo, all_repos, folder_exists)
+    if read_context is not None:
+        resolve_args += (context,)
     try:
-        rows = (
-            resolve(edges_by_repo, all_repos, folder_exists, context) if read_context is not None
-            else resolve(edges_by_repo, all_repos, folder_exists)
-        )
+        rows = resolve(*resolve_args, keep=keep) if keep is not None else resolve(*resolve_args)
     finally:
         for opened in stores.values():
             if opened is not None:
                 opened.close()
+    timings["resolve"] = _now() - phase
     if target_repo:
         rows = [r for r in rows if r[repo_key] == target_repo]
     if target_path:
@@ -1016,8 +1086,16 @@ def _infra_links(
         result["skipped_repos"] = skipped
     if unknown_shown:
         result["unknown"] = unknown_shown
+    phase = _now()
     if infrastructure:
         _attach_infrastructure(result, all_repos, selected, budget)
+    timings["infrastructure"] = _now() - phase
+    logger.info(
+        "cross-repo %s: %d selected repo(s), %d worker(s), %s, total %.1fs",
+        origin, len(selected), workers,
+        ", ".join(f"{name} {seconds:.1f}s" for name, seconds in timings.items()),
+        _now() - started,
+    )
     return result
 
 
@@ -1031,7 +1109,7 @@ def _attach_infrastructure(
     by_id = {id(e): i for i, e in enumerate(all_repos)}
     block = ij.build_infrastructure(
         all_repos, [by_id[id(e)] for e in selected], sa.FactsCache(all_repos), rules,
-        resolver.lookup, budget,
+        resolver.lookup, budget, cross_repo_workers(),
     )
     result["infrastructure"] = block
     if block["repos_total"]:
@@ -1218,6 +1296,7 @@ def cross_repo_requests_func(
         def identity() -> sa.IdentityIndex:
             # Read lazily: only a service name nothing else resolved needs every repo's facts.
             if not identity_holder:
+                facts.prefetch(range(len(all_repos)), cross_repo_workers())
                 identity_holder.append(sa.IdentityIndex(all_repos, facts))
             return identity_holder[0]
 

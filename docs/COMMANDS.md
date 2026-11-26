@@ -1378,6 +1378,18 @@ limit). When it is spent no further client repo is read; those left are listed i
 them out. A cursor made on such a partial answer is refused unless the same repos are
 skipped again.
 
+Speed. The `stepfunction` and `awssdk` origins, and the service-identity facts the Feign join
+reads from every repo, are read on up to `CRG_CROSS_REPO_WORKERS` threads (default 4, `1` = one at
+a time, at most 32), each on its own graph connection. What is read about a repo is kept while
+that repo's graph file is unchanged (same file, modification time and size). A long-lived server
+therefore reads a repo again only after the indexer publishes a rebuild of it. A value that failed
+to read is not kept. `CRG_REPO_MEMO_ENTRIES` (default 4096) bounds how many results are kept and
+`0` turns the cache off. With a `service` or `route` filter on `stepfunction` or `awssdk`, a row
+the filter drops gets no owner lookup; the rows returned are the same as without the early check.
+When the time budget is checked with more than one worker, up to `workers - 1` repos may start
+after it ran out. The server log has one `cross-repo <origin>:` line per call with the seconds each
+phase took (`read`, `context`, `prefetch`, `resolve`, `infrastructure`).
+
 #### `pr_blast_radius_tool`
 ```
 pr: int | None               # Pull request number; the server fetches refs/pull/<pr>/head from origin

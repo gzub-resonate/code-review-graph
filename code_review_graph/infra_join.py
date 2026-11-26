@@ -33,6 +33,7 @@ from . import aws_sdk_links as al
 from . import service_aliases as sa
 from .errors import GraphStoreError
 from .graph import GraphStore, _sanitize_name
+from .repo_cache import MEMO, parallel_map
 from .terraform_links import open_store
 
 logger = logging.getLogger(__name__)
@@ -108,17 +109,32 @@ class _Declarations:
             self._found[index] = self._read(index)
         return self._found[index]
 
+    def prefetch(self, indexes: Sequence[int], workers: int) -> None:
+        """Read the declarations of *indexes* on up to *workers* threads, ahead of ``get``."""
+        todo = [i for i in indexes if i not in self._found]
+        for index, found in zip(todo, parallel_map(self._read, todo, workers)):
+            self._found[index] = found
+
     def _read(self, index: int) -> list[Declaration]:
-        store = open_store(dict(self.repos[index]))
-        if store is None:
-            return []
-        try:
-            return read_declarations(store, Path(self.repos[index]["path"]))
-        except (sqlite3.Error, GraphStoreError, OSError) as exc:
-            logger.warning("Cannot read declarations of %s: %s", self.repos[index]["path"], exc)
-            return []
-        finally:
-            store.close()
+        entry = dict(self.repos[index])
+        failed: list[bool] = []
+
+        def compute() -> list[Declaration]:
+            store = open_store(entry)
+            if store is None:
+                failed.append(True)
+                return []
+            try:
+                return read_declarations(store, Path(entry["path"]))
+            except (sqlite3.Error, GraphStoreError, OSError) as exc:
+                logger.warning("Cannot read declarations of %s: %s", entry["path"], exc)
+                failed.append(True)
+                return []
+            finally:
+                store.close()
+
+        # Kept while the repo's graph is the same file; a failed read is not kept.
+        return MEMO.get("declarations", entry, compute, cacheable=lambda _found: not failed)
 
 
 def declared_by_for(
@@ -329,6 +345,7 @@ def build_infrastructure(
     rules: sa.AliasRules,
     lookup: Any,
     budget: float = 0,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """The ``infrastructure`` block of a reply: ``{"repos": {label: summary}, ...}``.
 
@@ -338,6 +355,11 @@ def build_infrastructure(
     """
     started = time.monotonic()
     decls = _Declarations(repos)
+    if selected:
+        # Every summary looks at every repo, so read them all ahead, on *workers* threads.
+        everything = range(len(repos))
+        facts.prefetch(everything, workers)
+        decls.prefetch(everything, workers)
     summaries: dict[str, Any] = {}
     checked = 0
     truncated = False

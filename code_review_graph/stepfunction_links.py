@@ -150,9 +150,50 @@ class Definitions:
         """Whether the graph of the repo at *repo_path* defines ``(service, kind, name)``."""
         return self.how(store, repo_path, target) is not None
 
-    def how(self, store: GraphStore, repo_path: Path, target: Any) -> Any:
+    def knows(self, repo_path: Path) -> bool:
+        """Whether this repo's definitions are already read, so ``defines`` needs no store."""
+        return str(repo_path) in self._by_repo
+
+    def prefetch(self, entries: list[dict[str, Any]], workers: int) -> None:
+        """Read the definitions of *entries* on up to *workers* threads, kept between calls."""
+        import logging
+        import sqlite3
+
+        from .errors import GraphStoreError
+        from .repo_cache import MEMO, parallel_map
+        from .terraform_links import open_store
+
+        todo = [e for e in entries if str(Path(e["path"])) not in self._by_repo]
+
+        def load(entry: dict[str, Any]) -> dict[tuple[str, str, str], str]:
+            failed: list[bool] = []
+
+            def compute() -> dict[tuple[str, str, str], str]:
+                store = open_store(dict(entry))
+                if store is None:
+                    failed.append(True)
+                    return {}
+                try:
+                    return self._read(store)
+                except (sqlite3.Error, GraphStoreError, OSError) as exc:
+                    logging.getLogger(__name__).warning(
+                        "Cannot read definitions of %s: %s", entry["path"], exc,
+                    )
+                    failed.append(True)
+                    return {}
+                finally:
+                    store.close()
+
+            return MEMO.get("definitions", entry, compute, cacheable=lambda _v: not failed)
+
+        for entry, found in zip(todo, parallel_map(load, todo, workers)):
+            self._by_repo[str(Path(entry["path"]))] = found
+
+    def how(self, store: GraphStore | None, repo_path: Path, target: Any) -> Any:
         key = str(repo_path)
         if key not in self._by_repo:
+            if store is None:
+                return None
             self._by_repo[key] = self._read(store)
         service, kind, name = target
         known = self._by_repo[key]
@@ -163,17 +204,22 @@ def resolve_links(
     edges_by_repo: dict[int, list[dict[str, Any]]],
     all_repos: list[dict[str, Any]],
     defined_in_repo,
+    keep=None,
 ) -> list[dict[str, Any]]:
     """Resolve each state target to the registered repo that defines it.
 
     *edges_by_repo* maps an index into *all_repos* to the rows ``read_target_edges`` returned
-    for it. *defined_in_repo* is ``(repo index, (service, kind, name)) -> bool``.
+    for it. *defined_in_repo* is ``(repo index, (service, kind, name)) -> bool``. *keep*, when
+    given, is ``edge -> bool``: an edge it rejects gets no row and no owner lookup. Each edge
+    resolves on its own, so the rows kept are the ones an unfiltered call would give.
     """
     owners: dict[tuple[str, str, str], list[int]] = {}
     rows: list[dict[str, Any]] = []
     for index, edges in edges_by_repo.items():
         source_path = Path(all_repos[index]["path"])
         for edge in edges:
+            if keep is not None and not keep(edge):
+                continue
             target = (edge["service"], edge["kind"], edge["name"])
             if target not in owners:
                 owners[target] = [
