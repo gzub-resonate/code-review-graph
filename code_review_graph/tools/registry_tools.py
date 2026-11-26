@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -39,7 +40,7 @@ from ..paging import (
     shown_range,
 )
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
-from ..repo_cache import MEMO, SKIPPED, parallel_map_budget
+from ..repo_cache import INFRASTRUCTURE_RESULTS, MEMO, SKIPPED, parallel_map_budget
 from ..search import hybrid_search
 from ._common import _bounded, _validate_positive_int
 
@@ -1380,18 +1381,68 @@ def _infra_links(
     return result
 
 
+def _file_signature(path: Optional[Path]) -> Any:
+    """What a small input file looks like now, for a cache key (``None`` when it is absent)."""
+    if path is None:
+        return None
+    try:
+        info = path.expanduser().stat()
+    except OSError:
+        return (str(path), None)
+    return (str(path), info.st_mtime_ns, info.st_size)
+
+
+def _infrastructure_key(
+    all_repos: list[dict[str, Any]], chosen: list[int],
+) -> Optional[tuple[Any, ...]]:
+    """Everything the ``infrastructure`` block depends on, or ``None`` if it cannot be known.
+
+    That is the registry (path and alias of every repo), each repo's graph stamp, which repos
+    were selected, both alias files and the repo cap. The time budget is left out because only
+    a block that was not cut short is kept.
+    """
+    from ..repo_aliases import repo_aliases_path
+    from ..repo_cache import graph_stamp
+
+    stamps = []
+    for entry in all_repos:
+        stamp = graph_stamp(entry)
+        if stamp is None:
+            return None
+        stamps.append((str(entry["path"]), entry.get("alias"), stamp))
+    service_file = os.environ.get(sa.ALIASES_FILE_ENV, "").strip()
+    return (
+        tuple(stamps), tuple(chosen),
+        _file_signature(Path(service_file) if service_file else None),
+        _file_signature(repo_aliases_path()), ij.MAX_REPOS,
+    )
+
+
 def _attach_infrastructure(
     result: dict[str, Any], all_repos: list[dict[str, Any]], selected: list[dict[str, Any]],
     budget: float,
 ) -> None:
     """Add the per-repo ``infrastructure`` summary (see ``infra_join``) to a reply."""
-    rules = sa.load_alias_rules()
-    resolver = RepoNameResolver(all_repos)
     by_id = {id(e): i for i, e in enumerate(all_repos)}
-    block = ij.build_infrastructure(
-        all_repos, [by_id[id(e)] for e in selected], sa.FactsCache(all_repos), rules,
-        resolver.lookup, budget, cross_repo_workers(),
-    )
+    chosen = [by_id[id(e)] for e in selected]
+
+    def compute() -> dict[str, Any]:
+        rules = sa.load_alias_rules()
+        resolver = RepoNameResolver(all_repos)
+        return ij.build_infrastructure(
+            all_repos, chosen, sa.FactsCache(all_repos), rules,
+            resolver.lookup, budget, cross_repo_workers(),
+        )
+
+    key = _infrastructure_key(all_repos, chosen)
+    if key is None:
+        block = compute()
+    else:
+        # Concurrent calls for the same repos at the same graph versions build it once, and a
+        # complete block is reused until a graph or an alias file changes.
+        block = copy.deepcopy(INFRASTRUCTURE_RESULTS.get(
+            key, compute, cacheable=lambda found: not found["truncated"],
+        ))
     result["infrastructure"] = block
     if block["repos_total"]:
         result["summary"] += (
