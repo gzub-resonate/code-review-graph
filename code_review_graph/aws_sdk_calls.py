@@ -41,11 +41,15 @@ from .config_keys import normalize_spring_config_key
 from .infra_references import aws_external_target, reduce_arn
 
 __all__ = [
-    "aws_sdk_edges", "RESOLUTION", "UNRESOLVED_NAME", "classify_access", "sdk_operation_name",
+    "aws_sdk_edges", "RESOLUTION", "UNRESOLVED_NAME", "NO_RESOURCE_PARAM", "classify_access",
+    "sdk_operation_name",
 ]
 
 RESOLUTION = "aws_sdk"
 UNRESOLVED_NAME = "?"
+#: ``unresolved_reason`` of a client call that names no resource parameter at all (``?`` row,
+#: confidence 0.3): the call is known, its target is not.
+NO_RESOURCE_PARAM = "no_resource_param"
 _DYN = "\x00"
 _MAX_EDGES_PER_FILE = 2000
 #: Longest line a pattern is run on, and the most text read from one file. Longer lines are
@@ -109,6 +113,12 @@ SERVICES: dict[str, _Svc] = {
     ),
     "elasticache": _Svc("elasticache", "cache-cluster", ("cacheclusterid",)),
     "es": _Svc("es", "search-domain", ("domainname", "domainnames")),
+    "logs": _Svc("logs", "log-group", ("loggroupname", "loggroupnames", "loggroupidentifier")),
+    "cloudwatch": _Svc("cloudwatch", "alarm", ("alarmname", "alarmnames")),
+    "application-autoscaling": _Svc(
+        "application-autoscaling", "scalable-target", ("resourceid", "resourceids"),
+    ),
+    "sts": _Svc("sts", "role", ("rolearn",)),
 }
 #: Services whose resources are data stores. A name is only joined to a declaration of the same
 #: kind (a replication group is not a cache cluster of the same name); see ``aws_sdk_links``.
@@ -133,6 +143,21 @@ _REPLICATION_GROUP_OPS = (
     "test_failover", "start_migration", "complete_migration", "test_migration",
     "modify_replication_group_shard_configuration",
 )
+_ECS_SERVICE_OPS = ("update_service", "create_service", "delete_service", "describe_services")
+_ECS_CLUSTER_OPS = (
+    "list_services", "list_tasks", "describe_tasks", "stop_task", "list_container_instances",
+    "describe_container_instances", "describe_clusters", "delete_cluster", "update_cluster",
+    "execute_command",
+)
+_BATCH_QUEUE_OPS = (
+    "describe_job_queues", "update_job_queue", "delete_job_queue", "create_job_queue",
+)
+_BATCH_JOB_OPS = ("describe_jobs", "terminate_job", "cancel_job")
+_EVENT_RULE_OPS = (
+    "put_rule", "describe_rule", "delete_rule", "enable_rule", "disable_rule", "put_targets",
+    "remove_targets", "list_targets_by_rule",
+)
+_METRIC_OPS = ("put_metric_data", "get_metric_statistics", "list_metrics")
 #: Per-operation resource parameters that differ from the service's.
 _OP_PARAMS: dict[tuple[str, str], tuple[str, ...]] = {
     ("secretsmanager", "create_secret"): ("name",),
@@ -143,16 +168,30 @@ _OP_PARAMS: dict[tuple[str, str], tuple[str, ...]] = {
         "targetgrouparn", "targetgrouparns", "names", "name",
     ) for op in _TARGET_GROUP_OPS},
     **{("elasticache", op): ("replicationgroupid",) for op in _REPLICATION_GROUP_OPS},
+    **{("ecs", op): ("service", "services", "servicename") for op in _ECS_SERVICE_OPS},
+    **{("ecs", op): ("cluster", "clusters") for op in _ECS_CLUSTER_OPS},
+    **{("batch", op): ("jobqueue", "jobqueues", "jobqueuename") for op in _BATCH_QUEUE_OPS},
+    **{("batch", op): ("jobid", "jobs") for op in _BATCH_JOB_OPS},
+    ("batch", "register_job_definition"): ("jobdefinitionname",),
+    **{("events", op): ("name", "rule") for op in _EVENT_RULE_OPS},
+    **{("cloudwatch", op): ("namespace",) for op in _METRIC_OPS},
 }
 #: Per-operation resource kind that differs from the service's.
 _OP_KIND: dict[tuple[str, str], str] = {
     **{("rds", op): "db-cluster" for op in _RDS_CLUSTER_OPS},
     **{("elasticloadbalancing", op): "target-group" for op in _TARGET_GROUP_OPS},
     **{("elasticache", op): "replication-group" for op in _REPLICATION_GROUP_OPS},
+    **{("ecs", op): "ecs-service" for op in _ECS_SERVICE_OPS},
+    **{("ecs", op): "cluster" for op in _ECS_CLUSTER_OPS},
+    **{("batch", op): "job-queue" for op in _BATCH_QUEUE_OPS},
+    **{("batch", op): "batch-job" for op in _BATCH_JOB_OPS},
+    **{("events", op): "rule" for op in _EVENT_RULE_OPS},
+    **{("cloudwatch", op): "metric-namespace" for op in _METRIC_OPS},
 }
 #: Parameters that take a list of names; each item (up to ten) is an edge.
 _LIST_PARAMS = frozenset({
     "names", "loadbalancerarns", "loadbalancernames", "targetgrouparns", "domainnames",
+    "loggroupnames", "alarmnames", "resourceids", "services", "clusters", "jobqueues", "jobs",
 })
 _MAX_LIST_ITEMS = 10
 #: boto3 ``client(<name>)`` -> service key.
@@ -162,6 +201,8 @@ _BOTO_SERVICE = {
     "firehose": "firehose", "events": "events", "eventbridge": "events", "ecs": "ecs",
     "glue": "glue", "batch": "batch", "rds": "rds", "elbv2": "elasticloadbalancing",
     "elb": "elasticloadbalancing", "elasticache": "elasticache", "es": "es", "opensearch": "es",
+    "logs": "logs", "cloudwatch": "cloudwatch",
+    "application-autoscaling": "application-autoscaling", "sts": "sts",
 }
 #: Java package segment (SDK v2 and v1) -> service key.
 _JAVA_PKG = {
@@ -334,6 +375,14 @@ _NAME_RE: dict[str, re.Pattern[str]] = {
     "cache-cluster": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,49}$"),
     "replication-group": re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,39}$"),
     "search-domain": re.compile(r"^[a-z][a-z0-9\-]{2,27}$"),
+    "log-group": re.compile(r"^[A-Za-z0-9_.\-/#]{1,512}$"),
+    "metric-namespace": re.compile(r"^[A-Za-z0-9_.\-/#:]{1,255}$"),
+    "alarm": re.compile(r"^[A-Za-z0-9_.\-/:]{1,255}$"),
+    "scalable-target": re.compile(r"^[A-Za-z0-9_.\-/:#]{1,1600}$"),
+    "ecs-service": re.compile(r"^[A-Za-z0-9_\-]{1,255}$"),
+    "job-queue": re.compile(r"^[A-Za-z0-9_\-]{1,128}$"),
+    "batch-job": re.compile(r"^[A-Za-z0-9\-]{1,128}$"),
+    "role": re.compile(r"^[A-Za-z0-9_+=,.@\-]{1,64}$"),
 }
 #: ARN resource prefix per kind for services ``reduce_arn`` does not know.
 _OWN_ARN = {
@@ -341,7 +390,12 @@ _OWN_ARN = {
     "parameter": ("ssm", "parameter"),
     "stream": ("kinesis", "stream/"), "delivery-stream": ("firehose", "deliverystream/"),
     "event-bus": ("events", "event-bus/"),
+    "log-group": ("logs", "log-group:"), "alarm": ("cloudwatch", "alarm:"),
+    "rule": ("events", "rule/"), "ecs-service": ("ecs", "service/"),
+    "job-queue": ("batch", "job-queue/"), "role": ("iam", "role/"),
 }
+#: Kinds whose ARN resource may carry a path (``cluster/name``) before the name.
+_ARN_LAST_SEGMENT = frozenset({"rule", "ecs-service", "role"})
 _PLACEHOLDER_OK = re.compile(r"[A-Za-z0-9_.\-\[\]]{1,128}")
 _PROP_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z0-9_.\-]+)(?::[^}]*)?\}$")
 
@@ -378,6 +432,10 @@ def _name_from_arn(kind: str, text: str) -> Optional[str]:
             rest = rest.split("/", 1)[0]
         elif kind == "secret":
             rest = re.sub(r"-[A-Za-z0-9]{6}$", "", rest)
+        elif kind == "log-group":
+            rest = rest.split(":", 1)[0]
+        elif kind in _ARN_LAST_SEGMENT:
+            rest = rest.rsplit("/", 1)[-1]
         elif kind == "parameter":
             rest = rest[1:] if rest.startswith("/") else rest
             rest = rest if rest.count("/") == 0 else "/" + rest
@@ -817,6 +875,15 @@ class _Python:
                 return
         if splat:
             self.out.add(svc, op, Val(), line, sdk)
+        elif kws:
+            # The call names none of the resource parameters this service is known by. Keep a
+            # service-level row so the call is still listed, marked so a consumer can drop it.
+            # A call with no argument at all (``describe_db_instances()``) lists everything and
+            # names no resource: no row, as before.
+            self.out.add(
+                svc, op, Val(), line, sdk,
+                extra={"unresolved_reason": NO_RESOURCE_PARAM, "confidence": 0.3},
+            )
 
 
 # -- Java -----------------------------------------------------------------------------------
