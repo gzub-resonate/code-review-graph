@@ -32,7 +32,14 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
-from . import asl_parse, ember_extract, ember_template, js_api_extract, py_api_extract
+from . import (
+    asl_parse,
+    ember_extract,
+    ember_template,
+    js_api_extract,
+    py_api_extract,
+    py_http_clients,
+)
 from . import dead_code_evidence as _dead_code_evidence
 from . import scala_parse as _scala_parse
 from .aws_sdk_calls import aws_sdk_edges
@@ -5221,6 +5228,13 @@ class CodeParser:
             )
         except (RecursionError, ValueError) as exc:  # pragma: no cover - defensive
             logger.warning("Python route extraction skipped for %s: %s", file_path, exc)
+        try:
+            py_http_clients.extract(
+                root, source, file_path, rel_path, nodes, edges,
+                NodeInfo, EdgeInfo, language, is_test,
+            )
+        except (RecursionError, ValueError) as exc:  # pragma: no cover - defensive
+            logger.warning("Python HTTP client extraction skipped for %s: %s", file_path, exc)
 
     def _stamp_ember_roles(
         self,
