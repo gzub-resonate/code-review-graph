@@ -1280,7 +1280,15 @@ repo are expanded; relaxed binding, so `queue-name`, `queueName`, `queue_name` a
 row says `target_source: "config"`, `config_profile` (the default profile is preferred), `via` (the property and each
 placeholder read), and `config_alternatives` (other profiles' names when they differ). A key that cannot be named
 stays unresolved with `target_source: "config_key_unresolved"`, `placeholder` (the key), `config_defined` and
-`unresolved_reason` (`not_defined`, `no_value`, `env_placeholder`, `profiles_differ`, `ambiguous`). Values of
+`unresolved_reason` (`not_defined`, `no_value`, `env_placeholder`, `profiles_differ`, `ambiguous`). A key that is
+defined only in profile-bound documents whose values differ (no default profile) keeps the row unresolved by name
+but is reported as `target_source: "config"` with `config_profile: "differs"`, `unresolved_reason: "profiles_differ"`
+and the per-profile names in `config_alternatives`; a name already resolved per profile at build time
+(`resolved_names`) also reports `target_source: "config"`. The Java extractors reach the key through one same-file
+hop: a local variable, a no-argument method of the same class that only returns the getter or `@Value` field, a
+resource-lookup wrapper such as `helper.getQueueUrl(props.getQueueName())`, a request variable built earlier in the
+method, or a chained getter (`props.getDynamo().getTableName()`, kept only when the repo's configuration defines
+`prefix.dynamo.tableName`). Method parameters and anything ambiguous yield no key. Values of
 secret-looking keys, private keys, JWTs, tokens and long random strings are never stored. Config values appear on
 nodes only after the repo is re-indexed (a full reindex follows from the new index fingerprint).
 

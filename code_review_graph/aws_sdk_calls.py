@@ -39,6 +39,7 @@ from typing import Any, NamedTuple, Optional
 from . import aws_terraform_wiring as _wiring
 from .config_keys import normalize_spring_config_key
 from .infra_references import aws_external_target, reduce_arn
+from .java_config_hops import follow, getter_chain
 
 __all__ = [
     "aws_sdk_edges", "RESOLUTION", "UNRESOLVED_NAME", "NO_RESOURCE_PARAM", "classify_access",
@@ -1032,6 +1033,21 @@ class _Java:
         return None
 
     def val(self, node: Any) -> Val:
+        got = self._val(node)
+        if (
+            got.template is not None or got.placeholder or got.getter
+            or node.type not in ("identifier", "method_invocation")
+        ):
+            return got
+        # One same-file hop (local alias, own-class method, lookup wrapper) to a binding.
+        hopped = follow(node, self._binding)
+        return hopped if hopped is not None else got
+
+    def _binding(self, node: Any) -> Optional[Val]:
+        got = self._val(node)
+        return got if got.placeholder or got.getter else None
+
+    def _val(self, node: Any) -> Val:
         src = self.src
         t = node.type
         if t == "string_literal":
@@ -1069,6 +1085,12 @@ class _Java:
                 if getter and owner:
                     prop = getter.group(2)[0].lower() + getter.group(2)[1:]
                     return Val(None, None, (owner, prop))
+            chain = getter_chain(node) if obj is not None and obj.type == "method_invocation" \
+                else None
+            if chain is not None and chain[0].type == "identifier":
+                owner = self.var_types.get(_text(chain[0], src))
+                if owner:
+                    return Val(None, None, (owner, ".".join(chain[1])))
             if name is None or first is None:
                 return Val()
             n, o = _text(name, src), (_text(obj, src) if obj is not None else "")

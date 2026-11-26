@@ -33,7 +33,10 @@ be worked out is ``unresolved``. A Terraform declaration, notification or policy
 configuration key is named from the ``ConfigProperty`` value on the graph
 (:mod:`~code_review_graph.config_values`: relaxed binding, profiles, ``${...}`` expansion) and
 says so in ``target_source: config`` and
-``via``; otherwise it is ``target_source: config_key_unresolved``.
+``via``; otherwise it is ``target_source: config_key_unresolved``. A key whose values differ by
+profile with no default one stays unresolved by name but is ``target_source: config`` with
+``config_profile: differs`` and the per-profile names in ``config_alternatives``. A name resolved
+per profile at build time (``resolved_names``) is ``target_source: config`` too.
 """
 
 from __future__ import annotations
@@ -182,7 +185,10 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
             key, defined = _config_key(
                 values.get(), prefixes, info["config_getter"], module_root(file_path),
             )
-            if key:
+            # A nested chain (``a.getB().getC()``) is a property path only when the repo's
+            # configuration defines it; otherwise it may be any method chain.
+            nested = "." in str(info["config_getter"].get("property", ""))
+            if key and (defined or not nested):
                 out[-1]["placeholder"] = key
                 out[-1]["extra"]["config_defined"] = defined
     _resolve_config_values(out, values)
@@ -216,6 +222,14 @@ def _resolve_config_values(edges: list[dict[str, Any]], values: _LazyValues) -> 
     for edge in edges:
         key = edge["placeholder"]
         extra = edge["extra"]
+        if (
+            isinstance(key, str) and key and extra.get("resolved_names")
+            and edge["kind"] in ALLOWED_KINDS and edge["sdk"] != "terraform"
+            and "target_source" not in extra
+        ):
+            # Named per profile at build time from this key: the name and confidence stay
+            # as built; the row only says where the name came from.
+            extra["target_source"] = "config"
         if not (
             edge["unresolved"] and isinstance(key, str) and key
             and edge["kind"] in ALLOWED_KINDS and not extra.get("resolved_names")
@@ -253,6 +267,11 @@ def _resolve_config_values(edges: list[dict[str, Any]], values: _LazyValues) -> 
                 alternatives[profile] = alt_name
         if alternatives:
             extra["config_alternatives"] = alternatives
+            if got.reason == "profiles_differ":
+                # Every value lives in a profile-bound document and they differ: the key is
+                # config-resolved, the name is per profile (listed), none is chosen.
+                extra["target_source"] = "config"
+                extra["config_profile"] = "differs"
 
 
 def _resolve_arn_getters(edges: list[dict[str, Any]]) -> None:
