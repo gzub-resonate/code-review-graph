@@ -18,6 +18,7 @@ from typing import Any, Optional
 from .. import amqp_exchanges as ax
 from .. import amqp_join as aj
 from .. import aws_sdk_links as al
+from .. import external_hosts as eh
 from .. import feign_links as fl
 from .. import infra_join as ij
 from .. import js_route_leads as jl
@@ -2090,8 +2091,9 @@ def cross_repo_requests_func(
         "terraform", "workflow", "stepfunction", "awssdk", "amqp", "trigger", "external",
         "consumers",
     )
-    if status is not None and origin not in infra_origins and status not in jl.ALL_STATUSES:
-        raise ValueError(f"status must be one of: {', '.join(jl.ALL_STATUSES)}")
+    accepted_statuses = (*jl.ALL_STATUSES, *eh.NO_TARGET_REASONS)
+    if status is not None and origin not in infra_origins and status not in accepted_statuses:
+        raise ValueError(f"status must be one of: {', '.join(accepted_statuses)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
         raise ValueError(
             "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp, "
@@ -2255,6 +2257,7 @@ def cross_repo_requests_func(
 
         wanted_route = fl.normalize_route(route) if route else None
         counts: dict[str, int] = {}
+        counts_by_reason: dict[str, int] = {}
         origin_counts: dict[str, int] = {}
         multiple_total = 0
         rows_by_repo: list[list[dict[str, Any]]] = []
@@ -2331,10 +2334,16 @@ def cross_repo_requests_func(
                     result = jl.refine_no_route_match(
                         call, result, js_index_for(index), own_index_for(index),
                     )
-                if status is not None and result.status != status:
+                no_target_why = (
+                    eh.no_target_reason(call.service, result.reason)
+                    if result.status == fl.NO_TARGET_REPO else None
+                )
+                if status is not None and status not in (result.status, no_target_why):
                     continue
 
                 counts[result.status] = counts.get(result.status, 0) + 1
+                if no_target_why:
+                    counts_by_reason[no_target_why] = counts_by_reason.get(no_target_why, 0) + 1
                 origin_counts[call.origin] = origin_counts.get(call.origin, 0) + 1
                 total += 1
                 row: dict[str, Any] = {
@@ -2364,6 +2373,8 @@ def cross_repo_requests_func(
                     row["served_methods"] = jl.served_methods(result.candidates)
                 if result.reason:
                     row["reason"] = result.reason
+                if no_target_why:
+                    row["no_target_reason"] = no_target_why
                 if resolution is not None and resolution.how:
                     row["target_resolution"] = resolution.how
                 if resolution is not None and resolution.matched_via:
@@ -2440,6 +2451,7 @@ def cross_repo_requests_func(
             "results": results,
             "results_shown": len(results),
             "counts": counts,
+            "counts_by_reason": counts_by_reason,
             "multiple_candidates_total": multiple_total,
             "total": total,
             "truncated": truncated,

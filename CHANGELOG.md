@@ -34,6 +34,10 @@
   `INCOMPLETE: searched 84 of 122 repos; 38 skipped by the time budget` and adds `truncated_reason`
   and `repos_total` (`skipped_repos` and `truncated: true` were already set). Query-time only:
   same index fingerprint.
+- `cross_repo_requests_tool` Feign rows with `status: no_target_repo` now carry `no_target_reason`
+  (`external_vendor` when the service name names a known SaaS vendor, `repo_not_registered` for any
+  other name no registered repo carries, `target_unreadable`), the reply has `counts_by_reason`, and
+  `status=` also accepts those three values. `status` and `reason` are unchanged. Query-time only.
 - `query_graph_tool` `handlers_of` with a route (`POST /v2/respondents/avmap`) no longer needs
   `repo_root`: omit it on a multi-repo server, or pass `"*"`, and every registered repo with a graph
   is asked. The reply names `repos_matched` and tags rows with `repo`, stays small (default 20
