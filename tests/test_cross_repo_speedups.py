@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from code_review_graph import stepfunction_links as sl
 from code_review_graph.repo_cache import (
     MEMO,
     SKIPPED,
+    _reset_shared_pool,
     graph_stamp,
     memo_entries,
     parallel_map,
@@ -142,13 +144,26 @@ class TestRepoMemo:
         assert len(MEMO) == 1
 
 
+@pytest.fixture
+def pool_of(monkeypatch):
+    """Make the shared pool of a given size for the test, and drop it afterwards."""
+
+    def make(size: int) -> None:
+        _reset_shared_pool()
+        monkeypatch.setenv("CRG_CROSS_REPO_WORKERS", str(size))
+
+    yield make
+    _reset_shared_pool()
+
+
 class TestParallelHelpers:
     @pytest.mark.parametrize("workers", [1, 2, 8])
     def test_results_come_back_in_input_order(self, workers):
         assert parallel_map(lambda n: n * n, range(20), workers) == [n * n for n in range(20)]
         assert parallel_map(lambda n: n, [], workers) == []
 
-    def test_work_overlaps_on_threads(self):
+    def test_work_overlaps_on_threads(self, pool_of):
+        pool_of(4)
         names: set[str] = set()
         barrier = threading.Barrier(3, timeout=5)
 
@@ -176,6 +191,80 @@ class TestParallelHelpers:
         none_left = parallel_map_budget(lambda n: n, [0, 1, 2], 2, lambda: True)
         assert none_left == [SKIPPED] * 3
         assert parallel_map_budget(lambda n: n, [], 4, lambda: False) == []
+
+
+class TestSharedPool:
+    def test_concurrent_calls_share_one_bounded_pool(self, pool_of):
+        pool_of(3)
+        lock = threading.Lock()
+        running = {"now": 0, "max": 0}
+        pool_threads: set[int] = set()
+
+        def fn(n: int) -> int:
+            if threading.current_thread().name.startswith("crg-xrepo"):
+                pool_threads.add(threading.get_ident())
+            with lock:
+                running["now"] += 1
+                running["max"] = max(running["max"], running["now"])
+            time.sleep(0.01)
+            with lock:
+                running["now"] -= 1
+            return n * 2
+
+        callers = 8
+        outcomes: dict[int, list[int]] = {}
+
+        def call(i: int) -> None:
+            outcomes[i] = parallel_map(fn, range(12), 4)
+
+        threads = [threading.Thread(target=call, args=(i,)) for i in range(callers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert all(got == [n * 2 for n in range(12)] for got in outcomes.values())
+        assert len(outcomes) == callers
+        # Eight calls of four workers used to start 32 threads; now at most the pool's three
+        # run besides the callers themselves.
+        assert len(pool_threads) <= 3
+        assert running["max"] <= 3 + callers
+
+    def test_a_task_that_maps_again_does_not_deadlock(self, pool_of):
+        pool_of(2)
+
+        def inner(n: int) -> int:
+            return n + 1
+
+        def outer(n: int) -> int:
+            return sum(parallel_map(inner, range(4), 3)) + n
+
+        done: list[list[int]] = []
+        worker = threading.Thread(
+            target=lambda: done.append(parallel_map(outer, range(6), 3)), daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=20)
+        assert done == [[10 + n for n in range(6)]]
+
+    def test_the_first_error_is_raised(self, pool_of):
+        pool_of(2)
+
+        def fn(n: int) -> int:
+            if n == 3:
+                raise ValueError("three")
+            return n
+
+        with pytest.raises(ValueError, match="three"):
+            parallel_map(fn, range(8), 3)
+        assert parallel_map(lambda n: n, range(4), 3) == [0, 1, 2, 3]
+
+    def test_the_pool_size_follows_the_setting(self, monkeypatch):
+        from code_review_graph.repo_cache import shared_pool_size
+
+        monkeypatch.setenv("CRG_CROSS_REPO_WORKERS", "2")
+        assert shared_pool_size() == 2
+        monkeypatch.delenv("CRG_CROSS_REPO_WORKERS")
+        assert 1 <= shared_pool_size() <= 4
 
 
 def count_calls(monkeypatch, owner, name: str) -> list[int]:
