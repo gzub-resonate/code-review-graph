@@ -2004,6 +2004,21 @@ async def cross_repo_requests_tool(
             binding keys that hold one; ``matched_via`` is ``exact_key``, ``topic_pattern`` or
             ``key_unknown``. Repos with no AMQP edges are named in ``repos_without_amqp``: a
             repo indexed before the exchange edges existed shows nothing until it is rebuilt.
+            ``external`` groups the HTTP calls that reach no registered service by host: one
+            row per (host, repo) with a ``vendor`` guess from a small static table, ``calls``,
+            ``files`` and ``samples`` (JavaScript absolute URLs, ``baseURL``, Ember adapter
+            hosts, Feign clients of an unregistered service); a placeholder host is
+            ``host_unresolved`` with its key. ``service`` filters by host, domain, vendor or
+            Feign service name, ``route`` by path prefix, ``status`` is ``known_vendor``,
+            ``unknown_vendor`` or ``host_unresolved``. Query strings and credentials are never
+            shown. ``consumers`` is a reverse lookup: ``service`` is a queue, bucket, SSM
+            parameter, table, topic or secret name; the rows are its Terraform declarations
+            and the repos that reference it, with ``match`` ``exact``, ``prefix`` or
+            ``config_key``. ``route`` filters by AWS service or kind, ``status`` by
+            ``declaration``, ``consumer`` or a match. Names under 4 characters and generic ones
+            (``logs``, ``test``) are refused. With no ``service`` it lists SSM reads that match
+            no declared ``aws_ssm_parameter``. Environment variable values and string literals
+            are not in the graphs and are not joined.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of
             the same query. Omit it for the first page.
         repo_root: Shorthand for ``repos=[<folder name>]`` when ``repos`` is not given, as

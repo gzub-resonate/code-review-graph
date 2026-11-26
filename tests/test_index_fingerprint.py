@@ -27,11 +27,12 @@ QUERY_ONLY = {
     # cross-repo link passes, run at query time over finished graphs
     "aws_sdk_links", "stepfunction_links", "terraform_links", "workflow_links",
     "service_aliases", "infra_join", "amqp_join", "repo_cache",
+    "external_hosts", "consumer_join",
     # MCP tool front-ends
     "tools.change_scope",
     "tools.analysis_tools", "tools.community_tools", "tools.context", "tools.flows_tools",
     "tools.pr_tools", "tools.query", "tools.query_extras", "tools.refactor_tools",
-    "tools.registry_tools", "tools.review",
+    "tools.registry_tools", "tools.review", "tools.cross_repo_origins",
     # CLI, server, installers and environment plumbing
     "__main__", "cli", "main", "stdio", "daemon_cli", "doctor", "dsh", "enrich",
     "hook_update", "install_gitignore", "install_manifest", "jsonc", "multi_worktree",

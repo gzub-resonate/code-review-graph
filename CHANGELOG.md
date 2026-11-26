@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `cross_repo_requests_tool` `origin="external"` groups the HTTP calls that reach no registered
+  service by host (JavaScript absolute URLs, `baseURL`, Ember adapter hosts, Feign clients of an
+  unregistered service), with a vendor guess from a small static table and `host_unresolved` for
+  placeholder hosts. `origin="consumers"` looks up one named queue, bucket, SSM parameter, table,
+  topic or secret and lists its Terraform declarations and every repo that references it (`exact`,
+  `prefix`, `config_key`); with no name it lists SSM reads that match no declared
+  `aws_ssm_parameter`. Both page and are query-time only: no index change.
+
 ### Changed
 
 - `cross_repo_requests_tool` with `origin` `terraform`, `workflow`, `stepfunction`, `awssdk` or
