@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 from collections import OrderedDict
@@ -58,9 +59,22 @@ class Registry:
         """Write registry to disk."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = {"repos": self._repos}
-        self._path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        # Write a sibling file, then rename it over the registry: a reader, or a crash
+        # part-way through, sees the old file or the new one, never a cut-off one.
+        tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def register(
         self, path: str, alias: str | None = None, data_dir: str | None = None,
