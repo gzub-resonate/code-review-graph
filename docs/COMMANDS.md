@@ -1113,7 +1113,15 @@ max_results: int = 50        # Merged results across searched repos (max 100)
 repos: list[str] | None      # Aliases or folder names; default: every registered repo
 cursor: str | None           # next_cursor of the previous reply (see Paging)
 include_repo_list: bool = False  # Return repos_searched (names) even for more than 10 repos
+include_fuzzy: bool = False  # Keep fuzzy/tokens rows (hidden when an exact hit exists; capped when none does)
+match: str = "fuzzy"         # fuzzy | exact (exact: only exact, exact_ci and qualified rows)
 ```
+
+The reply's `exact` is `"found"` or `"none"`, and the summary says `exact: none` when no row has the query as
+its name. With `match="fuzzy"` (default) and no exact hit, `fuzzy` rows that share fewer than half of the
+query's words are dropped and at most 10 are kept (an unmatched hyphenated name returned 600 rows, ~25 KB);
+`fuzzy_dropped` and the summary say how many were hidden, and `include_fuzzy=true` returns them all.
+`match="exact"` returns only exact rows and counts the rest in `fuzzy_dropped`.
 
 `repos_searched_total` is the number of repos searched. `repos_searched` (their names) is returned only
 for 10 repos or fewer, or with `include_repo_list=true`; it was ~2.5 KB on a 122-repo registry.

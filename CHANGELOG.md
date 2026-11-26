@@ -4,6 +4,12 @@
 
 ### Added
 
+- `cross_repo_search_tool` takes `match="exact"` (only `exact`, `exact_ci` and `qualified` rows) and
+  its reply carries `exact: "found"|"none"`; the summary says `exact: none` when no row is an exact
+  name. With the default `match="fuzzy"` and no exact hit, `fuzzy` rows that share fewer than half
+  of the query's words are dropped and at most 10 are kept, with `fuzzy_dropped` giving the count
+  (an unmatched hyphenated name returned 600 rows). `include_fuzzy=True` returns everything as
+  before. The cursor is tied to `match`. Query-time only.
 - `cross_repo_search_tool` and the Feign/JS origins of `cross_repo_requests_tool` return
   `repos_searched_total` (a count) on every reply and `repos_searched` (the names) only for 10
   repos or fewer, or with the new `include_repo_list=True`; the name list was ~2.5 KB of every

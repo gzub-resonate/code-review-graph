@@ -1871,6 +1871,7 @@ async def cross_repo_search_tool(
     detail_level: str = "standard",
     include_fuzzy: bool = False,
     include_repo_list: bool = False,
+    match: str = "fuzzy",
 ) -> dict:
     """Search for code entities across registered repositories.
 
@@ -1911,6 +1912,12 @@ async def cross_repo_search_tool(
         include_repo_list: ``repos_searched_total`` is always the number of repos searched.
             ``repos_searched`` (the names) is returned only for 10 repos or fewer, or when this
             is True. ``skipped_repos`` is always listed in full. Default: False.
+        match: ``"fuzzy"`` (default, as before) or ``"exact"`` (only ``exact``, ``exact_ci``
+            and ``qualified`` rows). The reply's ``exact`` is ``"found"`` or ``"none"`` and
+            the summary says ``exact: none``. With ``"fuzzy"`` and no exact hit, ``fuzzy``
+            rows sharing fewer than half of the query's words are dropped and at most 10 are
+            kept; ``fuzzy_dropped`` counts what was hidden and ``include_fuzzy=True``
+            returns everything.
 
     Returns:
         Merged results. When more remain the reply carries ``next_cursor``; a
@@ -1921,7 +1928,7 @@ async def cross_repo_search_tool(
         lambda: cross_repo_search_func(
             query=query, kind=kind, limit=limit, max_results=max_results,
             repos=repos, cursor=cursor, include_fuzzy=include_fuzzy,
-            include_repo_list=include_repo_list,
+            include_repo_list=include_repo_list, match=match,
         ),
         None,
         provenance=False,

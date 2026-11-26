@@ -186,6 +186,9 @@ def _listed(names: list[str]) -> list[str]:
 _MATCH_TIERS = ("exact", "exact_ci", "qualified", "prefix", "tokens", "fuzzy")
 _TIER_ORDER = {name: rank for rank, name in enumerate(_MATCH_TIERS)}
 #: Tiers that make weaker rows noise, and the rows hidden then (see ``include_fuzzy``).
+#: With no exact hit, at most this many ``fuzzy`` rows are kept (``include_fuzzy`` lifts it).
+_FUZZY_CAP_NO_EXACT = 10
+_MATCH_MODES = ("fuzzy", "exact")
 _STRONG_TIERS = frozenset({"exact", "exact_ci", "qualified"})
 _WEAK_TIERS = frozenset({"tokens", "fuzzy"})
 _QUALIFIED_SEPARATORS = (".", "::")
@@ -387,6 +390,7 @@ def cross_repo_search_func(
     cursor: str | None = None,
     include_fuzzy: bool = False,
     include_repo_list: bool = False,
+    match: str = "fuzzy",
 ) -> dict[str, Any]:
     """Search across registered repositories.
 
@@ -433,6 +437,11 @@ def cross_repo_search_func(
         include_fuzzy: Keep ``fuzzy`` and ``tokens`` rows when a strong match exists.
         include_repo_list: Return ``repos_searched`` (the names) even when more than 10
             repos were searched. ``repos_searched_total`` is always the count.
+        match: ``"fuzzy"`` (default) or ``"exact"``. ``"exact"`` returns only ``exact``,
+            ``exact_ci`` and ``qualified`` rows; the rest are counted in ``fuzzy_dropped``.
+            With ``"fuzzy"`` and no exact hit, ``fuzzy`` rows that share fewer than half of the
+            query's words are dropped and at most 10 are kept (``include_fuzzy=True`` keeps
+            all). ``exact`` in the reply is ``"found"`` or ``"none"``.
 
     Returns:
         Combined search results from the searched repos, plus ``total``
@@ -447,6 +456,8 @@ def cross_repo_search_func(
 
     _validate_positive_int(limit, "limit")
     _validate_positive_int(max_results, "max_results")
+    if match not in _MATCH_MODES:
+        raise ValueError(f"match must be one of: {', '.join(_MATCH_MODES)}")
 
     try:
         registry = Registry()
@@ -558,8 +569,30 @@ def cross_repo_search_func(
         ranked_results.sort(key=lambda item: item[:3])
         merged = [item[3] for item in ranked_results]
         fuzzy_dropped = 0
-        if not include_fuzzy and any(r.get("match") in _STRONG_TIERS for r in merged):
+        has_exact = any(r.get("match") in _STRONG_TIERS for r in merged)
+        if match == "exact":
+            kept = [r for r in merged if r.get("match") in _STRONG_TIERS]
+            fuzzy_dropped = len(merged) - len(kept)
+            merged = kept
+        elif not include_fuzzy and has_exact:
             kept = [r for r in merged if r.get("match") not in _WEAK_TIERS]
+            fuzzy_dropped = len(merged) - len(kept)
+            merged = kept
+        elif not include_fuzzy:
+            # No exact hit: the weak list is all there is, and an unmatched name returned
+            # hundreds of rows. Keep the ``prefix``/``tokens`` rows and the few ``fuzzy`` rows
+            # that share at least half of the query's words.
+            wanted = _name_tokens(query)
+            need = (len(wanted) + 1) // 2 if len(wanted) > 1 else 0
+            kept = []
+            fuzzy_kept = 0
+            for row in merged:
+                if row.get("match") == "fuzzy":
+                    shared = len(wanted & _name_tokens(str(row.get("name") or "")))
+                    if shared < need or fuzzy_kept >= _FUZZY_CAP_NO_EXACT:
+                        continue
+                    fuzzy_kept += 1
+                kept.append(row)
             fuzzy_dropped = len(merged) - len(kept)
             merged = kept
         skipped_shown, skipped_total, skipped_truncated = _listed(skipped), len(skipped), False
@@ -571,6 +604,7 @@ def cross_repo_search_func(
             scope=make_scope(
                 "cross_repo_search_tool", query=query, kind=kind, limit=limit,
                 repos=sorted(set(repos)) if repos else None, include_fuzzy=include_fuzzy,
+                match=match,
             ),
             stamp=make_scope("cross_repo_search_rows", rows=merged, skipped=skipped),
         )
@@ -585,10 +619,19 @@ def cross_repo_search_func(
             notes += f"; {unknown_total} name(s) matched no repository"
         if ambiguous_total:
             notes += f"; {ambiguous_total} name(s) matched several"
-        if fuzzy_dropped:
+        if not has_exact:
+            notes += "; exact: none"
+        if fuzzy_dropped and match == "exact":
+            notes += f"; {fuzzy_dropped} non-exact row(s) hidden by match=exact"
+        elif fuzzy_dropped and has_exact:
             notes += (
                 f"; {fuzzy_dropped} fuzzy/tokens row(s) hidden because exact matches exist "
                 "(pass include_fuzzy=True to see them)"
+            )
+        elif fuzzy_dropped:
+            notes += (
+                f"; {fuzzy_dropped} fuzzy row(s) dropped (fewer than half of the query's words, "
+                f"or beyond {_FUZZY_CAP_NO_EXACT}; pass include_fuzzy=True to see them)"
             )
         if skipped_total:
             notes += (
@@ -608,6 +651,7 @@ def cross_repo_search_func(
             "results": all_results,
             "total": total,
             "fuzzy_dropped": fuzzy_dropped,
+            "exact": "found" if has_exact else "none",
             "truncated": truncated,
             **_searched_fields(searched_repos, include_repo_list),
             "skipped_repos": skipped_shown,
