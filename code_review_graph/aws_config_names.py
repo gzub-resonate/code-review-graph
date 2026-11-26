@@ -49,7 +49,8 @@ except ImportError:  # pragma: no cover
     _yaml = None  # type: ignore[assignment]
 
 from .aws_sdk_calls import _NAME_RE, _name_from_arn
-from .config_keys import normalize_spring_config_key
+from .config_keys import SECRET_TOKENS as _SECRET_TOKENS  # noqa: F401
+from .config_keys import is_secret_key, normalize_spring_config_key
 
 logger = logging.getLogger(__name__)
 
@@ -71,28 +72,10 @@ _ENV_VAR = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 _ACCOUNT_ID = re.compile(r"\d{12}")
 _ACCESS_KEY = re.compile(r"(?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{12,}")
 _TOKEN_PREFIX = re.compile(r"(?:ghp_|gho_|ghs_|xox[abprs]-|eyJ|sk-|AIza)")
-_SECRET_TOKENS = frozenset({
-    "password", "passwd", "pwd", "pass", "passphrase", "secret", "secrets", "token", "tokens",
-    "key", "keys", "credential", "credentials", "cred", "creds", "private", "auth",
-    "authorization", "authentication", "apikey", "accesskey", "signature", "sig", "cert",
-    "certificate", "keystore", "truststore", "salt",
-})
-_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _PROFILE_FILE = re.compile(
     r"^(?:application|bootstrap)(?:-([A-Za-z0-9_.\-]+))?\.(?:properties|ya?ml)$", re.IGNORECASE,
 )
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
-
-
-def is_secret_key(key: str) -> bool:
-    """Whether a property key names something that looks like a secret (any token matches)."""
-    flat = re.sub(r"\[[0-9]+\]", "", key)
-    for part in re.split(r"[.\-_]+", flat):
-        for token in _CAMEL.split(part):
-            if token.lower() in _SECRET_TOKENS:
-                return True
-    lowered = flat.lower().replace("-", "").replace("_", "").replace(".", "")
-    return any(w in lowered for w in ("password", "secret", "apikey", "accesskey", "credential"))
 
 
 # -- Value policy -----------------------------------------------------------------------------

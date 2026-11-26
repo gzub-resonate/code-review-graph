@@ -183,13 +183,16 @@ def test_parse_targets_drops_credentials_and_queries() -> None:
     for text in (
         f"jdbc:postgresql://app:{secret}@{RDS}:5432/orders?user=u&password={secret}",
         f"jdbc:sqlserver://{RDS}:1433;databaseName=orders;password={secret}",
-        f"jdbc:postgresql://{RDS}/orders?password=p@{secret}",
         f"jdbc:mysql://{RDS}/orders?user=a&password=b/{secret}",
     ):
         found = parse_targets(text, "sql")
         assert [t.host for t in found] == [RDS]
         assert found[0].database == "orders"
         assert secret not in repr(found)
+    # An '@' inside a later query value cannot be told from userinfo, so the host is dropped
+    # (fail closed) and the secret still never appears.
+    dropped = parse_targets(f"jdbc:postgresql://{RDS}/orders?password=p@{secret}", "sql")
+    assert [t.host for t in dropped] == [None] and secret not in repr(dropped)
     redis = parse_targets(f"rediss://:{secret}@{CACHE_RG}:6379/0", "redis")
     assert redis[0].host == CACHE_RG and redis[0].port == 6379 and secret not in repr(redis)
 

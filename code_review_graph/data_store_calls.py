@@ -290,15 +290,14 @@ def _pieces(authority: str, database: Optional[str], engine: Optional[str]) -> l
 def _cut_inside_userinfo(rest: str) -> bool:
     """Whether the ``?``, ``#`` or ``;`` that cuts *rest* sits inside ``user:password@``.
 
-    ``user:12345;x@host`` would otherwise read as the host ``user`` and the port 12345. A ``@``
-    after the cut is a credential unless a ``/`` (the database path) or a ``key=value`` property
-    (``host;password=a@b``) comes first.
+    ``user:12345;x@host`` would otherwise read as the host ``user`` and the port 12345. Any
+    ``@`` after the first cut is treated as userinfo and the host is dropped. There is no
+    exemption for a ``/`` or a ``key=value`` before it: a password may hold both
+    (``user:12/ss;x@host``, ``user:a=b;x@host``), and a wrong guess leaks the user name as a host.
+    A URL with an ``@`` in a later query value loses its host, which is the safe side to err on.
     """
-    before, at, _ = rest.partition("@")
-    if not at or "/" in before:
-        return False
-    cut = re.search(r"[?#;]", before)
-    return cut is not None and "=" not in before[cut.end():]
+    cut = re.search(r"[?#;]", rest)
+    return cut is not None and "@" in rest[cut.end():]
 
 
 def _parse_url(text: str, family: str) -> list[Target]:

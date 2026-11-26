@@ -252,6 +252,8 @@ def test_no_output_field_holds_a_credential(name: str, source: str) -> None:
         "jdbc:mysql://admin:123?x@{h}/db",
         "redis://user:12)3@{h}:6379",           # ')' ends the URL inside the password
         "redis://user:12]3@{h}:6379",
+        "redis://user:12/ss;x@{h}:6379",       # a password may hold '/' ...
+        "redis://user:a=b;x@{h}:6379",         # ... or '='; neither makes the cut safe
     ],
 )
 def test_a_password_that_cuts_the_url_never_becomes_a_host(url: str) -> None:

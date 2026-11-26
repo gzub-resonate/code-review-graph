@@ -80,11 +80,13 @@ def test_getter_is_recorded_on_the_unresolved_edge(tmp_path):
         store.close()
     assert len(edges) == 1
     edge = edges[0]
-    assert edge["unresolved"] and edge["service"] == "s3"
-    assert edge["operation"] == "put_object"
+    assert edge["service"] == "s3" and edge["operation"] == "put_object"
     # The property key is joined from the class prefix and the getter, and the YAML defines it.
     assert edge["placeholder"] == "announce.s3Bucket"
     assert edge["extra"]["config_defined"] is True
+    # The value on the ConfigProperty node names the bucket at query time.
+    assert edge["name"] == "some-bucket" and not edge["unresolved"]
+    assert edge["extra"]["target_source"] == "config"
 
 
 def test_key_not_defined_in_config_files_is_flagged(tmp_path):

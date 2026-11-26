@@ -261,9 +261,11 @@ def test_no_unrelated_or_secret_value_reaches_the_graph(resolved: GraphStore) ->
     dump = json.dumps([list(r) for r in resolved._conn.execute(
         "SELECT * FROM edges").fetchall()]) + json.dumps([list(r) for r in resolved._conn.execute(
             "SELECT * FROM nodes").fetchall()])
-    for secret in ("plain-text-note-that-must-not-be-stored", "should-never-be-stored-bucket",
-                   "123456789012", "sqs.us-east-1.amazonaws.com"):
+    # Non-secret values now live on ConfigProperty nodes (config_values); secrets and AWS
+    # account ids never do.
+    for secret in ("should-never-be-stored-bucket", "123456789012"):
         assert secret not in dump
+    assert "plain-text-note-that-must-not-be-stored" in dump
 
 
 @pytest.mark.parametrize(

@@ -1993,7 +1993,8 @@ async def cross_repo_requests_tool(
             ``aws s3`` commands: ``service`` filters by resource name, ``route`` by
             ``<service>/<name>`` or ``<service>`` (``s3``, ``dynamodb``, ``lambda``, ``states``,
             ``secretsmanager``, ``ssm``, ``kinesis``, ``firehose``, ``events``, ``ecs``,
-            ``glue``, ``batch``, ``rds``, ``elasticloadbalancing``, ``elasticache``, ``es``), ``status`` is ``matched``, ``not_found``, ``ambiguous``,
+            ``glue``, ``batch``, ``rds``, ``elasticloadbalancing``, ``elasticache``, ``es``),
+            ``status`` is ``matched``, ``not_found``, ``ambiguous``,
             ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
             (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
             to see which services read or write a bucket and which repo defines it.
@@ -2007,10 +2008,16 @@ async def cross_repo_requests_tool(
             ``resolved``, ``source_unresolved`` or ``target_unresolved``. Rows give
             ``trigger_kind``, ``source``, ``target``, ``schedule``, ``event_pattern_sources``,
             ``file``, ``line`` and ``via`` (``reference`` marks an inference).
+            A target that is a Spring config key is named from the YAML value (profiles,
+            ``${KEY:default}``, relaxed binding): ``target_source`` is ``config`` (with
+            ``config_profile``, ``via``, ``config_alternatives``) or ``config_key_unresolved``.
             ``amqp`` lists the publishers and listeners of one RabbitMQ exchange across the
-            repos: ``service`` is the exchange (required; ``orders.exchange`` or
+            repos: ``service`` is the exchange (``orders.exchange`` or
             ``external:rabbitmq:orders.exchange``), ``route`` an optional key and ``status``
-            ``publisher`` or ``listener``. With ``route`` set, a listener row is kept when its
+            ``publisher`` or ``listener``. Without ``service`` it lists every exchange instead,
+            one row each with publisher and listener counts and repos, and a ``status`` of
+            ``unlistened``, ``unpublished`` or ``matched`` (``status`` filters on those, and
+            ``route`` is a key substring). With ``route`` set, a listener row is kept when its
             ``binding_key`` matches it and a publisher row when its ``routing_key`` matches it,
             with AMQP topic wildcards (``*`` one word, ``#`` zero or more) applied only in
             binding keys that hold one; ``matched_via`` is ``exact_key``, ``topic_pattern`` or
