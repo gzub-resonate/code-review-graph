@@ -197,7 +197,13 @@ def resolve_commit(repo_root: str, ref: str, what: str) -> str:
     The error names the ref that failed and carries Git's own message.
     """
     _safe_ref(ref, what)
-    scratch = bool(_COMMIT_RE.fullmatch(ref)) or ref.startswith("refs/crg/")
+    full_sha = bool(_COMMIT_RE.fullmatch(ref))
+    session = _SESSION.get()
+    if full_sha and session is not None and (repo_root, ref) in session.verified:
+        # Already resolved by this call (every later step gets the SHA back from here), and
+        # the objects of a session do not change: skip the repeated ``git rev-parse``.
+        return ref
+    scratch = full_sha or ref.startswith("refs/crg/")
     try:
         sha = _git(
             repo_root, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}",
@@ -207,6 +213,8 @@ def resolve_commit(repo_root: str, ref: str, what: str) -> str:
         raise PullRequestError(f"{what} {ref!r} could not be resolved: {exc}") from exc
     if not _COMMIT_RE.fullmatch(sha):
         raise PullRequestError(f"{what} does not name a commit: {ref!r}")
+    if session is not None:
+        session.verified.add((repo_root, sha))
     return sha
 
 
@@ -235,6 +243,8 @@ class ScratchSession:
 
     def __init__(self) -> None:
         self.path: Optional[str] = None
+        #: ``(repo_root, sha)`` pairs :func:`resolve_commit` already confirmed in this session.
+        self.verified: set[tuple[str, str]] = set()
 
     def ensure(self, repo_root: str) -> str:
         if self.path:
@@ -438,19 +448,100 @@ def diff_ranges(repo_root: str, base_ref: str, head: str, merge_based: bool) -> 
     return _parse_unified_diff(out)
 
 
-def git_file_reader(repo_root: str, head: str) -> Callable[[str], Optional[bytes]]:
-    """A reader of a file's bytes at *head*; ``None`` when it cannot be read or is too big."""
-    head = resolve_commit(repo_root, head, "head")
+class BlobReader:
+    """A reader of files' bytes at one commit: ``reader(path)`` is the bytes or ``None``.
 
-    def read(path: str) -> Optional[bytes]:
+    ``None`` means the file cannot be read or is larger than :data:`MAX_FILE_BYTES`. A path
+    given to :meth:`prime` is read, with the others, by one ``git cat-file --batch`` instead of
+    one ``git show`` process each; any other path (or one a batch could not answer) is read the
+    old way, so the bytes returned are the same either way.
+    """
+
+    def __init__(self, repo_root: str, head: str) -> None:
+        self.repo_root = repo_root
+        self.head = head
+        self._primed: dict[str, Optional[bytes]] = {}
+
+    def prime(self, paths: list[str], max_bytes: Optional[int] = None) -> None:
+        """Read *paths* in as few Git calls as possible, up to *max_bytes* of content."""
+        if max_bytes is None:
+            max_bytes = MAX_TOTAL_BYTES
+        wanted = list(dict.fromkeys(
+            p for p in paths if "\n" not in p and p not in self._primed
+        ))
+        if not wanted:
+            return
+        try:
+            checked = _git(
+                self.repo_root, "cat-file", "--batch-check", binary=True,
+                stdin="".join(f"{self.head}:{p}\n" for p in wanted).encode(),
+            ).split(b"\n")
+        except PullRequestError:
+            return
+        if len(checked) < len(wanted):
+            return
+        batch: list[str] = []
+        batch_bytes = 0
+        spent = 0
+        for path, line in zip(wanted, checked):
+            fields = line.split()
+            if len(fields) != 3 or fields[1] != b"blob" or not fields[2].isdigit():
+                if len(fields) == 2 and fields[1] == b"missing":
+                    self._primed[path] = None  # ``git show`` fails on it too
+                continue
+            size = int(fields[2])
+            if size > MAX_FILE_BYTES + 1:
+                self._primed[path] = None  # ``git show`` refuses it by size
+                continue
+            if spent + size > max_bytes:
+                break
+            if batch_bytes + size > MAX_GIT_OUTPUT // 2 and batch:
+                self._read_batch(batch)
+                batch, batch_bytes = [], 0
+            batch.append(path)
+            batch_bytes += size
+            spent += size
+        if batch:
+            self._read_batch(batch)
+
+    def _read_batch(self, batch: list[str]) -> None:
+        try:
+            out = _git(
+                self.repo_root, "cat-file", "--batch", binary=True,
+                stdin="".join(f"{self.head}:{p}\n" for p in batch).encode(),
+            )
+        except PullRequestError:
+            return
+        pos = 0
+        for path in batch:
+            end = out.find(b"\n", pos)
+            if end < 0:
+                return
+            fields = out[pos:end].split()
+            if len(fields) != 3 or fields[1] != b"blob" or not fields[2].isdigit():
+                return
+            size = int(fields[2])
+            start = end + 1
+            if start + size > len(out):
+                return
+            self._primed[path] = out[start:start + size]
+            pos = start + size + 1
+
+    def __call__(self, path: str) -> Optional[bytes]:
+        if path in self._primed:
+            return self._primed.pop(path)
         try:
             return _git(
-                repo_root, "show", f"{head}:{path}", binary=True, limit=MAX_FILE_BYTES + 1,
+                self.repo_root, "show", f"{self.head}:{path}", binary=True,
+                limit=MAX_FILE_BYTES + 1,
             )
         except PullRequestError:
             return None
 
-    return read
+
+def git_file_reader(repo_root: str, head: str) -> BlobReader:
+    """A reader of a file's bytes at *head*; ``None`` when it cannot be read or is too big."""
+    return BlobReader(repo_root, resolve_commit(repo_root, head, "head"))
 
 
 def merge_base(repo_root: str, base_ref: str, head: str) -> Optional[str]:
@@ -519,6 +610,11 @@ def is_config_file(path: str) -> bool:
     """A YAML, JSON or ``.properties`` file whose paths a pull request review lists."""
     name = path.rsplit("/", 1)[-1].lower()
     return name.endswith(_CONFIG_SUFFIXES) and name not in _CONFIG_SKIP_NAMES
+
+
+def is_migration(path: str) -> bool:
+    """A Flyway-style SQL migration, whose statements a pull request review lists."""
+    return bool(_MIGRATION_RE.search(path))
 
 
 def _digest(text: str) -> str:
@@ -667,9 +763,102 @@ class FileReport:
             self.changed_qns = []
 
 
+_IN_CHUNK = 400  # well under SQLite's default limit of 999 variables
+
+
+class _GraphReads:
+    """The base graph's rows one request reads, fetched in batches and kept for the request.
+
+    The walks of one request overlap a great deal: the walk of each file starts inside the
+    neighbourhood the whole-request walk already visited. Looking each node up on its own
+    costs one query per node, per walk. This reads a frontier in one ``IN`` query, answers
+    repeats from memory, and returns the rows in the order the one-by-one queries did
+    (``ORDER BY id`` per node). The graph is not written during a request.
+    """
+
+    def __init__(self, store: GraphStore) -> None:
+        self._conn = store._conn
+        self._store = store
+        self._incoming: dict[str, list[tuple[str, str]]] = {}
+        self._nodes: dict[str, Optional[tuple[str, bool, str, str]]] = {}
+        self._out: dict[str, list[tuple[str, str]]] = {}
+
+    def _chunks(self, names: list[str]) -> Iterator[list[str]]:
+        for i in range(0, len(names), _IN_CHUNK):
+            yield names[i:i + _IN_CHUNK]
+
+    def prefetch_incoming(self, names: list[str]) -> None:
+        todo = [n for n in dict.fromkeys(names) if n not in self._incoming]
+        for chunk in self._chunks(todo):
+            for n in chunk:
+                self._incoming[n] = []
+            marks = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(  # nosec B608 - placeholders only
+                "SELECT target_qualified, kind, source_qualified FROM edges "
+                f"WHERE target_qualified IN ({marks}) ORDER BY id", chunk,
+            )
+            for target, kind, source in rows:
+                self._incoming[target].append((kind, source))
+
+    def incoming(self, name: str) -> list[tuple[str, str]]:
+        """``(kind, source)`` of every edge that ends at *name*."""
+        if name not in self._incoming:
+            self.prefetch_incoming([name])
+        return self._incoming[name]
+
+    def prefetch_nodes(self, names: list[str]) -> None:
+        todo = [n for n in dict.fromkeys(names) if n not in self._nodes]
+        for chunk in self._chunks(todo):
+            found: set[str] = set()
+            marks = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(  # nosec B608 - placeholders only
+                "SELECT qualified_name, file_path, is_test, kind, name FROM nodes "
+                f"WHERE qualified_name IN ({marks})", chunk,
+            )
+            for qn, file_path, is_test, kind, name in rows:
+                found.add(qn)
+                self._nodes[qn] = (file_path, bool(is_test), kind, name)
+            for qn in chunk:
+                if qn not in found:
+                    # The same lookup (with its path-spelling bridge) as before.
+                    node = self._store.get_node(qn)
+                    self._nodes[qn] = (
+                        (node.file_path, bool(node.is_test), node.kind, node.name)
+                        if node is not None else None
+                    )
+
+    def node(self, name: str) -> Optional[tuple[str, bool, str, str]]:
+        """``(file_path, is_test, kind, name)`` of the node *name*, or ``None``."""
+        if name not in self._nodes:
+            self.prefetch_nodes([name])
+        return self._nodes[name]
+
+    def prefetch_out(self, names: list[str]) -> None:
+        """Outgoing ``HANDLES`` and ``TESTED_BY`` edges (all the walks below read)."""
+        todo = [n for n in dict.fromkeys(names) if n not in self._out]
+        for chunk in self._chunks(todo):
+            for n in chunk:
+                self._out[n] = []
+            marks = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(  # nosec B608 - placeholders only
+                "SELECT source_qualified, kind, target_qualified FROM edges "
+                f"WHERE source_qualified IN ({marks}) AND kind IN ('HANDLES', 'TESTED_BY') "
+                "ORDER BY id", chunk,
+            )
+            for source, kind, target in rows:
+                self._out[source].append((kind, target))
+
+    def outgoing(self, name: str) -> list[tuple[str, str]]:
+        """``(kind, target)`` of the ``HANDLES`` and ``TESTED_BY`` edges that start at *name*."""
+        if name not in self._out:
+            self.prefetch_out([name])
+        return self._out[name]
+
+
 def reach_from(
     store: GraphStore, seeds: list[str], depth: int = DEFAULT_DEPTH,
     max_nodes: int = MAX_REACHED_NODES, budget: Optional[list[int]] = None,
+    reads: Optional[_GraphReads] = None,
 ) -> dict[str, int]:
     """Qualified names that depend on *seeds*, with the hop count of each (seeds are 0).
 
@@ -678,22 +867,25 @@ def reach_from(
 
     *budget* is a one-item list shared by every walk of a request: each node visited takes
     one from it, and the walk stops when it is spent, so many small walks cannot add up to
-    more work than one large one.
+    more work than one large one. *reads* shares the fetched rows between walks.
     """
+    if reads is None:
+        reads = _GraphReads(store)
     hops = {qn: 0 for qn in seeds}
     frontier = list(seeds)
     for hop in range(1, max(0, depth) + 1):
         following: list[str] = []
+        reads.prefetch_incoming(frontier)
         for qn in frontier:
-            for edge in store.get_edges_by_target(qn):
-                direction = IMPACT_EDGE_DIRECTIONS.get(edge.kind, IMPACT_DEFAULT_EDGE_DIRECTION)
+            for kind, source in reads.incoming(qn):
+                direction = IMPACT_EDGE_DIRECTIONS.get(kind, IMPACT_DEFAULT_EDGE_DIRECTION)
                 if direction != IMPACT_DIRECTION_INCOMING:
                     continue
                 if budget is not None and budget[0] <= 0:
                     return hops
-                if edge.source_qualified not in hops and len(hops) < max_nodes:
-                    hops[edge.source_qualified] = hop
-                    following.append(edge.source_qualified)
+                if source not in hops and len(hops) < max_nodes:
+                    hops[source] = hop
+                    following.append(source)
                     if budget is not None:
                         budget[0] -= 1
         frontier = following
@@ -880,48 +1072,57 @@ def analyse(
         reports.append(report)
 
     budget = [MAX_REACH_VISITS]
+    reads = _GraphReads(store)
     reached = (
-        reach_from(store, list(dict.fromkeys(all_seeds)), depth, budget=budget)
+        reach_from(store, list(dict.fromkeys(all_seeds)), depth, budget=budget, reads=reads)
         if all_seeds else {}
     )
 
     reached_endpoints: dict[str, GraphNode] = {}
+    reads.prefetch_out(list(reached))
     for qn in reached:
-        for edge in store.get_edges_by_source(qn):
-            if edge.kind == "HANDLES" and edge.target_qualified not in reached_endpoints:
-                target = store.get_node(edge.target_qualified)
-                if target is not None and target.kind == "Endpoint":
-                    reached_endpoints[edge.target_qualified] = target
+        for kind, target in reads.outgoing(qn):
+            if kind == "HANDLES" and target not in reached_endpoints:
+                found = store.get_node(target)
+                if found is not None and found.kind == "Endpoint":
+                    reached_endpoints[target] = found
 
     changed_paths = {c.path for c in changes}
     changed_abs = {str(root / p) for p in changed_paths} | changed_paths
     for report in reports:
-        own = reach_from(store, report.seeds, depth, budget=budget) if report.seeds else {}
+        own = (
+            reach_from(store, report.seeds, depth, budget=budget, reads=reads)
+            if report.seeds else {}
+        )
         seeds = set(report.seeds)
         files: set[str] = set()
         production = tests = 0
+        reads.prefetch_nodes(list(own))
         for qn in own:
-            reached_node = store.get_node(qn)
+            reached_node = reads.node(qn)
             if reached_node is None:
                 continue
-            if reached_node.file_path not in changed_abs:
-                files.add(reached_node.file_path)
+            file_path, is_test, node_kind, _name = reached_node
+            if file_path not in changed_abs:
+                files.add(file_path)
             if qn in seeds:
                 continue
-            if reached_node.is_test or reached_node.kind == "Test":
+            if is_test or node_kind == "Test":
                 tests += 1
             else:
                 production += 1
         report.reached, report.reached_tests = production, tests
         report.same_repo_files = len(files)
+        reads.prefetch_nodes(report.seeds)
+        reads.prefetch_out(report.seeds)
         for qn in report.seeds:
-            seed_node = store.get_node(qn)
-            if seed_node is None or seed_node.kind not in _CHANGEABLE_KINDS:
+            seed_node = reads.node(qn)
+            if seed_node is None or seed_node[2] not in _CHANGEABLE_KINDS:
                 continue
-            if seed_node.kind == "Test":
+            if seed_node[2] == "Test":
                 continue
-            if not any(e.kind == "TESTED_BY" for e in store.get_edges_by_source(qn)):
-                report.untested.append(seed_node.name)
+            if not any(kind == "TESTED_BY" for kind, _t in reads.outgoing(qn)):
+                report.untested.append(seed_node[3])
 
     _clients_h, servers_head = extract_endpoints(head_endpoint_nodes, root)
     _clients_t, servers_touched = extract_endpoints(touched_endpoint_nodes, root)

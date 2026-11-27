@@ -27,6 +27,7 @@ from weakref import WeakKeyDictionary
 
 from . import feign_links as fl
 from . import js_route_leads as jl
+from . import query_cache as qc
 
 __all__ = ["ExcludingIndex", "link_js_call", "refine_no_route_match", "variable_pool"]
 
@@ -158,14 +159,14 @@ def _tails(index: fl.ServerIndex) -> dict[tuple[str, str], list[_Entry]]:
 
 def variable_hits(call: fl.ClientCall, index: fl.ServerIndex) -> Optional[fl.LinkResult]:
     """``feign_links._variable_hits`` reading :func:`variable_pool` instead of every route."""
-    wanted = fl._segments(fl.normalize_route(call.route))
+    wanted = qc.segments(qc.normalize_route(call.route))
     fixed = sum(1 for segment in wanted if segment != "{}")
     if fixed < fl._MIN_FIXED_SEGMENTS or fixed == len(wanted):
         return None
     found: dict[object, fl.ServerEndpoint] = {}
     shapes: set[tuple[str, ...]] = set()
     for segments, server in variable_pool(index, wanted):
-        if not fl._method_matches(call.http_method, server.http_method):
+        if not qc.method_matches(call.http_method, server.http_method):
             continue
         if all(want == "{}" or want == have for want, have in zip(wanted, segments)):
             found.setdefault(fl._location_key(server, "/" + "/".join(segments)), server)
@@ -196,7 +197,7 @@ def link_js_call(
 
 
 def _other_prefix(call: fl.ClientCall, index: fl.ServerIndex) -> Optional[fl.LinkResult]:
-    wanted = fl._segments(fl.normalize_route(call.route))
+    wanted = qc.segments(qc.normalize_route(call.route))
     if len(wanted) < 2 or all(segment == "{}" for segment in wanted[-2:]):
         return None
     excluded = index.excluded if isinstance(index, ExcludingIndex) else None
@@ -205,7 +206,7 @@ def _other_prefix(call: fl.ClientCall, index: fl.ServerIndex) -> Optional[fl.Lin
     for segments, server in _tails(index).get((wanted[-2], wanted[-1]), ()):
         if not _keep(server, excluded):
             continue
-        if segments == wanted or not fl._method_matches(call.http_method, server.http_method):
+        if segments == wanted or not qc.method_matches(call.http_method, server.http_method):
             continue
         found.setdefault(fl._location_key(server, "/" + "/".join(segments)), server)
         shapes.add(segments)

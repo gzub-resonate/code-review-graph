@@ -46,7 +46,8 @@ from .aws_config_names import _Values
 from .aws_terraform_wiring import _literal, top_attrs
 from .errors import GraphStoreError
 from .graph import GraphStore
-from .repo_cache import MEMO, parallel_map
+from .repo_cache import MEMO, SKIPPED, parallel_map, parallel_map_budget
+from .xrepo_budget import BudgetSpent
 
 try:  # PyYAML is a hard dependency of the package; guard anyway
     import yaml as _yaml
@@ -389,11 +390,30 @@ class FactsCache:
             "facts", entry, lambda: read_repo_facts(entry), cacheable=lambda f: f.readable,
         )
 
-    def prefetch(self, indexes: Sequence[int], workers: int) -> None:
-        """Read the facts of *indexes* on up to *workers* threads, ahead of ``get``."""
+    def prefetch(
+        self, indexes: Sequence[int], workers: int,
+        out_of_budget: Callable[[], bool] | None = None,
+    ) -> None:
+        """Read the facts of *indexes* on up to *workers* threads, ahead of ``get``.
+
+        With *out_of_budget* the reads stop at a spent budget: the facts already read are kept
+        (here and in ``repo_cache``) and ``BudgetSpent`` is raised for the rest.
+        """
         todo = [i for i in indexes if i not in self._facts]
-        for index, facts in zip(todo, parallel_map(self._load, todo, workers)):
-            self._facts[index] = facts
+        if out_of_budget is None:
+            for index, facts in zip(todo, parallel_map(self._load, todo, workers)):
+                self._facts[index] = facts
+            return
+        left = False
+        for index, facts in zip(
+            todo, parallel_map_budget(self._load, todo, workers, out_of_budget),
+        ):
+            if facts is SKIPPED:
+                left = True
+            else:
+                self._facts[index] = facts
+        if left:
+            raise BudgetSpent
 
 
 # -- The identity index --------------------------------------------------------------------------
