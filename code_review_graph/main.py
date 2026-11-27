@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -259,6 +260,31 @@ def _log_tool_error(tool_name: str, root: str | None, result: Any) -> None:
         )
 
 
+def _log_tool_timing(
+    tool_name: str, root: str | None, started: float, stages: dict[str, float], status: str,
+) -> None:
+    """One ``tool timing`` line per call: queue wait, body, provenance stamp and the total.
+
+    *started* is when the call reached the server; *stages* holds ``perf_counter`` marks the
+    worker thread took (``begin``, ``work_done``, ``end``). ``queue_ms`` is the wait for a
+    worker slot, so a slow call that was mostly queued shows up as that, not as slow work.
+    A call over ``CRG_SLOW_TOOL_SECONDS`` (default 120) is logged at WARNING as ``slow tool``.
+    """
+    now = time.perf_counter()
+    begin = stages.get("begin", now)
+    work_done = stages.get("work_done", stages.get("end", now))
+    end = stages.get("end", now)
+    total = now - started
+    slow = total >= env_int("CRG_SLOW_TOOL_SECONDS", 120)
+    logger.log(
+        logging.WARNING if slow else logging.INFO,
+        "%s tool=%s repo_root=%r status=%s total_ms=%d queue_ms=%d work_ms=%d provenance_ms=%d",
+        "slow tool" if slow else "tool timing", tool_name, root, status,
+        total * 1000, (begin - started) * 1000, (work_done - begin) * 1000,
+        (end - work_done) * 1000,
+    )
+
+
 async def _offload(
     tool_name: str,
     work: Callable[[], dict],
@@ -318,10 +344,15 @@ async def _offload(
             their builds would make the documented remedy a new bug.
         timeout_hint: Advice appended to the timeout message.
     """
+    started = time.perf_counter()
+    stages: dict[str, float] = {}
+    outcome = ["ok"]
+
     def run_fn() -> Any:
         try:
             return _run_logged()
         except Exception as exc:
+            outcome[0] = "raised"
             logger.error(
                 "tool raised tool=%s repo_root=%r error=%r", tool_name, root, str(exc)[:500],
             )
@@ -333,22 +364,27 @@ async def _offload(
         # otherwise block the event loop before the timeout even starts.
         # Module __getattr__ never serves a bare global lookup, so every lazy
         # name the tool body reads must be in globals() before it runs.
+        stages["begin"] = time.perf_counter()
         for name in getattr(getattr(work, "__code__", None), "co_names", ()):
             if name in _LAZY_TOOL_NAMES and name not in globals():
                 _resolve_attr(name)
         result = work()
+        stages["work_done"] = time.perf_counter()
         _log_tool_error(tool_name, root, result)
+        if isinstance(result, dict) and result.get("status") == "error":
+            outcome[0] = "error"
         if provenance:
-            return _resolve_attr("with_provenance")(result, root)
+            result = _resolve_attr("with_provenance")(result, root)
+        stages["end"] = time.perf_counter()
         return result
 
     tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
-    if not bounded or tool_timeout <= 0:
-        return await _run_off_loop(run_fn)
-
     try:
+        if not bounded or tool_timeout <= 0:
+            return await _run_off_loop(run_fn)
         return await asyncio.wait_for(_run_off_loop(run_fn), timeout=tool_timeout)
     except asyncio.TimeoutError:
+        outcome[0] = "timeout"
         message = f"{tool_name} timed out after {tool_timeout}s. {timeout_hint}"
         logger.warning(
             "tool timed out tool=%s repo_root=%r after=%ss", tool_name, root, tool_timeout,
@@ -363,6 +399,8 @@ async def _offload(
         return await _run_off_loop(
             lambda: _resolve_attr("with_provenance")(error_response, root)
         )
+    finally:
+        _log_tool_timing(tool_name, root, started, stages, outcome[0])
 
 
 # What an agent reads before it loads any of these tools: with deferred tool
