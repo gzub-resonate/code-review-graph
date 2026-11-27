@@ -1195,3 +1195,35 @@ class TestFindDeadCodeJavaAnnotations:
             {"toString", "hashCode", "qualified", "withArgs", "testNg", "rows"}
         )
         assert {"lookalike", "unusedHelper"} <= dead
+
+
+def test_dead_code_same_name_in_many_files_keeps_per_file_answers(tmp_path):
+    """Names defined in several files ask the same file pair many times; each answer is kept.
+
+    ``handle`` is defined in three files. The expected set is what the code reported before
+    the file-pair answers were memoised, so this pins the answer, not the heuristic.
+    """
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.parser import CodeParser
+    from code_review_graph.refactor import find_dead_code
+
+    files = {
+        "a.py": "def handle():\n    return 1\n\n\ndef other_a():\n    return handle()\n",
+        "b.py": "def handle():\n    return 2\n",
+        "c.py": "def handle():\n    return 3\n",
+        "caller.py": "from a import handle\n\n\ndef run():\n    return handle()\n",
+    }
+    store = GraphStore(str(tmp_path / "g.db"))
+    parser = CodeParser()
+    for name, text in files.items():
+        path = tmp_path / name
+        path.write_text(text)
+        nodes, edges = parser.parse_bytes(path, text.encode())
+        store.store_file_nodes_edges(str(path), nodes, edges)
+    store.commit()
+    try:
+        found = find_dead_code(store, root=tmp_path)
+        dead = {(Path(d["file_path"]).name, d["name"]) for d in found}
+        assert dead == {("a.py", "other_a"), ("caller.py", "run")}
+    finally:
+        store.close()

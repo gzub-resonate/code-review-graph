@@ -122,9 +122,10 @@ def get_minimal_context(
         if files:
             try:
                 from ..changes import analyze_changes
+                from ..flow_twins import with_shared_twin_reads
 
                 abs_files = [normalize_file_path(root / f) for f in files]
-                analysis = analyze_changes(
+                analysis = with_shared_twin_reads(store, analyze_changes)(
                     store, abs_files, repo_root=str(root), base=base,
                     # Same reason as detect_changes: without this the
                     # change-frequency term is pinned at zero for every
