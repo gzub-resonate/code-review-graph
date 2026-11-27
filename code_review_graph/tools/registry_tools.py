@@ -1013,7 +1013,7 @@ def _awssdk_links(
         nfr.annotate_awssdk(rows, definitions._by_repo, all_repos, edges_by_repo, context)
 
     result = _infra_links(
-        "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges,
+        "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges_and_references,
         definitions.defines, al.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         read_context=al.read_declare_edges,
@@ -1541,6 +1541,20 @@ def _slow_call_seconds() -> float:
     return value if value >= 0 else DEFAULT_SLOW_CALL_SECONDS
 
 
+def _same_machine_name(edge: dict[str, Any], wanted: str) -> bool:
+    """Exact name, or for a state machine the same name spelled with ``-`` or ``_``.
+
+    A machine is deployed as ``disrupt-next-best-customer`` from a file
+    ``disrupt_next_best_customer.asl.json``; the join already ignores the spelling, so a filter
+    written either way finds the rows of both.
+    """
+    if edge["name"] == wanted:
+        return True
+    return edge["service"] == "states" and bool(wanted) and (
+        re.sub(r"[-_]", "", edge["name"]).lower() == re.sub(r"[-_]", "", wanted).lower()
+    )
+
+
 def _edge_target_filter(
     target_name: str | None, target: str | None,
 ) -> Callable[[dict[str, Any]], bool]:
@@ -1553,11 +1567,15 @@ def _edge_target_filter(
     wanted = target.strip("/") if target else ""
 
     def keep(edge: dict[str, Any]) -> bool:
-        if target_name and edge["name"] != target_name:
+        if target_name and not _same_machine_name(edge, target_name):
             return False
         if wanted:
             full = f"{edge['service']}/{edge['name']}"
-            return full == wanted or full.startswith(wanted + "/")
+            if full == wanted or full.startswith(wanted + "/"):
+                return True
+            return _same_machine_name(edge, wanted.partition("/")[2]) and (
+                edge["service"] == wanted.partition("/")[0] == "states"
+            )
         return True
 
     return keep
@@ -1732,13 +1750,25 @@ def _infra_links(
                 opened.close()
     timings["resolve"] = _now() - phase
     if target_repo:
-        rows = [r for r in rows if r[repo_key] == target_repo]
+        rows = [
+            r for r in rows
+            if r[repo_key] == target_repo or (
+                origin == "awssdk" and r.get("target_kind") == "states"
+                and _same_machine_name({"service": "states", "name": r[repo_key]}, target_repo)
+            )
+        ]
     if target_path:
         wanted = target_path.strip("/")
         rows = [
             r for r in rows
             if (r[path_key] or "") == wanted
             or (r[path_key] or "").startswith(wanted + "/")
+            or (
+                origin == "awssdk" and wanted.startswith("states/")
+                and _same_machine_name(
+                    {"service": "states", "name": r["target_name"]}, wanted[len("states/"):],
+                )
+            )
         ]
     if origin == "awssdk":
         for r in rows:
