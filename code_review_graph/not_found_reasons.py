@@ -324,7 +324,8 @@ def cross_repo_row_reason(
 
     A JavaScript ``unmatchable`` row is tallied under the reason it already has; a JavaScript
     ``no_route_match`` gets one of :data:`JS_NO_ROUTE_REASONS`; a Feign
-    ``no_route_match`` gets ``served_by_caller_repo`` when the caller repo itself serves the route, else no reason. Never changes the status.
+    ``no_route_match`` gets ``served_by_caller_repo`` when the caller repo
+    itself serves the route, else no reason. Never changes the status.
     """
     from .feign_links import NO_ROUTE_MATCH, UNMATCHABLE
 
