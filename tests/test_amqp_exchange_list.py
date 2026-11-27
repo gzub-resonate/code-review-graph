@@ -210,3 +210,126 @@ def test_a_spent_budget_marks_the_service_status_unconfirmed(world, monkeypatch)
     assert reply["exchange_status"] == "unlistened"
     assert reply["exchange_status_confirmed"] is False
     assert "searched 1 of 3 repos, 2 skipped by the time budget" in reply["summary"]
+
+
+@pytest.fixture
+def bound_queue_world(tmp_path, registry):  # noqa: F811
+    """Imitates services-api-attribute: queues bound by ``@QueueBinding`` to the exchange
+    ``api.e.topic.vertical`` (``VerticalAmqpService``, ``PermutationWorkAmqpService``)."""
+    repo = _build_repo(tmp_path / "attr", exchange_edges=False)
+    _add_edges(repo, [
+        ("HANDLES", "svc.refresh", {"queue": "svc.refresh"}),
+        ("HANDLES", "svc.permutation", {"queue": "svc.permutation"}),
+        ("HANDLES", "svc.lonely", {"queue": "svc.lonely"}),
+        ("HANDLES", "svc.wild", {"queue": "svc.wild"}),
+        ("HANDLES", "svc.future", {"queue": "svc.future"}),
+        ("PUBLISHES", "api.e.topic.vertical", {"routing_key": "verticals.isdirty"}),
+        ("PUBLISHES", "api.e.topic.vertical", {"routing_key": "verticals.permutation.work"}),
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.isdirty", "queue": "svc.refresh",
+          "exchange": "api.e.topic.vertical"}),
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.permutation.work", "queue": "svc.permutation",
+          "exchange": "api.e.topic.vertical"}),
+        # Bound to a key nobody publishes: stays unpublished.
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.never", "queue": "svc.lonely",
+          "exchange": "api.e.topic.vertical"}),
+        # A wildcard binding reached by a published key.
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.#", "queue": "svc.wild", "exchange": "api.e.topic.vertical"}),
+        # Exchange with no publisher at all.
+        ("HANDLES", "api.e.topic.quiet",
+         {"binding_key": "q.x", "queue": "svc.future", "exchange": "api.e.topic.quiet"}),
+    ])
+    registry.register(str(repo), alias="attr")
+    return repo
+
+
+def test_a_queue_gets_the_publishers_of_the_exchange_it_is_bound_to(bound_queue_world):
+    reply = cross_repo_requests_func(origin="amqp")
+    queues = {q["queue"]: q for q in reply["queues"]}
+    refresh = queues["svc.refresh"]
+    assert refresh["status"] == "matched"
+    assert refresh["publisher_count"] == 1
+    assert refresh["publisher_repos"] == ["attr"]
+    assert refresh["bound_publisher_count"] == 1
+    assert refresh["bound_to"] == [{
+        "exchange": "api.e.topic.vertical", "binding_key": "verticals.isdirty",
+        "publisher_count": 1, "matched_via": "exact_key",
+    }]
+    assert queues["svc.permutation"]["status"] == "matched"
+
+
+def test_a_wildcard_binding_counts_every_publisher_it_reaches(bound_queue_world):
+    wild = {q["queue"]: q for q in cross_repo_requests_func(origin="amqp")["queues"]}["svc.wild"]
+    assert wild["status"] == "matched"
+    assert wild["publisher_count"] == 2
+    assert wild["bound_to"][0]["matched_via"] == "topic_pattern"
+
+
+def test_a_queue_bound_to_a_key_nobody_publishes_stays_unpublished(bound_queue_world):
+    lonely = {q["queue"]: q for q in cross_repo_requests_func(origin="amqp")["queues"]}[
+        "svc.lonely"]
+    assert lonely["status"] == "unpublished"
+    assert lonely["publisher_count"] == 0
+    assert "bound_publisher_count" not in lonely
+    assert lonely["bound_to"][0]["publisher_count"] == 0
+
+
+def test_a_queue_bound_to_an_unpublished_exchange_stays_unpublished(bound_queue_world):
+    future = {q["queue"]: q for q in cross_repo_requests_func(origin="amqp")["queues"]}[
+        "svc.future"]
+    assert future["status"] == "unpublished"
+    assert future["bound_to"][0]["exchange"] == "api.e.topic.quiet"
+
+
+@pytest.fixture
+def declared_binding_world(tmp_path, registry):  # noqa: F811
+    """Imitates services-api (``SalesforceAmqpConfig``: queues bound with the ``QueueBinding``
+    data class to ``api.e.topic.salesforce``) and services-api-salesforce (the publisher)."""
+    api = _build_repo(tmp_path / "api", exchange_edges=False)
+    sf = _build_repo(tmp_path / "sf", exchange_edges=False)
+    _add_edges(api, [
+        ("HANDLES", "q.sf.create", {"queue": "q.sf.create"}),
+        ("HANDLES", "q.sf.delete", {"queue": "q.sf.delete"}),
+        ("BINDS", "api.e.topic.salesforce",
+         {"binding_key": "account.created", "queue": "q.sf.create", "declaration": True,
+          "exchange": "api.e.topic.salesforce"}),
+        ("BINDS", "api.e.topic.salesforce",
+         {"binding_key": "account.deleted", "queue": "q.sf.delete", "declaration": True,
+          "exchange": "api.e.topic.salesforce"}),
+        # Declared, never published and never listened: not an exchange to list.
+        ("BINDS", "api.e.topic.orphan",
+         {"binding_key": "o.x", "queue": "q.sf.create", "declaration": True}),
+    ])
+    _add_edges(sf, [
+        ("PRODUCES", "api.e.topic.salesforce", {"routing_key": "account.created"}),
+    ])
+    registry.register(str(api), alias="api")
+    registry.register(str(sf), alias="sf")
+    return tmp_path
+
+
+def test_a_declared_binding_links_the_queue_to_a_publisher_in_another_repo(
+    declared_binding_world,
+):
+    reply = cross_repo_requests_func(origin="amqp", repos=["api"])
+    queues = {q["queue"]: q for q in reply["queues"]}
+    create = queues["q.sf.create"]
+    assert create["status"] == "matched"
+    assert create["publisher_repos"] == ["sf"]
+    assert queues["q.sf.delete"]["status"] == "unpublished"
+
+
+def test_a_declared_binding_is_not_a_listener_of_the_exchange(declared_binding_world):
+    reply = cross_repo_requests_func(origin="amqp")
+    rows = {r["exchange"]: r for r in reply["results"]}
+    assert list(rows) == ["api.e.topic.salesforce"]
+    assert rows["api.e.topic.salesforce"]["status"] == "unlistened"
+    assert rows["api.e.topic.salesforce"]["listener_count"] == 0
+
+
+def test_the_single_exchange_mode_does_not_list_declared_bindings(declared_binding_world):
+    reply = cross_repo_requests_func(origin="amqp", service="api.e.topic.salesforce")
+    assert {r["role"] for r in reply["results"]} == {"publisher"}

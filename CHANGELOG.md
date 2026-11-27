@@ -13,6 +13,24 @@
 - `cross_repo_requests_tool origin=awssdk` lists the state machines a module constant names (`_PROD_NBC_STATE_MACHINE_ARN = 'arn:aws:states:...:stateMachine:<name>'`, or a `*_STATE_MACHINE*` name constant) as `operation: arn_reference` rows (`sdk: arn-constant`, `evidence`, `constant`) and joins them to the ASL definition, a Terraform resource or a Terragrunt unit of that name in another repo; a `states` filter written `disrupt_next_best_customer` or `disrupt-next-best-customer` finds both. Resource constants with one leading underscore are now kept at parse time (needs a reindex).
 - `origin=stepfunction` joins a Task target to a Terraform declaration whose name the name evaluator read (a topic named by `module "x" { name = "TechOps" }` or `guardians-pipeline-${var.environment}-fail`), by exact name, so those rows are `matched` instead of `not_found`.
 
+- `origin=amqp` reads queue-to-exchange bindings declared in code, so a queue bound that way
+  joins the publishers of its exchange. New `BINDS` edges (`extra.declaration`, `queue`,
+  `binding_key`, `resolution` `queue_binding_class` or `binding_builder`) come from
+  `new QueueBinding(queue, exchange, key)` (the service-side data class kept in a static list, as
+  in services-api `SalesforceAmqpConfig` and `ProjectAdminAmqpConfig`) and from
+  `BindingBuilder.bind(queue).to(exchange).with(key)`, where the queue, exchange and key are
+  literals, constants (also of another class) or a same-class `@Bean` method returning `new
+  Queue(..)`. A binding is not a listener or a publisher: it adds no listener to the exchange,
+  and a name that only has bindings is not listed. A binding with an unresolved name is not
+  written. Parse time; the index fingerprint moves.
+- `origin=amqp` (exchange list) credits a queue with the publishers of the exchange it is bound
+  to. A queue listed apart used to count only publishers that wrote to it directly, so a queue
+  bound with `@RabbitListener(bindings=@QueueBinding(...))` to an exchange that has publishers
+  showed `unpublished`. Each queue row now has `bound_to` (exchange, binding key, publisher count,
+  `matched_via`) and, when a published routing key reaches the binding key (exact or AMQP topic
+  wildcard), `bound_publisher_count`; its `publisher_count`, `publisher_repos` and `status` include
+  those publishers. A queue with no binding, or bound to a key nobody publishes, stays
+  `unpublished`. Query time; no reindex.
 - Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.
   `requests.get(f"{BASE}/users")` resolves when `BASE` is a module-level string literal in the same
   file, or one imported by name (`from settings import BASE`, `from .conf import BASE`) from a module
