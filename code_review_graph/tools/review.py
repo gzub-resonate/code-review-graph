@@ -458,7 +458,7 @@ def _render_regions(
 # ---------------------------------------------------------------------------
 
 
-@scoped
+@scoped(takes_pr=False)
 def get_review_context(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
@@ -935,7 +935,7 @@ def _generate_review_guidance(
 # ---------------------------------------------------------------------------
 
 
-@scoped
+@scoped(takes_pr=False)
 def get_affected_flows_func(
     changed_files: list[str] | None = None,
     base: str = "HEAD~1",

@@ -1118,7 +1118,7 @@ def _query_route(
     return response
 
 
-@scoped
+@scoped(takes_pr=False)
 def get_impact_radius(
     changed_files: list[str] | None = None,
     max_depth: int = 2,

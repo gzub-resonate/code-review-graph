@@ -2072,6 +2072,10 @@ _SPRING_WIRED_CLASS_ANNOTATION = re.compile(
 _SPRING_BOUND_CLASS_ANNOTATION = re.compile(
     r"^(?:[\w.]+\.)?(?:ConfigurationProperties|Component)(?:\s*\(.*)?$", re.DOTALL,
 )
+# Flyway Java migrations: ``V1_25__Add_index`` (versioned) and ``R__Refresh_views`` (repeatable).
+# The migration runner finds them by class name and reflects on them; no code calls them.
+_FLYWAY_MIGRATION_NAME = re.compile(r"^(?:V\d+(?:[._]\d+)*|R)__\w+$")
+
 _JAVA_SETTER_NAME = re.compile(r"^set[A-Z]")
 
 
@@ -2127,14 +2131,20 @@ class _JavaWiring:
         * the public setter of a ``@ConfigurationProperties`` / ``@Component``
           class, which binding calls by property name;
         * an accessor a record declares for one of its own components, which
-          serialisation, binding and ``record.component()`` reach.
+          serialisation, binding and ``record.component()`` reach;
+        * a Flyway Java migration (``V1_25__Add_index``, ``R__Refresh_views``) and its
+          methods, which the migration runner finds by class name.
         """
         if node.language != "java":
             return False
         if node.kind == "Class":
-            return node.qualified_name in self.wired
+            return node.qualified_name in self.wired or bool(
+                _FLYWAY_MIGRATION_NAME.match(node.name)
+            )
         if node.kind != "Function" or not node.parent_name:
             return False
+        if _FLYWAY_MIGRATION_NAME.match(node.parent_name):
+            return True
         extra = node.extra or {}
         if extra.get("java_constructor"):
             return True

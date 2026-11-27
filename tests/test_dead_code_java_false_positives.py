@@ -436,3 +436,42 @@ public class Use {
         )
     finally:
         store.close()
+
+
+# --- Flyway migrations: the migration runner reflects on them, nothing calls them ----------
+
+FLYWAY_VERSIONED = """package shop.db.migration;
+import org.flywaydb.core.api.migration.BaseJavaMigration;
+import org.flywaydb.core.api.migration.Context;
+public class V1_25__Add_trgm_index_concurrently extends BaseJavaMigration {
+  @Override
+  public void migrate(Context context) throws Exception {
+    context.getConnection().createStatement().execute("select 1");
+  }
+  @Override
+  public boolean canExecuteInTransaction() { return false; }
+}
+"""
+FLYWAY_REPEATABLE = """package shop.db.migration;
+import org.flywaydb.core.api.migration.BaseJavaMigration;
+import org.flywaydb.core.api.migration.Context;
+public class R__Refresh_views extends BaseJavaMigration {
+  public void migrate(Context context) throws Exception {}
+}
+"""
+NOT_A_MIGRATION = """package shop.db.migration;
+public class Version2Helper {
+  public void migrate(String from) {}
+}
+"""
+
+
+def test_flyway_migrations_and_their_methods_are_not_dead(tmp_path):
+    dead = _dead(tmp_path, {
+        SRC + "db/migration/V1_25__Add_trgm_index_concurrently.java": FLYWAY_VERSIONED,
+        SRC + "db/migration/R__Refresh_views.java": FLYWAY_REPEATABLE,
+        SRC + "db/migration/Version2Helper.java": NOT_A_MIGRATION,
+    })
+    assert not {d for d in dead if "V1_25__" in d or "R__Refresh_views" in d}, dead
+    # A class that merely sits in the same folder is still judged like any other.
+    assert "Version2Helper" in dead

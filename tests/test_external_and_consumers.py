@@ -94,6 +94,8 @@ def run():
     ssm.get_parameter(Name="/prod/billing/api-key")
     ssm.get_parameters_by_path(Path="/prod/orders")
     ssm.get_parameters_by_path(Path="/prod/reports")
+    ssm.put_parameter(Name="/prod/worker/written-by-worker", Value="x", Type="String")
+    ssm.delete_parameter(Name="/prod/worker/deleted-by-worker")
     s3.put_object(Bucket="acme-export-files", Key="a")
 """
 
@@ -310,6 +312,10 @@ class TestConsumers:
         assert ("orders-worker", "/dev/orders/feature-flags") not in names
         assert reply["declarations_with_computed_name"] == 1
         assert all(r["role"] == "undeclared_read" for r in reply["results"])
+        # A put or a delete is not a read: the rows and the summary say "reads".
+        assert ("orders-worker", "/prod/worker/written-by-worker") not in names
+        assert ("orders-worker", "/prod/worker/deleted-by-worker") not in names
+        assert all(r["access"] not in ("write", "delete", "admin") for r in reply["results"])
 
     def test_pages(self, world):
         everything = self.reply()

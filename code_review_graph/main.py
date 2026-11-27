@@ -671,12 +671,12 @@ async def get_impact_radius_tool(
     ``unresolved_call_sites`` counts call sites that name a changed symbol but
     were never bound to it, so an empty radius is not mistaken for proof.
 
-    Scope: with no ``pr``, ``head``, ``base`` or ``changed_files`` this reviews the last
+    Scope: with no ``base`` or ``changed_files`` this reviews the last
     commit (HEAD~1..HEAD; the whole commit in a one-commit repository). The reply carries
     a ``scope`` object (``kind``, ``base``, ``head``, ``files_considered``, ``reason``) and
-    a ``note`` on how to widen it: pass ``pr``, ``head``, ``base`` (for example
-    ``base="HEAD~20"``) or ``changed_files``. A named change reports ``scope.kind:
-    "explicit"``. Every change tool follows this rule.
+    a ``note`` on how to widen it: pass ``base`` (for example ``base="HEAD~20"``) or
+    ``changed_files``. This tool takes no ``pr`` or ``head``; detect_changes_tool and
+    pr_blast_radius_tool do. A named change reports ``scope.kind: "explicit"``.
 
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
@@ -942,12 +942,12 @@ async def get_review_context_tool(
     Combines impact analysis with source snippets and review guidance.
     Use this for comprehensive code reviews.
 
-    Scope: with no ``pr``, ``head``, ``base`` or ``changed_files`` this reviews the last
+    Scope: with no ``base`` or ``changed_files`` this reviews the last
     commit (HEAD~1..HEAD; the whole commit in a one-commit repository). The reply carries
     a ``scope`` object (``kind``, ``base``, ``head``, ``files_considered``, ``reason``) and
-    a ``note`` on how to widen it: pass ``pr``, ``head``, ``base`` (for example
-    ``base="HEAD~20"``) or ``changed_files``. A named change reports ``scope.kind:
-    "explicit"``. Every change tool follows this rule.
+    a ``note`` on how to widen it: pass ``base`` (for example ``base="HEAD~20"``) or
+    ``changed_files``. This tool takes no ``pr`` or ``head``; detect_changes_tool and
+    pr_blast_radius_tool do. A named change reports ``scope.kind: "explicit"``.
 
     Args:
         changed_files: Files to review. Auto-detected from git diff if omitted.
@@ -1223,7 +1223,9 @@ async def list_flows_tool(
         limit: Maximum flows to return. Default: 50.
         kind: Optional filter by entry point kind (e.g. "Test", "Function").
         detail_level: "standard" (default) returns full flow data; "minimal"
-                      returns only name, criticality, and node_count per flow.
+                      returns only name, qualified_name, file, flow_key, criticality,
+                      node_count, entry_kind and group_size per flow (``flow_key`` is
+                      what get_flow_tool takes).
         repo_root: Repository root path. Auto-detected if omitted.
         cursor: The ``next_cursor`` of a previous reply, to read the next page.
             Omit it for the first page.
@@ -1318,12 +1320,12 @@ async def get_affected_flows_tool(
     Useful during code review to understand which user-facing or critical paths
     are impacted by a change. Auto-detects changed files from git if not specified.
 
-    Scope: with no ``pr``, ``head``, ``base`` or ``changed_files`` this reviews the last
+    Scope: with no ``base`` or ``changed_files`` this reviews the last
     commit (HEAD~1..HEAD; the whole commit in a one-commit repository). The reply carries
     a ``scope`` object (``kind``, ``base``, ``head``, ``files_considered``, ``reason``) and
-    a ``note`` on how to widen it: pass ``pr``, ``head``, ``base`` (for example
-    ``base="HEAD~20"``) or ``changed_files``. A named change reports ``scope.kind:
-    "explicit"``. Every change tool follows this rule.
+    a ``note`` on how to widen it: pass ``base`` (for example ``base="HEAD~20"``) or
+    ``changed_files``. This tool takes no ``pr`` or ``head``; detect_changes_tool and
+    pr_blast_radius_tool do. A named change reports ``scope.kind: "explicit"``.
 
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
@@ -2207,7 +2209,9 @@ async def cross_repo_requests_tool(
         status: Only rows with this status.
         limit: Maximum rows per client repo. Default: 20.
         max_results: Maximum rows overall, at most 100. ``counts`` and
-            ``total`` cover every call that passed the filters. Default: 50.
+            ``total`` cover every call that passed the filters. Default: 50. For
+            ``amqp`` the separate ``queues`` list is not cut by it: it is capped at
+            100 rows and ``queues_total`` gives the full count.
         origin: Only ``feign`` or only ``js`` calls. Default: both. ``terraform``
             lists the remote Terraform module sources (``git::...//modules/x``)
             the repos name and the registered repo and folder each resolves to:

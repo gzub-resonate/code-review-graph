@@ -39,8 +39,16 @@ CHANGE_SCOPE_HINT = (
     'base="HEAD~20", or changed_files=[...].'
 )
 
+#: The hint for a tool that takes no ``pr`` or ``head`` (impact radius, review context, affected
+#: flows): naming arguments the tool would reject is worse than naming fewer.
+CHANGE_SCOPE_HINT_NO_PR = (
+    "To widen or change the scope, pass base=<ref> for a larger range such as "
+    'base="HEAD~20", or changed_files=[...].'
+)
+
 #: Why the scope is the last commit.
 LAST_COMMIT_REASON = "no pr/head/base/changed_files given"
+LAST_COMMIT_REASON_NO_PR = "no base/changed_files given"
 
 KIND_LAST_COMMIT = "last_commit"
 KIND_EXPLICIT = "explicit"
@@ -49,7 +57,23 @@ _SCOPE: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "crg_change_scope", default=None,
 )
 
+#: Whether the running tool accepts ``pr`` and ``head``; ``scoped(takes_pr=False)`` clears it so
+#: the hint and the reason name only arguments the tool has.
+_TAKES_PR: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "crg_change_takes_pr", default=True,
+)
+
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def scope_hint() -> str:
+    """The hint for the running tool: with ``pr``/``head`` only when it takes them."""
+    return CHANGE_SCOPE_HINT if _TAKES_PR.get() else CHANGE_SCOPE_HINT_NO_PR
+
+
+def last_commit_reason() -> str:
+    """Why the scope is the last commit, naming only the arguments the running tool takes."""
+    return LAST_COMMIT_REASON if _TAKES_PR.get() else LAST_COMMIT_REASON_NO_PR
 
 
 def uses_default_scope(
@@ -69,7 +93,7 @@ def scope_note(scope: dict[str, Any]) -> str:
     count = f", {files} file(s)" if isinstance(files, int) else ""
     return (
         f"Scope: last commit ({scope['base'][:12]}..{scope['head'][:12]}{count}); "
-        f"{scope['reason']}. {CHANGE_SCOPE_HINT}"
+        f"{scope['reason']}. {scope.get('hint') or scope_hint()}"
     )
 
 
@@ -84,7 +108,7 @@ def build_scope(
     scope["reason"] = reason
     scope.update(extra)
     if kind == KIND_LAST_COMMIT:
-        scope["hint"] = CHANGE_SCOPE_HINT
+        scope["hint"] = scope_hint()
     return scope
 
 
@@ -172,7 +196,7 @@ def discover_changes_with_scope(
         files, resolved = discover(root, base, notes=notes)
         record_scope(build_scope(
             "working_copy", base=resolved, files_considered=len(files),
-            reason=LAST_COMMIT_REASON,
+            reason=last_commit_reason(),
         ))
         return files, resolved
 
@@ -188,7 +212,7 @@ def discover_changes_with_scope(
         notes.extend(scope_notes)
     record_scope(build_scope(
         KIND_LAST_COMMIT, base=parent, head=head, files_considered=len(files),
-        reason=LAST_COMMIT_REASON + "; reviewing the last commit",
+        reason=last_commit_reason() + "; reviewing the last commit",
     ))
     return files, parent
 
@@ -205,16 +229,25 @@ def attach_scope(result: Any, scope: dict[str, Any] | None) -> Any:
     return result
 
 
-def scoped(func: F) -> F:
-    """Decorator: attach the scope recorded during the call to an ``ok`` result."""
+def scoped(func: F | None = None, *, takes_pr: bool = True) -> Any:
+    """Decorator: attach the scope recorded during the call to an ``ok`` result.
 
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        token = _SCOPE.set(None)
-        try:
-            result = func(*args, **kwargs)
-            return attach_scope(result, _SCOPE.get())
-        finally:
-            _SCOPE.reset(token)
+    Use ``@scoped(takes_pr=False)`` on a tool with no ``pr``/``head`` argument, so the note it
+    returns does not tell the caller to pass them. Plain ``@scoped`` is unchanged.
+    """
 
-    return wrapper  # type: ignore[return-value]
+    def decorate(inner: F) -> F:
+        @functools.wraps(inner)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            token = _SCOPE.set(None)
+            pr_token = _TAKES_PR.set(takes_pr)
+            try:
+                result = inner(*args, **kwargs)
+                return attach_scope(result, _SCOPE.get())
+            finally:
+                _TAKES_PR.reset(pr_token)
+                _SCOPE.reset(token)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorate if func is None else decorate(func)

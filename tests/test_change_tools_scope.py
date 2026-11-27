@@ -17,7 +17,7 @@ import pytest
 
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
-from code_review_graph.tools.change_scope import CHANGE_SCOPE_HINT
+from code_review_graph.tools.change_scope import CHANGE_SCOPE_HINT, CHANGE_SCOPE_HINT_NO_PR
 from code_review_graph.tools.pr_tools import pr_blast_radius_func
 from code_review_graph.tools.query import get_impact_radius
 from code_review_graph.tools.review import (
@@ -35,6 +35,14 @@ TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "get_affected_flows": get_affected_flows_func,
     "pr_blast_radius": pr_blast_radius_func,
 }
+#: The tools that take ``pr`` and ``head``; the others take only ``base`` and ``changed_files``.
+TAKES_PR = {"detect_changes", "pr_blast_radius"}
+
+
+def _hint_for(name: str) -> str:
+    return CHANGE_SCOPE_HINT if name in TAKES_PR else CHANGE_SCOPE_HINT_NO_PR
+
+
 #: The tools that take ``changed_files``.
 FILE_TOOLS = ["detect_changes", "get_review_context", "get_impact_radius", "get_affected_flows"]
 
@@ -108,18 +116,25 @@ def test_no_arguments_review_the_labelled_last_commit(name: str, two_commits: Pa
     assert scope["base"] == _git(two_commits, "rev-parse", "HEAD~1")
     assert scope["files_considered"] == 2
     assert scope["reason"]
-    assert scope["hint"] == CHANGE_SCOPE_HINT
-    assert CHANGE_SCOPE_HINT in result["note"]
+    assert scope["hint"] == _hint_for(name)
+    assert _hint_for(name) in result["note"]
 
 
-def test_every_tool_returns_the_same_hint(two_commits: Path) -> None:
-    hints = {_call(name, two_commits)["scope"]["hint"] for name in TOOLS}
-    notes = {CHANGE_SCOPE_HINT in _call(name, two_commits)["note"] for name in TOOLS}
-
-    assert hints == {CHANGE_SCOPE_HINT}
-    assert notes == {True}
+def test_each_tool_hints_only_at_arguments_it_takes(two_commits: Path) -> None:
+    for name in TOOLS:
+        result = _call(name, two_commits)
+        assert result["scope"]["hint"] == _hint_for(name), name
+        assert _hint_for(name) in result["note"], name
+        if name in TAKES_PR:
+            assert "pr=" in result["note"] and "head=" in result["note"], name
+        else:
+            assert "pr=" not in result["note"] and "head=" not in result["note"], name
+            assert "no base/changed_files given" in result["scope"]["reason"], name
     for token in ("pr", "head", "base", "changed_files", 'base="HEAD~20"'):
         assert token in CHANGE_SCOPE_HINT
+    for token in ("base", "changed_files", 'base="HEAD~20"'):
+        assert token in CHANGE_SCOPE_HINT_NO_PR
+    assert "pr=" not in CHANGE_SCOPE_HINT_NO_PR and "head=" not in CHANGE_SCOPE_HINT_NO_PR
 
 
 def test_detect_changes_without_arguments_finds_the_last_commit_changes(
@@ -217,7 +232,7 @@ def test_one_commit_repo_reviews_the_whole_commit(name: str, one_commit: Path) -
     empty_tree = _git(one_commit, "hash-object", "-t", "tree", "/dev/null")
     assert scope["base"] == empty_tree
     assert scope["files_considered"] == 2  # service.py and .gitignore
-    assert CHANGE_SCOPE_HINT in result["note"]
+    assert _hint_for(name) in result["note"]
 
 
 def test_one_commit_pr_blast_radius_says_there_is_no_parent(one_commit: Path) -> None:

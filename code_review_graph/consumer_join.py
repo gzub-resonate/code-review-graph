@@ -63,6 +63,8 @@ ROLE_UNDECLARED = "undeclared_read"
 ROLES = (ROLE_DECLARATION, ROLE_CONSUMER)
 
 _PATH_READ = "get_parameters_by_path"
+#: Access modes (``aws_sdk_calls.classify_access``) that change or remove what they name.
+_NOT_READS = frozenset({"write", "delete", "admin"})
 #: ``terraform type -> (service, kind)`` of the blocks whose ``name`` is read from the file.
 FILE_DECLARED = {
     "aws_ssm_parameter": ("ssm", "parameter"),
@@ -280,6 +282,9 @@ def undeclared_reads(
     unnamed = 0
     for use in uses:
         if use["service"] != "ssm" or use["sdk"] == "terraform":
+            continue
+        # A put or a delete of a parameter is not a read of one; the rows are labelled reads.
+        if use["access"] in _NOT_READS:
             continue
         names: list[tuple[str, dict[str, Any]]] = (
             [(use["name"], {})] if not use["unresolved"] and use["name"] != "?" else []
