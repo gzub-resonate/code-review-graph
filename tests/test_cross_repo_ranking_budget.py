@@ -8,6 +8,7 @@ from code_review_graph import constants
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import NodeInfo
 from code_review_graph.registry import Registry
+from code_review_graph.repo_cache import _reset_shared_pool
 from code_review_graph.tools import registry_tools
 from code_review_graph.tools.registry_tools import (
     _match_tier,
@@ -373,6 +374,7 @@ def test_repos_are_searched_in_parallel_up_to_the_worker_count(tmp_path, registr
     for alias in "abcdefgh":
         named_repo(tmp_path, registry, alias, ["getMetricsBatch", *WEAK])
     monkeypatch.setenv(constants.CROSS_REPO_WORKERS_ENV, "4")
+    _reset_shared_pool()  # the pool's size is read when it is first used
     state = _watch_concurrency(monkeypatch)
     reply = search(query="getMetricsBatch")
     assert reply["repos_searched"] == list("abcdefgh")
@@ -454,3 +456,102 @@ def test_a_search_cut_by_the_per_repo_limit_says_more_exist(tmp_path, registry):
     whole = search(query="loadWidget", limit=50, max_results=100, repos=["narrow"])
     assert "total_is_lower_bound" not in whole and whole["repos_capped_total"] == 0
     assert whole["truncated"] is False
+
+
+# --- loud budget skip, retry order, read-only opens -------------------------------------------
+
+
+def test_a_budget_skip_is_loud_in_the_summary_and_the_reply(five_repos, monkeypatch):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    reply = search(query="getMetricsBatch")
+    assert reply["summary"].startswith(
+        "INCOMPLETE: searched 2 of 5 repos; 3 skipped by the time budget."
+    )
+    assert reply["truncated_reason"].startswith("searched 2 of 5 repos; 3 skipped")
+    assert reply["repos_total"] == 5
+    assert reply["skipped_repos"] == ["c", "d", "e"] and reply["truncated"] is True
+
+
+def test_a_complete_search_has_no_incomplete_marker(five_repos):
+    reply = search(query="getMetricsBatch")
+    assert "INCOMPLETE" not in reply["summary"]
+    assert "truncated_reason" not in reply
+
+
+def test_a_repeat_after_a_budget_skip_starts_with_the_repos_it_did_not_reach(
+    five_repos, monkeypatch,
+):
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    first = search(query="getMetricsBatch")
+    assert first["skipped_repos"] == ["c", "d", "e"]
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    second = search(query="getMetricsBatch")
+    assert second["repos_searched"] == ["c", "d"]
+    assert second["skipped_repos"] == ["a", "b", "e"]
+    # Once everything was searched the memory is dropped: the order is the registry's again.
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "0")
+    assert search(query="getMetricsBatch")["skipped_repos"] == []
+    monkeypatch.setenv(constants.CROSS_REPO_BUDGET_ENV, "15")
+    monkeypatch.setattr(registry_tools, "_now", Clock(10))
+    assert search(query="getMetricsBatch")["skipped_repos"] == ["c", "d", "e"]
+
+
+def test_the_search_opens_graphs_without_writing_unless_they_hold_vectors(
+    five_repos, monkeypatch,
+):
+    opened: list[bool] = []
+    original = registry_tools.GraphStore
+
+    def spy(*args, **kwargs):
+        opened.append(bool(kwargs.get("read_only")))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(registry_tools, "GraphStore", spy)
+    reply = search(query="getMetricsBatch")
+    assert reply["repos_searched_total"] == 5
+    assert opened and all(opened), "a graph without vectors must be opened read-only"
+
+
+def test_a_graph_with_vectors_is_still_opened_writable_for_the_embedding_search(
+    tmp_path, registry, monkeypatch,
+):
+    root = named_repo(tmp_path, registry, "vec", ["getMetricsBatch"])
+    import sqlite3
+
+    db = root / ".code-review-graph" / "graph.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS embeddings (qualified_name TEXT PRIMARY KEY, "
+            "vector BLOB NOT NULL, text_hash TEXT NOT NULL, provider TEXT NOT NULL "
+            "DEFAULT 'unknown')"
+        )
+        conn.execute("INSERT INTO embeddings VALUES ('q', x'00', 'h', 'p')")
+    opened: list[bool] = []
+    original = registry_tools.GraphStore
+
+    def spy(*args, **kwargs):
+        opened.append(bool(kwargs.get("read_only")))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(registry_tools, "GraphStore", spy)
+    assert search(query="getMetricsBatch")["repos_searched"] == ["vec"]
+    assert opened == [True, False]
+
+
+def test_search_tasks_run_on_the_shared_pool(tmp_path, registry, monkeypatch):
+    import threading
+
+    for alias in "abcd":
+        named_repo(tmp_path, registry, alias, ["getMetricsBatch"])
+    names: set[str] = set()
+    original = registry_tools._search_repo
+
+    def spy(store, query, kind, limit):
+        names.add(threading.current_thread().name)
+        return original(store, query, kind, limit)
+
+    monkeypatch.setattr(registry_tools, "_search_repo", spy)
+    search(query="getMetricsBatch")
+    assert names and all(n.startswith("crg-xrepo") for n in names)

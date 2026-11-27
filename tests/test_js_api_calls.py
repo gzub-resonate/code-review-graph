@@ -752,6 +752,7 @@ def test_feign_rows_are_unchanged_by_js_rows(tmp_path, registry):
     # The JS call sees both the Spring controller and the route file.
     assert js[0]["status"] == "ambiguous"
     only_feign = cross_repo_requests_func(repos=["web"], origin="feign")
+    assert only_feign["results_shown"] == len(only_feign["results"])
     assert only_feign["summary"].startswith("1 Feign call(s)")
     assert only_feign["results"] == feign
 

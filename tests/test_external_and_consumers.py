@@ -172,6 +172,30 @@ class TestExternal:
         other = rows[("hooks.example-vendor.io", "web-app")]
         assert other["status"] == "unknown_vendor" and "vendor" not in other
 
+    def test_capped_lists_say_their_true_size(self, tmp_path, registry):  # noqa: F811
+        files = {
+            f"src/c{n}.js": f"fetch('https://api.bulk-vendor.io/v1/item{n}');\n"
+            for n in range(8)
+        }
+        make_repo(tmp_path, registry, "bulk-app", files)
+        reply = self.reply()
+        row = next(r for r in reply["results"] if r["host"] == "api.bulk-vendor.io")
+        assert row["calls"] == 8 and len(row["files"]) == 5
+        assert row["files_total"] == 8 and row["files_truncated"] is True
+        assert row["samples_total"] == 8 and len(row["samples"]) == 3
+        assert row["samples_truncated"] is True
+        assert "files_total" in reply["summary"]
+        assert reply["results_shown"] == len(reply["results"])
+        assert reply["hosts_shown"] == 1 and reply["hosts_total"] == 1
+
+    def test_short_lists_are_not_marked_truncated(self, world):
+        reply = self.reply()
+        row = next(r for r in reply["results"] if r["host"] == "graph.facebook.com")
+        assert row["files_total"] == 1 and row["files_truncated"] is False
+        assert row["samples_total"] == 1 and row["samples_truncated"] is False
+        auth0 = next(r for r in reply["results"] if r["host"] == "*.auth0.com")
+        assert auth0["hosts_seen_total"] == 2 and auth0["hosts_seen_truncated"] is False
+
     def test_unresolved_hosts_carry_their_key(self, world):
         reply = self.reply(status="host_unresolved")
         keys = {(r["repo"], r["unresolved_key"]) for r in reply["results"]}

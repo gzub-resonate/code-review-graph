@@ -516,6 +516,12 @@ def _build_result(
         "contract_changes": contract[:_MAX_ENDPOINTS_SHOWN],
         "endpoints": endpoints[:_MAX_ENDPOINTS_SHOWN],
         "same_file_endpoints": same_file[:_MAX_ENDPOINTS_SHOWN],
+        "contract_changes_total": len(contract),
+        "contract_changes_truncated": len(contract) > _MAX_ENDPOINTS_SHOWN,
+        "endpoints_total": len(endpoints),
+        "endpoints_truncated": len(endpoints) > _MAX_ENDPOINTS_SHOWN,
+        "same_file_endpoints_total": len(same_file),
+        "same_file_endpoints_truncated": len(same_file) > _MAX_ENDPOINTS_SHOWN,
         "config_changes": config_rows[:_MAX_CONFIG_SHOWN],
         "config_changes_total": len(config_rows),
         "config_changes_truncated": (
@@ -523,7 +529,10 @@ def _build_result(
         ),
         "external_callers": external[:_MAX_CALLERS_SHOWN],
         "external_callers_total": len(external),
+        "external_callers_truncated": len(external) > _MAX_CALLERS_SHOWN,
         "external_info": external_info,
+        "schema_changes_total": len(found["schema"]),
+        "schema_changes_truncated": len(found["schema"]) > _MAX_ENDPOINTS_SHOWN,
         "schema_changes": [
             {key: _sanitize_name(value) for key, value in row.items()}
             for row in found["schema"][:_MAX_ENDPOINTS_SHOWN]

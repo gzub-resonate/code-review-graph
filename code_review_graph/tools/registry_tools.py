@@ -7,16 +7,18 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from pathlib import Path
 from typing import Any, Optional
 
 from .. import amqp_exchanges as ax
 from .. import amqp_join as aj
 from .. import aws_sdk_links as al
+from .. import external_hosts as eh
 from .. import feign_links as fl
 from .. import infra_join as ij
 from .. import js_route_leads as jl
@@ -41,7 +43,13 @@ from ..paging import (
 )
 from ..parser import is_test_file
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
-from ..repo_cache import INFRASTRUCTURE_RESULTS, MEMO, SKIPPED, parallel_map_budget
+from ..repo_cache import (
+    INFRASTRUCTURE_RESULTS,
+    MEMO,
+    SKIPPED,
+    parallel_map_budget,
+    submit_shared,
+)
 from ..search import hybrid_search
 from ._common import _bounded, _validate_positive_int
 
@@ -316,6 +324,39 @@ class _SearchedRows(list[tuple[int, int, int, dict[str, Any]]]):
     more: bool = False
 
 
+def _has_embeddings(store: GraphStore) -> bool:
+    """Whether the graph's database holds embedding vectors (one indexed probe, no writes)."""
+    try:
+        conn = store._conn
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embeddings'"
+        ).fetchone() is None:
+            return False
+        return conn.execute("SELECT 1 FROM embeddings LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return True
+
+
+def _open_for_search(db_path: Path, *, lookup_only: bool = False) -> GraphStore:
+    """Open a repo's graph for a search without the writes a normal open makes.
+
+    A normal open runs the schema and migration statements and, for the embedding search, opens
+    a second connection that creates its table: every one of those takes the write lock, so on
+    a repo the indexer is writing the open itself waits, 100+ times in a row. A read-only open
+    does none of that. The embedding search needs the writable open, so a graph that holds
+    vectors (and any graph a read-only open refuses, such as an older schema) is opened the
+    normal way: the answers are the ones they always were. ``lookup_only`` never needs vectors.
+    """
+    try:
+        store = GraphStore(db_path, read_only=True)
+    except GraphStoreError:
+        return GraphStore(str(db_path))
+    if lookup_only or not _has_embeddings(store):
+        return store
+    store.close()
+    return GraphStore(str(db_path))
+
+
 def _search_one_repo(
     repo_index: int, repo_entry: dict[str, Any], query: str, kind: str | None, limit: int,
 ) -> tuple[str, list[tuple[int, int, int, dict[str, Any]]]] | None:
@@ -330,7 +371,7 @@ def _search_one_repo(
     if not db_path.exists():
         return None
     try:
-        store = GraphStore(str(db_path))
+        store = _open_for_search(db_path)
         try:
             alias = repo_entry.get("alias", repo_path.name)
             rows: list[tuple[int, int, int, dict[str, Any]]] = _SearchedRows()
@@ -376,7 +417,7 @@ def _exact_pass(
         if not db_path.exists():
             continue
         try:
-            store = GraphStore(str(db_path))
+            store = _open_for_search(db_path, lookup_only=True)
             try:
                 found = _lookup_rows(store, query, kind, limit)
             finally:
@@ -408,6 +449,55 @@ def _now() -> float:
 
 def _out_of_budget(deadline: float | None) -> bool:
     return deadline is not None and _now() >= deadline
+
+
+#: ``search key -> repo paths the time budget kept out of that search``, newest last. A repeat of
+#: the same first-page search starts with them, so retrying a call that ran out of time makes
+#: progress on the repos it never reached instead of re-reading the ones it already did.
+_UNSEARCHED: dict[tuple[Any, ...], list[str]] = {}
+_UNSEARCHED_LOCK = threading.Lock()
+_UNSEARCHED_KEYS_MAX = 32
+
+
+def _search_key(
+    selected: list[dict[str, Any]], query: str, kind: str | None, limit: int,
+    repos: list[str] | None,
+) -> tuple[Any, ...]:
+    return (query, kind, limit, tuple(sorted(repos)) if repos else None,
+            tuple(str(e["path"]) for e in selected))
+
+
+def _retry_order(
+    selected: list[dict[str, Any]], query: str, kind: str | None, limit: int,
+    repos: list[str] | None, cursor: str | None,
+) -> list[int]:
+    """Indexes into *selected* in the order they are started: registry order, except that a
+    repeat of a first-page search that skipped repos tries those first. A call with a cursor
+    keeps registry order, so its pages line up with the page that made the cursor."""
+    order = list(range(len(selected)))
+    if cursor:
+        return order
+    with _UNSEARCHED_LOCK:
+        pending = set(_UNSEARCHED.get(_search_key(selected, query, kind, limit, repos), ()))
+    if not pending:
+        return order
+    first = [i for i in order if str(selected[i]["path"]) in pending]
+    return first + [i for i in order if str(selected[i]["path"]) not in pending]
+
+
+def _remember_skipped(
+    selected: list[dict[str, Any]], query: str, kind: str | None, limit: int,
+    repos: list[str] | None, cursor: str | None, left: list[tuple[int, dict[str, Any]]],
+) -> None:
+    if cursor:
+        return
+    key = _search_key(selected, query, kind, limit, repos)
+    with _UNSEARCHED_LOCK:
+        _UNSEARCHED.pop(key, None)
+        if left:
+            _UNSEARCHED[key] = [str(entry["path"]) for _i, entry in left]
+            while len(_UNSEARCHED) > _UNSEARCHED_KEYS_MAX:
+                del _UNSEARCHED[next(iter(_UNSEARCHED))]
 
 
 def cross_repo_search_func(
@@ -561,24 +651,29 @@ def cross_repo_search_func(
                 if outcome is not None:
                     outcomes[index] = outcome
 
-        # Up to ``workers`` repos are searched at once. The budget is checked here, on the
-        # calling thread and in registry order, each time a worker is free to start the next
-        # repo, so what is skipped does not depend on which search finishes first.
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crg-xrepo") as pool:
-            for repo_index, repo_entry in enumerate(selected):
-                while len(in_flight) >= workers:
-                    reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
-                # The first repo always runs, so a call makes progress; after that no
-                # new repo is started once the budget is spent, and each one left is named.
-                if repo_index and _out_of_budget(deadline):
-                    skipped.extend(_repo_label(e) for e in selected[repo_index:])
-                    left = list(enumerate(selected))[repo_index:]
-                    break
-                future = pool.submit(
-                    _search_one_repo, repo_index, repo_entry, query, kind, limit,
-                )
-                in_flight[future] = repo_index
-            reap(wait(in_flight).done)
+        # Up to ``workers`` repos are searched at once, on the pool every cross-repo call shares
+        # (so concurrent calls do not each start their own threads). The budget is checked
+        # here, on the calling thread, each time a worker is free to start the next repo, so
+        # what is skipped does not depend on which search finishes first. A repo left out by a
+        # first-page call that ran out of budget is tried first by the next such call.
+        order = _retry_order(selected, query, kind, limit, repos, cursor)
+        for position, repo_index in enumerate(order):
+            repo_entry = selected[repo_index]
+            while len(in_flight) >= workers:
+                reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
+            # The first repo always runs, so a call makes progress; after that no
+            # new repo is started once the budget is spent, and each one left is named.
+            if position and _out_of_budget(deadline):
+                left_over = sorted(order[position:])
+                skipped.extend(_repo_label(selected[i]) for i in left_over)
+                left = [(i, selected[i]) for i in left_over]
+                break
+            future = submit_shared(
+                _search_one_repo, repo_index, repo_entry, query, kind, limit,
+            )
+            in_flight[future] = repo_index
+        reap(wait(in_flight).done)
+        _remember_skipped(selected, query, kind, limit, repos, cursor, left)
 
         capped: list[str] = []
         # Whatever order the searches finished in, the rows go in registry order.
@@ -671,11 +766,17 @@ def cross_repo_search_func(
                 f"; {capped_total} repo(s) have more matches than limit={limit} "
                 "(see repos_capped; total is a lower bound, raise limit to see them)"
             )
+        searched_of = len(searched_repos)
+        coverage = (
+            f"searched {searched_of} of {len(selected)} repos; "
+            f"{skipped_total} skipped by the time budget"
+        )
         if skipped_total:
             notes += (
-                f"; time budget of {budget:g}s spent, {skipped_total} repo(s) not searched "
-                f"(exact names were still looked up in {len(exact_looked_in)} of them; "
-                "see skipped_repos; raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
+                f"; {coverage} (budget {budget:g}s spent, {skipped_total} repo(s) not searched; "
+                f"exact names were still looked up in {len(exact_looked_in)} of them; "
+                "see skipped_repos; repeat the call to search "
+                "the skipped repos first, raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
             )
 
         response = {
@@ -702,6 +803,10 @@ def cross_repo_search_func(
         }
         if capped_total:
             response["total_is_lower_bound"] = True
+        if skipped_total:
+            response["truncated_reason"] = f"{coverage} (see skipped_repos)"
+            response["repos_total"] = len(selected)
+            response["summary"] = f"INCOMPLETE: {coverage}. " + response["summary"]
         if repos:
             response["unknown"] = unknown_shown
             response["unknown_total"] = unknown_total
@@ -847,14 +952,22 @@ def _stepfunction_links(
     machine: str | None = None,
 ) -> dict[str, Any]:
     """The ``origin="stepfunction"`` branch: what state machines call, joined to its owner."""
+    from .. import not_found_reasons as nfr
+
     definitions = sl.Definitions()
+
+    def annotate(rows, all_repos, _edges, _context):
+        nfr.annotate_stepfunction(rows, definitions._by_repo, all_repos)
+
     result = _infra_links(
         "stepfunction", "Step Functions target(s)", sl.STATUSES, sl.read_target_edges,
         definitions.defines, sl.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
-        path_prefix=path_prefix, machine=machine,
+        path_prefix=path_prefix, machine=machine, annotate=annotate,
     )
+    if target_name and result["total"] == 0 and not result["counts"]:
+        _machine_hint(result, definitions, target_name)
     for row in result["results"]:
         for key in ("machine", "state", "target_kind", "target_subkind", "target_repo"):
             if isinstance(row.get(key), str):
@@ -862,6 +975,22 @@ def _stepfunction_links(
         if isinstance(row.get("candidates"), list):
             row["candidates"] = [_sanitize_name(str(name)) for name in row["candidates"]]
     return result
+
+
+def _machine_hint(result: dict[str, Any], definitions: Any, name: str) -> None:
+    """Explain an empty ``service=<state machine>`` answer: this origin lists what states call."""
+    from ..registry import Registry
+
+    all_repos = Registry().list_repos()
+    definitions.prefetch(all_repos, cross_repo_workers())
+    key = ("states", "state-machine", "~" + re.sub(r"[-_]", "", name).lower())
+    if any(key in definitions._by_repo.get(str(Path(e["path"])), {}) for e in all_repos):
+        result["hint"] = (
+            f"{name!r} is an indexed state machine. origin=stepfunction lists what Task "
+            "states CALL (a Lambda, ECS task, topic or another machine), not what SDK code "
+            "starts. For who starts or calls this machine use origin=awssdk route=states/"
+            f"{name} (or the machine's callers)."
+        )
 
 
 def _awssdk_links(
@@ -876,7 +1005,13 @@ def _awssdk_links(
     include_tests: bool = True,
 ) -> dict[str, Any]:
     """The ``origin="awssdk"`` branch: AWS resources application code calls, joined to owners."""
+    from .. import not_found_reasons as nfr
+
     definitions = sl.Definitions()
+
+    def annotate(rows, all_repos, edges_by_repo, context):
+        nfr.annotate_awssdk(rows, definitions._by_repo, all_repos, edges_by_repo, context)
+
     result = _infra_links(
         "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges,
         definitions.defines, al.resolve_links, "target_name", "target",
@@ -884,6 +1019,7 @@ def _awssdk_links(
         read_context=al.read_declare_edges,
         edge_filter=_edge_target_filter, prefetch=definitions.prefetch, cursor=cursor,
         path_prefix=path_prefix, source=source, include_tests=include_tests,
+        annotate=annotate,
     )
     for row in result["results"]:
         # Every string here was read from a repository's files: none is passed on as written.
@@ -1459,6 +1595,7 @@ def _infra_links(
     source: str | None = None,
     machine: str | None = None,
     include_tests: bool = True,
+    annotate: Any = None,
 ) -> dict[str, Any]:
     """Shared body of the ``terraform``, ``workflow``, ``stepfunction`` and ``awssdk`` origins.
 
@@ -1479,10 +1616,14 @@ def _infra_links(
     *path_prefix*, *source*, *machine* and *include_tests* filter the rows before ``counts``,
     ``total`` and paging, so a page and its cursor only ever hold rows that passed them.
     """
+    from .. import not_found_reasons as nfr
     from ..registry import Registry
 
-    if status is not None and status not in statuses:
-        raise ValueError(f"status must be one of: {', '.join(statuses)}")
+    reason_values = nfr.REASONS_BY_ORIGIN.get(origin, ())
+    if status is not None and status not in statuses + reason_values:
+        raise ValueError(
+            f"status must be one of: {', '.join(statuses + reason_values)}"
+        )
     all_repos = Registry().list_repos()
     selected: list[dict[str, Any]] = all_repos
     unknown_shown: list[str] = []
@@ -1602,6 +1743,8 @@ def _infra_links(
     if origin == "awssdk":
         for r in rows:
             r["is_test"] = is_test_file(r.get("file") or "")
+    if annotate is not None:
+        annotate(rows, all_repos, edges_by_repo, context)
     if path_prefix:
         wanted_path = path_prefix.strip("/")
         rows = [
@@ -1621,8 +1764,9 @@ def _infra_links(
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    reason_counts = nfr.counts_by_reason(rows)
     if status:
-        rows = [r for r in rows if r["status"] == status]
+        rows = [r for r in rows if r["status"] == status or r.get("not_found_reason") == status]
     page = paginate(
         rows, max_results, 100, cursor,
         scope=make_scope(
@@ -1646,6 +1790,7 @@ def _infra_links(
             f"{total} {noun} across {len(selected)} repo(s)" + shown_range(page)
             + (f"; {tests_hidden} test row(s) hidden (include_tests=True shows them)"
                if tests_hidden else "")
+            + nfr.summary_clause(counts, reason_counts)
         ),
         "origin": origin,
         "results": shown,
@@ -1656,6 +1801,8 @@ def _infra_links(
         "unreadable": unreadable,
         **page.fields(),
     }
+    if reason_counts:
+        result["counts_by_reason"] = reason_counts
     if origin == "awssdk":
         result["tests_hidden"] = tests_hidden
     if skipped:
@@ -1944,8 +2091,9 @@ def cross_repo_requests_func(
         "terraform", "workflow", "stepfunction", "awssdk", "amqp", "trigger", "external",
         "consumers",
     )
-    if status is not None and origin not in infra_origins and status not in jl.ALL_STATUSES:
-        raise ValueError(f"status must be one of: {', '.join(jl.ALL_STATUSES)}")
+    accepted_statuses = (*jl.ALL_STATUSES, *eh.NO_TARGET_REASONS)
+    if status is not None and origin not in infra_origins and status not in accepted_statuses:
+        raise ValueError(f"status must be one of: {', '.join(accepted_statuses)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
         raise ValueError(
             "origin must be one of: feign, js, terraform, workflow, stepfunction, awssdk, amqp, "
@@ -2109,6 +2257,7 @@ def cross_repo_requests_func(
 
         wanted_route = fl.normalize_route(route) if route else None
         counts: dict[str, int] = {}
+        counts_by_reason: dict[str, int] = {}
         origin_counts: dict[str, int] = {}
         multiple_total = 0
         rows_by_repo: list[list[dict[str, Any]]] = []
@@ -2185,10 +2334,16 @@ def cross_repo_requests_func(
                     result = jl.refine_no_route_match(
                         call, result, js_index_for(index), own_index_for(index),
                     )
-                if status is not None and result.status != status:
+                no_target_why = (
+                    eh.no_target_reason(call.service, result.reason)
+                    if result.status == fl.NO_TARGET_REPO else None
+                )
+                if status is not None and status not in (result.status, no_target_why):
                     continue
 
                 counts[result.status] = counts.get(result.status, 0) + 1
+                if no_target_why:
+                    counts_by_reason[no_target_why] = counts_by_reason.get(no_target_why, 0) + 1
                 origin_counts[call.origin] = origin_counts.get(call.origin, 0) + 1
                 total += 1
                 row: dict[str, Any] = {
@@ -2218,6 +2373,8 @@ def cross_repo_requests_func(
                     row["served_methods"] = jl.served_methods(result.candidates)
                 if result.reason:
                     row["reason"] = result.reason
+                if no_target_why:
+                    row["no_target_reason"] = no_target_why
                 if resolution is not None and resolution.how:
                     row["target_resolution"] = resolution.how
                 if resolution is not None and resolution.matched_via:
@@ -2292,7 +2449,9 @@ def cross_repo_requests_func(
             ),
             "origin": origin or "all",
             "results": results,
+            "results_shown": len(results),
             "counts": counts,
+            "counts_by_reason": counts_by_reason,
             "multiple_candidates_total": multiple_total,
             "total": total,
             "truncated": truncated,
@@ -2423,6 +2582,8 @@ def handlers_of_route_across_repos(
             f"{' ...' if len(matched) > 10 else ''}. Pass repo_root for one repo's full answer."
         ),
         "repos_matched": matched[:20],
+        "repos_matched_total": len(matched),
+        "repos_matched_truncated": len(matched) > 20,
         **scope,
         "result_count": total_rows,
         "results_omitted": max(0, total_rows - len(rows)),

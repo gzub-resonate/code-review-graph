@@ -697,6 +697,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_SERVICE_ALIASES_FILE` | Feign 서비스 이름을 등록된 저장소에 매핑하는 JSON 또는 YAML 파일의 경로(`{"alias": "repo", "prefix:billing-api-": "billing-api"}`); [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) 참고 | 설정 안 함 |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | `cross_repo_search_tool` 또는 `cross_repo_requests_tool` 한 번의 호출이 새 저장소 시작을 멈추고 나머지를 `skipped_repos`에 나열하기까지의 시간(초). `0`은 제한 없음 | `300` |
 | `CRG_CROSS_REPO_WORKERS` | `cross_repo_search_tool` 한 번의 호출이 동시에 검색하는 저장소 수. `1`은 하나씩 검색합니다. 32보다 큰 값은 32로 처리됩니다 | `4` |
+| `CRG_CROSS_REPO_WARMUP` | `1`이면 멀티 저장소 서버에서 백그라운드 스레드가 시작되어 `CRG_CROSS_REPO_WARMUP_ORIGINS`(쉼표로 구분한 목록)의 각 origin에 대해 범위를 지정하지 않은 `cross_repo_requests_tool` 호출을 시작 후와 저장소 그래프가 바뀐 뒤에 다시 실행합니다. 첫 클라이언트 호출은 캐시에서 응답합니다. 공유 풀에서 한 번에 하나의 origin만 처리하며, `CRG_CROSS_REPO_WARMUP_MAX_SECONDS`(1800)가 지나면 새 origin을 시작하지 않고 `CRG_CROSS_REPO_WARMUP_INTERVAL_SECONDS`(60)마다 폴링합니다 | 꺼짐; origin은 `awssdk,feign,js` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
 | `CRG_CONTEXT_HISTORY` | `1`로 설정하면 각 `context_savings` 추정치를 로컬 로그 `.code-review-graph/context-history.jsonl`에 기록합니다. `code-review-graph context-history`로 확인합니다. 토큰 수, 도구 이름, 타임스탬프, 상세 수준, 파일 수와 깊이를 남기며 파일 이름, 경로, 소스 코드는 남기지 않고 외부로 보내지 않습니다 | - |

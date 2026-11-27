@@ -695,6 +695,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_SERVICE_ALIASES_FILE` | JSON 或 YAML 文件的路径，把 Feign 服务名映射到已注册的仓库（`{"alias": "repo", "prefix:billing-api-": "billing-api"}`）；见 [docs/SERVICE_ALIASES.md](docs/SERVICE_ALIASES.md) | 未设置 |
 | `CRG_CROSS_REPO_BUDGET_SECONDS` | 单次 `cross_repo_search_tool` 或 `cross_repo_requests_tool` 调用在停止启动新仓库并将其余仓库列入 `skipped_repos` 之前可运行的秒数。`0` 表示不限制 | `300` |
 | `CRG_CROSS_REPO_WORKERS` | 单次 `cross_repo_search_tool` 调用同时搜索的仓库数。`1` 表示逐个搜索。大于 32 的值按 32 处理 | `4` |
+| `CRG_CROSS_REPO_WARMUP` | `1` 在多仓库服务器上启动后台线程，对 `CRG_CROSS_REPO_WARMUP_ORIGINS`（逗号分隔列表）中的每个来源发起不带范围的 `cross_repo_requests_tool` 调用，在启动后以及各仓库的图发生变化后再次执行，使第一次客户端调用直接命中缓存。共享线程池上一次处理一个来源；超过 `CRG_CROSS_REPO_WARMUP_MAX_SECONDS`（1800）后不再启动新的来源；每隔 `CRG_CROSS_REPO_WARMUP_INTERVAL_SECONDS`（60）轮询一次 | 关闭；来源为 `awssdk,feign,js` |
 | `CRG_TOOL_TIMEOUT` | 只读 MCP 工具的超时秒数（`0` 表示禁用）。不限制写入类工具：build、postprocess、embed、wiki 和 apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` 统计提交数的时间窗口 | `90` |
 | `CRG_CONTEXT_HISTORY` | 设为 `1` 时，把每次 `context_savings` 估算记入本地日志 `.code-review-graph/context-history.jsonl`；用 `code-review-graph context-history` 查看。记录 token 数、工具名、时间戳、详细级别以及文件数和深度，从不记录文件名、路径或源代码，也从不外发 | - |

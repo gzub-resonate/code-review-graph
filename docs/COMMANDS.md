@@ -1366,6 +1366,8 @@ How a call is classified:
   otherwise the status is `no_target_repo` with `service_not_registered`,
   `service_name_ambiguous` or `target_unreadable`. Sibling checkouts that share
   a folder name are all searched. See [SERVICE_ALIASES.md](SERVICE_ALIASES.md).
+  A `no_target_repo` row also has `no_target_reason` (`external_vendor`, `repo_not_registered` or
+  `target_unreadable`), the reply has `counts_by_reason`, and `status` accepts those values too.
 - Within the target, an endpoint matches when its HTTP method is the same (an
   endpoint mapped for every method matches any) and its route is the same
   after dropping the query string, collapsing repeated slashes, dropping a

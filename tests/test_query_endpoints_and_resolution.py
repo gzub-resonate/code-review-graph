@@ -181,6 +181,8 @@ def test_handlers_of_accepts_route_strings(repo):
     assert with_method["status"] == "ok"
     assert [r["name"] for r in with_method["results"]] == ["op0"]
     assert with_method["matched_endpoints"] == ["POST /v1/items/0"]
+    assert with_method["matched_endpoints_total"] == 1
+    assert with_method["matched_endpoints_truncated"] is False
 
     path_only = query_graph("handlers_of", "/v1/items/1", root)
     assert [r["name"] for r in path_only["results"]] == ["op1"]
