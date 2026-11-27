@@ -22,6 +22,7 @@ from .. import external_hosts as eh
 from .. import feign_links as fl
 from .. import infra_join as ij
 from .. import js_route_leads as jl
+from .. import server_route_index as sri
 from .. import service_aliases as sa
 from .. import stepfunction_links as sl
 from .. import terraform_links as tl
@@ -46,7 +47,9 @@ from ..repo_aliases import RepoNameResolver, load_repo_aliases
 from ..repo_cache import (
     INFRASTRUCTURE_RESULTS,
     MEMO,
+    SERVER_INDEXES,
     SKIPPED,
+    graph_stamp,
     parallel_map_budget,
     submit_shared,
 )
@@ -835,6 +838,20 @@ _COMPUTED = "computed"
 def _load_endpoints(
     entry: dict[str, Any],
 ) -> tuple[list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str]]:
+    """One repo's endpoints, kept in this process while its graph file is the same one.
+
+    The value is shared between calls and threads and must be read as it is. A read that failed
+    is returned but not kept. The registry label is part of the key: it is on every row.
+    """
+    return MEMO.get(
+        "endpoints:" + _repo_label(entry), entry, lambda: _load_endpoints_uncached(entry),
+        cacheable=lambda found: found[2] is None,
+    )
+
+
+def _load_endpoints_uncached(
+    entry: dict[str, Any],
+) -> tuple[list[fl.ClientCall], list[fl.ServerEndpoint], Optional[str], Optional[str]]:
     """Read one repo's Feign client calls and server endpoints, read-only.
 
     The third item is ``None`` on success, else ``"no_database"`` or
@@ -1013,7 +1030,7 @@ def _awssdk_links(
         nfr.annotate_awssdk(rows, definitions._by_repo, all_repos, edges_by_repo, context)
 
     result = _infra_links(
-        "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges,
+        "awssdk", "AWS SDK call(s)", al.STATUSES, al.read_edges_and_references,
         definitions.defines, al.resolve_links, "target_name", "target",
         repos, target_name, target, status, max_results, infrastructure=True,
         read_context=al.read_declare_edges,
@@ -1201,18 +1218,22 @@ def _amqp_exchange_list(
                 {**e, "routing_key": _sanitize_name(e["routing_key"])
                  if isinstance(e.get("routing_key"), str) else None,
                  "binding_key": _sanitize_name(e["binding_key"])
-                 if isinstance(e.get("binding_key"), str) else None}
+                 if isinstance(e.get("binding_key"), str) else None,
+                 "queue": _sanitize_name(e["queue"]) if isinstance(e.get("queue"), str) else None}
                 for e in raw_edges
             ]
             ax.add_edges(
                 exchanges.setdefault(_sanitize_name(name), ax.new_exchange()), label, edges,
                 in_scope=in_scope,
             )
+    ax.link_bound_queues(exchanges)
     counts: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     queues: list[dict[str, Any]] = []
     for name in sorted(exchanges):
         entry_data = exchanges[name]
+        if not ax.has_role_edges(entry_data):
+            continue  # only declared bindings name it
         if scoped and not ax.in_scope_edges(entry_data):
             continue
         if routing_key and not ax.has_key_containing(entry_data, routing_key):
@@ -1327,7 +1348,7 @@ def _amqp_links(
     overall = {"publisher": 0, "listener": 0}
     paths = {_sanitize_name(_repo_label(e)): Path(e["path"]) for e in all_repos}
     for label, in_scope, amap in scan.loaded:
-        found = amap.get(channel, [])
+        found = [e for e in amap.get(channel, []) if e["role"] != aj.ROLE_BINDING]
         for edge in found:
             overall[edge["role"]] += 1
         if not in_scope:
@@ -1541,6 +1562,20 @@ def _slow_call_seconds() -> float:
     return value if value >= 0 else DEFAULT_SLOW_CALL_SECONDS
 
 
+def _same_machine_name(edge: dict[str, Any], wanted: str) -> bool:
+    """Exact name, or for a state machine the same name spelled with ``-`` or ``_``.
+
+    A machine is deployed as ``disrupt-next-best-customer`` from a file
+    ``disrupt_next_best_customer.asl.json``; the join already ignores the spelling, so a filter
+    written either way finds the rows of both.
+    """
+    if edge["name"] == wanted:
+        return True
+    return edge["service"] == "states" and bool(wanted) and (
+        re.sub(r"[-_]", "", edge["name"]).lower() == re.sub(r"[-_]", "", wanted).lower()
+    )
+
+
 def _edge_target_filter(
     target_name: str | None, target: str | None,
 ) -> Callable[[dict[str, Any]], bool]:
@@ -1553,11 +1588,15 @@ def _edge_target_filter(
     wanted = target.strip("/") if target else ""
 
     def keep(edge: dict[str, Any]) -> bool:
-        if target_name and edge["name"] != target_name:
+        if target_name and not _same_machine_name(edge, target_name):
             return False
         if wanted:
             full = f"{edge['service']}/{edge['name']}"
-            return full == wanted or full.startswith(wanted + "/")
+            if full == wanted or full.startswith(wanted + "/"):
+                return True
+            return _same_machine_name(edge, wanted.partition("/")[2]) and (
+                edge["service"] == wanted.partition("/")[0] == "states"
+            )
         return True
 
     return keep
@@ -1732,13 +1771,25 @@ def _infra_links(
                 opened.close()
     timings["resolve"] = _now() - phase
     if target_repo:
-        rows = [r for r in rows if r[repo_key] == target_repo]
+        rows = [
+            r for r in rows
+            if r[repo_key] == target_repo or (
+                origin == "awssdk" and r.get("target_kind") == "states"
+                and _same_machine_name({"service": "states", "name": r[repo_key]}, target_repo)
+            )
+        ]
     if target_path:
         wanted = target_path.strip("/")
         rows = [
             r for r in rows
             if (r[path_key] or "") == wanted
             or (r[path_key] or "").startswith(wanted + "/")
+            or (
+                origin == "awssdk" and wanted.startswith("states/")
+                and _same_machine_name(
+                    {"service": "states", "name": r["target_name"]}, wanted[len("states/"):],
+                )
+            )
         ]
     if origin == "awssdk":
         for r in rows:
@@ -1766,7 +1817,14 @@ def _infra_links(
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     reason_counts = nfr.counts_by_reason(rows)
     if status:
-        rows = [r for r in rows if r["status"] == status or r.get("not_found_reason") == status]
+        rows = [
+            r for r in rows
+            if r["status"] == status or r.get("not_found_reason") == status
+            or (
+                status not in al.STATUSES and r["status"] == "unresolved"
+                and r.get("unresolved_reason") == status
+            )
+        ]
     page = paginate(
         rows, max_results, 100, cursor,
         scope=make_scope(
@@ -2083,6 +2141,7 @@ def cross_repo_requests_func(
         origins page the same way: ``max_results`` (at most 100) is the page size, ``limit`` is
         not used, and the cursor is refused when the query or the rows changed.
     """
+    from .. import not_found_reasons as nfr
     from ..registry import Registry
 
     _validate_positive_int(limit, "limit")
@@ -2091,7 +2150,7 @@ def cross_repo_requests_func(
         "terraform", "workflow", "stepfunction", "awssdk", "amqp", "trigger", "external",
         "consumers",
     )
-    accepted_statuses = (*jl.ALL_STATUSES, *eh.NO_TARGET_REASONS)
+    accepted_statuses = (*jl.ALL_STATUSES, *eh.NO_TARGET_REASONS, *nfr.CROSS_REPO_ROW_REASONS)
     if status is not None and origin not in infra_origins and status not in accepted_statuses:
         raise ValueError(f"status must be one of: {', '.join(accepted_statuses)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
@@ -2243,16 +2302,43 @@ def cross_repo_requests_func(
                 )
             return own_index[client_index]
 
+        everywhere: list[fl.ServerIndex] = []
+
+        def everywhere_index() -> fl.ServerIndex:
+            # One index over every repo, built once per registry state (kept across calls while
+            # no graph changes); each client repo searches it with its own endpoints left out.
+            if not everywhere:
+                stamps = tuple(
+                    (str(e["path"]), _repo_label(e), graph_stamp(e)) for e in all_repos
+                )
+
+                def build() -> tuple[fl.ServerIndex, list[tuple[int, str]]]:
+                    pool: list[fl.ServerEndpoint] = []
+                    failed: list[tuple[int, str]] = []
+                    for other in range(len(all_repos)):
+                        _c, srv, why, _src = load(other)
+                        if why:
+                            failed.append((other, why))
+                        else:
+                            pool.extend(srv)
+                    return fl.ServerIndex(pool), failed
+
+                index, failed = SERVER_INDEXES.get(
+                    ("everywhere", stamps), build,
+                    cacheable=lambda built: not built[1] and all(s[2] for s in stamps),
+                )
+                for other in range(len(all_repos)):
+                    load(other)  # kept loads: ``endpoint_index`` counts every repo the join used
+                for other, why in failed:
+                    note_unreadable(all_repos[other], "target", why)
+                everywhere.append(index)
+            return everywhere[0]
+
         def js_index_for(client_index: int) -> fl.ServerIndex:
             if client_index not in js_index:
-                pool: list[fl.ServerEndpoint] = []
-                for other in range(len(all_repos)):
-                    if other == client_index:
-                        continue
-                    found = servers_of(other)
-                    if found:
-                        pool.extend(found)
-                js_index[client_index] = fl.ServerIndex(pool)
+                js_index[client_index] = sri.ExcludingIndex(
+                    everywhere_index(), str(Path(all_repos[client_index]["path"])),
+                )
             return js_index[client_index]
 
         wanted_route = fl.normalize_route(route) if route else None
@@ -2260,28 +2346,49 @@ def cross_repo_requests_func(
         counts_by_reason: dict[str, int] = {}
         origin_counts: dict[str, int] = {}
         multiple_total = 0
-        rows_by_repo: list[list[dict[str, Any]]] = []
-        searched: list[str] = []
-        skipped: list[str] = []
+        rows_by_repo: list[list[dict[str, Any]]]
+        searched: list[str]
+        skipped: list[str]
         total = 0
         budget = cross_repo_budget_seconds()
         deadline = _now() + budget if budget > 0 else None
         started = 0
 
-        for index, entry in enumerate(all_repos):
-            if id(entry) not in selected_ids:
-                continue
+        client_indexes = [i for i, e in enumerate(all_repos) if id(e) in selected_ids]
+        client_entries = [all_repos[i] for i in client_indexes]
+        resume_key = repr((service, route, status, origin, limit))
+        # A repeat of a first-page call that ran out of time starts with the client repos it did
+        # not reach; the ones it did are kept in this process, so the repeat finishes the query.
+        order = [
+            client_indexes[i] for i in _retry_order(
+                client_entries, resume_key, "requests", limit, repos, cursor,
+            )
+        ]
+        # Read the client repos on a few threads first (graph reads wait on the disk); the loop
+        # below then finds them loaded. Repos the budget keeps from being read here are read, or
+        # skipped, by the loop as before.
+        prefetch_until = time.monotonic() + budget if budget > 0 else None
+        parallel_map_budget(
+            load, order, min(cross_repo_workers(), len(order) or 1),
+            lambda: prefetch_until is not None and time.monotonic() >= prefetch_until,
+        )
+        searched_at: dict[int, str] = {}
+        skipped_at: dict[int, str] = {}
+        rows_at: dict[int, list[dict[str, Any]]] = {}
+
+        for index in order:
+            entry = all_repos[index]
             # The first client repo always runs, so a call makes progress; after
             # that no new one is started once the budget is spent, and each is named.
             if started and _out_of_budget(deadline):
-                skipped.append(_repo_label(entry))
+                skipped_at[index] = _repo_label(entry)
                 continue
             started += 1
             clients, _own_servers, why, _src = load(index)
             if why:
                 note_unreadable(entry, "client", why)
                 continue
-            searched.append(_sanitize_name(_repo_label(entry)))
+            searched_at[index] = _sanitize_name(_repo_label(entry))
             seen: set[tuple[Any, ...]] = set()
             repo_rows: list[dict[str, Any]] = []
             for call in sorted(
@@ -2306,7 +2413,7 @@ def cross_repo_requests_func(
                 resolution: Optional[fl.TargetResolution] = None
                 result = fl.LinkResult(fl.UNMATCHABLE, reason)
                 if reason is None and call.origin == "js":
-                    result = fl.link_js_call(
+                    result = sri.link_js_call(
                         call, js_index_for(index), own_index_for(index),
                     )
                 elif reason is None:
@@ -2331,19 +2438,28 @@ def cross_repo_requests_func(
                         if missing and result.status == fl.NO_ROUTE_MATCH:
                             result = fl.LinkResult(fl.NO_TARGET_REPO, "target_unreadable")
                 if reason is None and call.origin == "js":
-                    result = jl.refine_no_route_match(
+                    result = sri.refine_no_route_match(
                         call, result, js_index_for(index), own_index_for(index),
                     )
                 no_target_why = (
                     eh.no_target_reason(call.service, result.reason)
                     if result.status == fl.NO_TARGET_REPO else None
                 )
-                if status is not None and status not in (result.status, no_target_why):
+                no_route_why = nfr.cross_repo_row_reason(
+                    call, result,
+                    own_index_for(index) if call.origin == "js" else None,
+                    js_index_for(index) if call.origin == "js" else None,
+                    load(index)[1] if call.origin != "js" else (),
+                )
+                if status is not None and status not in (
+                    result.status, no_target_why, no_route_why,
+                ):
                     continue
 
                 counts[result.status] = counts.get(result.status, 0) + 1
-                if no_target_why:
-                    counts_by_reason[no_target_why] = counts_by_reason.get(no_target_why, 0) + 1
+                for why in (no_target_why, no_route_why):
+                    if why:
+                        counts_by_reason[why] = counts_by_reason.get(why, 0) + 1
                 origin_counts[call.origin] = origin_counts.get(call.origin, 0) + 1
                 total += 1
                 row: dict[str, Any] = {
@@ -2373,6 +2489,8 @@ def cross_repo_requests_func(
                     row["served_methods"] = jl.served_methods(result.candidates)
                 if result.reason:
                     row["reason"] = result.reason
+                elif no_route_why:
+                    row["reason"] = no_route_why
                 if no_target_why:
                     row["no_target_reason"] = no_target_why
                 if resolution is not None and resolution.how:
@@ -2395,7 +2513,15 @@ def cross_repo_requests_func(
                         row["multiple_candidates"] = True
                         multiple_total += 1
                 repo_rows.append(row)
-            rows_by_repo.append(repo_rows)
+            rows_at[index] = repo_rows
+
+        rows_by_repo = [rows_at[i] for i in sorted(rows_at)]
+        searched = [searched_at[i] for i in sorted(searched_at)]
+        skipped = [skipped_at[i] for i in sorted(skipped_at)]
+        _remember_skipped(
+            client_entries, resume_key, "requests", limit, repos, cursor,
+            [(i, all_repos[i]) for i in sorted(skipped_at)],
+        )
 
         page = paginate_groups(
             rows_by_repo, limit, max_results, _MAX_REQUEST_ROWS, cursor,
@@ -2425,7 +2551,8 @@ def cross_repo_requests_func(
             notes += (
                 f"; time budget of {budget:g}s spent, {skipped_total} client repo(s) not read "
                 "(see skipped_repos; counts and total leave them out; "
-                "raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos')"
+                "raise CRG_CROSS_REPO_BUDGET_SECONDS or narrow 'repos'; repeating the same call "
+                "starts with these repos, as the others are already read)"
             )
         ordered = ", ".join(f"{counts[s]} {s}" for s in jl.ALL_STATUSES if s in counts)
         response: dict[str, Any] = {
@@ -2460,6 +2587,7 @@ def cross_repo_requests_func(
             "skipped_repos": skipped_shown,
             "skipped_repos_total": skipped_total,
             "skipped_repos_truncated": skipped_truncated,
+            "resumes_skipped_on_repeat": bool(skipped_total) and not cursor,
             "endpoint_index": {
                 kind: sum(1 for item in loaded.values() if item[3] == kind)
                 for kind in (_STORED, _COMPUTED)

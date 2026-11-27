@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sqlite3
 from collections import deque
 from pathlib import Path
 from typing import Iterable, Optional
@@ -1012,6 +1013,27 @@ def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _in_stable_order(conn: sqlite3.Connection, flows: list[dict]) -> list[dict]:
+    """Order by criticality, then entry qualified name, so ids ignore detection order."""
+    ids = sorted({f["entry_point_id"] for f in flows if f.get("entry_point_id") is not None})
+    qn: dict[int, str] = {}
+    for i in range(0, len(ids), 450):
+        batch = ids[i:i + 450]
+        rows = conn.execute(
+            f"SELECT id, qualified_name FROM nodes WHERE id IN ({','.join('?' * len(batch))})",  # nosec B608
+            batch,
+        )
+        qn.update({r[0]: r[1] or "" for r in rows})
+    return sorted(
+        flows,
+        key=lambda f: (
+            -float(f.get("criticality") or 0.0),
+            qn.get(f.get("entry_point_id"), ""),
+            str(f.get("name") or ""),
+        ),
+    )
+
+
 def store_flows(store: GraphStore, flows: list[dict]) -> int:
     """Clear existing flows and persist new ones.
 
@@ -1021,6 +1043,7 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
     # multi-statement batch writes (DELETE + INSERT loop) that are
     # tightly coupled to the DB transaction lifecycle.
     conn = store._conn
+    flows = _in_stable_order(conn, flows)
 
     if conn.in_transaction:
         logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
@@ -1031,6 +1054,9 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
     try:
         conn.execute("DELETE FROM flow_memberships")
         conn.execute("DELETE FROM flows")
+        # AUTOINCREMENT keeps counting across a DELETE, so every rebuild would
+        # hand out higher ids. Restart the counter so equal flows get equal ids.
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'flows'")
 
         count = 0
         membership_rows: list[tuple[int, int, int]] = []

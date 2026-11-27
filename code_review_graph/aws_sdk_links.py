@@ -42,6 +42,7 @@ per profile at build time (``resolved_names``) is ``target_source: config`` too.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ from .aws_sdk_calls import DATA_STORE_SERVICES, RESOLUTION, UNRESOLVED_NAME
 from .aws_terraform_wiring import REF_TYPES, WIRING_OPS
 from .config_values import ConfigValues, module_root
 from .graph import GraphStore
+from .infra_references import reduce_arn
 
 STATUSES = ("matched", "not_found", "ambiguous", "unresolved", "declared")
 _TERRAFORM_OPS = frozenset({"declare", "notification", "policy"}) | WIRING_OPS
@@ -62,7 +64,7 @@ _TERRAFORM_OPS = frozenset({"declare", "notification", "policy"}) | WIRING_OPS
 _ROW_EXTRA = (
     "schedule", "event_sources", "wiring", "route", "protocol", "dead_letter_target",
     "arn_getter", "via", "target_source", "config_profile", "config_alternatives",
-    "const_ref", "client_inferred",
+    "const_ref", "client_inferred", "constant",
 )
 #: What a client connection names besides the resource: never a user, password or query.
 _CONNECTION_FIELDS = (
@@ -195,6 +197,61 @@ def read_edges(store: GraphStore) -> list[dict[str, Any]]:
     _resolve_terraform_refs(out)
     _resolve_arn_getters(out)
     return out
+
+
+#: ``operation`` and ``sdk`` of a row that names a state machine without calling it.
+REFERENCE_OPERATION = "arn_reference"
+REFERENCE_SDK = "arn-constant"
+_STATE_MACHINE_CONSTANT = re.compile(r"(?:^|_)STATE_?MACHINE(?:_NAME)?(?:$|_)")
+_STATE_MACHINE_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,80}$")
+
+
+def read_state_machine_references(store: GraphStore) -> list[dict[str, Any]]:
+    """The state machines a module constant names, in the shape :func:`read_edges` gives.
+
+    ``_PROD_NBC_STATE_MACHINE_ARN = "arn:aws:states:...:stateMachine:disrupt-next-best-customer"``
+    is how ``project-disrupt`` names the machine its launchers start: the call itself passes the
+    ARN through a function parameter, so no call edge carries the name. Only a module constant
+    (a ``Variable`` node with ``extra.resource_value``) counts: an ARN of the Step Functions
+    service, or a plain name held by a constant whose own name says it is a state machine.
+    The row says it is a reference (``operation: arn_reference``, ``evidence``), not a call, and
+    carries the constant's name; whether the code starts the machine is not claimed.
+    """
+    out: list[dict[str, Any]] = []
+    for source, name, file_path, line, value in store._conn.execute(
+        "SELECT qualified_name, name, file_path, line_start, "
+        "json_extract(extra, '$.resource_value') FROM nodes "
+        "WHERE kind = 'Variable' AND json_valid(extra) "
+        "AND json_extract(extra, '$.resource_value') IS NOT NULL "
+        "ORDER BY file_path, line_start, id"
+    ).fetchall():
+        if not isinstance(value, str):
+            continue
+        reduced = reduce_arn(value)
+        if reduced is not None:
+            if reduced[:2] != ("states", "state-machine"):
+                continue
+            machine, evidence = reduced[2], "state_machine_arn_constant"
+        elif (
+            _STATE_MACHINE_CONSTANT.search(name) and _STATE_MACHINE_NAME.match(value.strip())
+            and not value.startswith(("arn:", "s3:"))
+        ):
+            machine, evidence = value.strip(), "state_machine_name_constant"
+        else:
+            continue
+        out.append({
+            "file_path": file_path, "line": line, "source": source,
+            "service": "states", "kind": "state-machine", "name": machine,
+            "operation": REFERENCE_OPERATION, "access": "unknown", "sdk": REFERENCE_SDK,
+            "unresolved": False, "placeholder": None,
+            "extra": {"constant": name, "evidence": evidence, "confidence": 0.5},
+        })
+    return out
+
+
+def read_edges_and_references(store: GraphStore) -> list[dict[str, Any]]:
+    """:func:`read_edges` plus the state machines module constants name (``awssdk`` origin)."""
+    return [*read_edges(store), *read_state_machine_references(store)]
 
 
 class _LazyValues:

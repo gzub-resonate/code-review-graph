@@ -320,6 +320,9 @@ class RepoMemo:
 MEMO = RepoMemo()
 #: Whole ``infrastructure`` blocks, keyed by the repos' graph stamps.
 INFRASTRUCTURE_RESULTS = ResultCache()
+#: The all-repo server index of the Feign/JS join, keyed by every repo's graph stamp. Two entries:
+#: one registry state is current, the other covers a call that began before an indexer published.
+SERVER_INDEXES = ResultCache(2)
 
 
 POOL_THREADS_CAP = 4

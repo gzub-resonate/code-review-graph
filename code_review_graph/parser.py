@@ -100,6 +100,7 @@ from .infra_references import (
 from .java_scheduling import schedule_timing
 from .messaging_edges import (
     build_java_const_index,
+    emit_class_binding_edges,
     emit_messaging_edges,
     trigger_edge,
 )
@@ -18974,6 +18975,11 @@ class CodeParser:
             self._emit_temporal_stub_fields(child, name, file_path, edges)
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
+            # RabbitMQ: queue-to-exchange bindings kept in static field initializers
+            emit_class_binding_edges(
+                child, self._qualify(name, file_path, enclosing_class), file_path, edges,
+                self._java_const_index(),
+            )
 
         # Recurse into class body. Descend with the full accumulated scope
         # chain (``Parent.Name``), not the bare leaf name: the class node is

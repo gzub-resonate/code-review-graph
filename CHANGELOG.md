@@ -2,8 +2,46 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `cross_repo_requests_tool` (`feign` and `js`) is much faster on a large registry, with the same
+  rows. The JS variable-route step reads an inverted (segment count, position, segment) index
+  instead of every server route per call; one server index over all repos is built once per
+  registry state and each client repo searches it with its own endpoints left out (it was rebuilt
+  for every client repo); each repo's endpoint read is kept while its graph is unchanged; client
+  repos are read on a few threads. A call that ran out of time (`skipped_repos`) starts with those
+  repos when repeated unchanged, and says so with `resumes_skipped_on_repeat`. Query side only;
+  the index fingerprint does not move.
+
 ### Added
 
+- Terraform `aws_ssm_parameter` and `aws_iam_role` resources with a written (or statically
+  evaluated, `name_evaluated`) name are now `declare` edges, so an `awssdk` call that reads an SSM
+  parameter or assumes a role by name finds its Terraform owner instead of `no_owner_lookup`.
+  The `not_found_reason` of an unmatched SSM or STS call is now `not_declared_in_registry`
+  (or `declared_name_dynamic`); `no_owner_lookup` stays for services with no Terraform owner type.
+  Parse-time change: the index fingerprint moves, so repos need one reindex.
+- `cross_repo_requests_tool origin=awssdk` lists the state machines a module constant names (`_PROD_NBC_STATE_MACHINE_ARN = 'arn:aws:states:...:stateMachine:<name>'`, or a `*_STATE_MACHINE*` name constant) as `operation: arn_reference` rows (`sdk: arn-constant`, `evidence`, `constant`) and joins them to the ASL definition, a Terraform resource or a Terragrunt unit of that name in another repo; a `states` filter written `disrupt_next_best_customer` or `disrupt-next-best-customer` finds both. Resource constants with one leading underscore are now kept at parse time (needs a reindex).
+- `origin=stepfunction` joins a Task target to a Terraform declaration whose name the name evaluator read (a topic named by `module "x" { name = "TechOps" }` or `guardians-pipeline-${var.environment}-fail`), by exact name, so those rows are `matched` instead of `not_found`.
+
+- `origin=amqp` reads queue-to-exchange bindings declared in code, so a queue bound that way
+  joins the publishers of its exchange. New `BINDS` edges (`extra.declaration`, `queue`,
+  `binding_key`, `resolution` `queue_binding_class` or `binding_builder`) come from
+  `new QueueBinding(queue, exchange, key)` (the service-side data class kept in a static list, as
+  in services-api `SalesforceAmqpConfig` and `ProjectAdminAmqpConfig`) and from
+  `BindingBuilder.bind(queue).to(exchange).with(key)`, where the queue, exchange and key are
+  literals, constants (also of another class) or a same-class `@Bean` method returning `new
+  Queue(..)`. A binding is not a listener or a publisher: it adds no listener to the exchange,
+  and a name that only has bindings is not listed. A binding with an unresolved name is not
+  written. Parse time; the index fingerprint moves.
+- `origin=amqp` (exchange list) credits a queue with the publishers of the exchange it is bound
+  to. A queue listed apart used to count only publishers that wrote to it directly, so a queue
+  bound with `@RabbitListener(bindings=@QueueBinding(...))` to an exchange that has publishers
+  showed `unpublished`. Each queue row now has `bound_to` (exchange, binding key, publisher count,
+  `matched_via`) and, when a published routing key reaches the binding key (exact or AMQP topic
+  wildcard), `bound_publisher_count`; its `publisher_count`, `publisher_repos` and `status` include
+  those publishers. A queue with no binding, or bound to a key nobody publishes, stays
+  `unpublished`. Query time; no reindex.
 - Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.
   `requests.get(f"{BASE}/users")` resolves when `BASE` is a module-level string literal in the same
   file, or one imported by name (`from settings import BASE`, `from .conf import BASE`) from a module
@@ -40,6 +78,15 @@
   `not_declared_in_registry`), the reply adds `counts_by_reason` and a summary clause, and
   `status=<reason>` selects those rows. `status` and `counts` are unchanged. `origin=stepfunction`
   with `service=<indexed state machine>` and no rows adds a `hint` pointing at `origin=awssdk`.
+- `cross_repo_requests_tool` reasons (no status changes): every `unresolved` `awssdk` row now has an
+  `unresolved_reason` (new values `name_not_literal`, `constant_not_resolved`,
+  `config_key_not_resolved`, `host_not_literal`); `counts_by_reason` and the summary cover them. A call
+  under a mock, fixture or `msw` folder is `test_double`. `declared_name_dynamic` is documented as a
+  statement about the registry, and the row adds `dynamic_declared_in`. `origin=js` `no_route_match`
+  rows get a `reason` (`no_servers_indexed`, `no_endpoint_under_base_path`,
+  `variable_segments_unmatched`, `route_missing_under_served_base`), a Feign `no_route_match` the
+  caller repo serves gets `served_by_caller_repo`, and `counts_by_reason` also tallies `unmatchable`
+  and these reasons; `status` accepts each. Query-time only.
 - Cold cross-repo calls are faster to warm and stay warm. The cache stamp of a repo's graph
   (`repo_cache.graph_stamp`) no longer uses the mtime and size of the database and its `-wal`: an
   indexer writing, a checkpoint or any reader opening the database moved those and threw away
@@ -75,6 +122,11 @@
   `get_flow_tool` takes `flow_key` as a lookup (`flow_id` still wins, then `flow_key`, then
   `flow_name`). Read from the entry node at query time: no build change, same index fingerprint.
   The minimal affected-flow rows (also in `detect_changes_tool`) gain the two fields.
+- Flow ids are now the same for two builds of the same code. A full rebuild stored flows in
+  detection order and kept counting up (`AUTOINCREMENT` survives `DELETE`), so unchanged flows moved
+  from #1, #3, #4 to #4, #6, #7. `store_flows` now orders by criticality, then the entry node's
+  qualified name, and restarts the counter. Integer ids keep working; `flow_key` stays the durable
+  reference. No schema change. Build time (flows are stored at build): the index fingerprint moves.
 - `pr_blast_radius_tool` pages its `files`: `files_limit` (default 50, at most 200) and `cursor`.
   Before, a pull request of 196 files showed the first 50 with `files_truncated` and no way to
   read the rest. `files_total` gives the full count and `next_cursor` the next page; the cursor is

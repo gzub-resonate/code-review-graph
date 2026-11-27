@@ -27,8 +27,8 @@ from typing import Any
 from .graph import GraphStore
 
 __all__ = [
-    "EXCHANGE_PREFIX", "KIND_EXCHANGE", "KIND_QUEUE", "MATCH_EXACT", "MATCH_PATTERN",
-    "MATCH_UNKNOWN", "edge_kind", "has_amqp_edges", "has_wildcard", "link_kind",
+    "BIND_KIND", "EXCHANGE_PREFIX", "KIND_EXCHANGE", "KIND_QUEUE", "MATCH_EXACT", "MATCH_PATTERN",
+    "MATCH_UNKNOWN", "ROLE_BINDING", "edge_kind", "has_amqp_edges", "has_wildcard", "link_kind",
     "read_channel_edges", "topic_matches",
 ]
 
@@ -109,6 +109,10 @@ def link_kind(binding_key: Any, routing_key: Any) -> str | None:
 # A publisher edge to an exchange is ``PUBLISHES`` from the Spring event parser and ``PRODUCES``
 # from the messaging parser (``convertAndSend``, ``basic_publish``); both mean "publishes here".
 PUBLISH_KINDS = ("PUBLISHES", "PRODUCES")
+#: A declared queue-to-exchange binding (``new QueueBinding(...)``, ``BindingBuilder``): not a
+#: listener, not a publisher. Its row has ``role`` ``binding``.
+BIND_KIND = "BINDS"
+ROLE_BINDING = "binding"
 
 
 #: ``kind`` of a row whose target is a queue name, not an exchange.
@@ -134,7 +138,7 @@ def has_amqp_edges(store: GraphStore) -> bool:
     """Whether the graph has any edge that ends at an AMQP exchange or queue."""
     row = store._conn.execute(
         "SELECT 1 FROM edges WHERE target_qualified >= ? AND target_qualified < ? "
-        "AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES') LIMIT 1",
+        "AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES', 'BINDS') LIMIT 1",
         (EXCHANGE_PREFIX, EXCHANGE_PREFIX[:-1] + ";"),
     ).fetchone()
     return row is not None
@@ -147,15 +151,17 @@ def read_channel_edges(
 
     Each row has ``role`` (``publisher`` or ``listener``), ``source`` (qualified name),
     ``file_path``, ``line``, ``routing_key`` (publishers) or ``binding_key`` (listeners) and,
-    for listeners, ``queue``. A listener that has both a ``CONSUMES`` and a ``HANDLES`` edge at
-    the same place is one row. Values are the raw strings from the graph: sanitise them before
-    they leave the process.
+    for listeners, ``queue``. A declared binding has ``role`` ``binding`` with the same
+    ``binding_key`` and ``queue``; it is neither a publisher nor a listener. A listener that
+    has both a ``CONSUMES`` and a ``HANDLES`` edge at the same place is one row. Values are the
+    raw strings from the graph: sanitise them before they leave the process.
     """
     target = exchange if exchange.startswith(EXCHANGE_PREFIX) else EXCHANGE_PREFIX + exchange
     seen: set[tuple[Any, ...]] = set()
     for source, kind, file_path, line, extra in store._conn.execute(
         "SELECT source_qualified, kind, file_path, line, extra FROM edges "
-        "WHERE target_qualified = ? AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES') "
+        "WHERE target_qualified = ? "
+        "AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES', 'BINDS') "
         "ORDER BY file_path, line, id",
         (target,),
     ):
@@ -165,13 +171,20 @@ def read_channel_edges(
             info = {}
         if not isinstance(info, dict):
             info = {}
-        role = "publisher" if kind in PUBLISH_KINDS else "listener"
+        role = (
+            ROLE_BINDING if kind == BIND_KIND
+            else "publisher" if kind in PUBLISH_KINDS else "listener"
+        )
         row: dict[str, Any] = {
             "role": role, "source": source, "file_path": file_path, "line": line,
         }
         row_kind = edge_kind(target, info)
         if role == "publisher":
             row["routing_key"] = info.get("routing_key")
+        elif role == ROLE_BINDING:
+            row["binding_key"] = info.get("binding_key")
+            row["queue"] = info.get("queue")
+            row_kind = KIND_EXCHANGE
         else:
             row["binding_key"] = info.get("binding_key")
             row["queue"] = info.get("queue")

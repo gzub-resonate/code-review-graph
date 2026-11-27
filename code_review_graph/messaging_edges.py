@@ -1105,6 +1105,158 @@ def _java_call_edges(method_node, consts, var_types, source, file_path, out) -> 
     return count
 
 
+# -- Java binding declarations ------------------------------------------------------------------
+
+#: Edge kind of a declared queue-to-exchange binding. It is not a listener or a publisher, so it
+#: never makes an exchange look listened to; the AMQP list reads it to tie a queue to the
+#: publishers of the exchange it is bound to.
+BIND_KIND = "BINDS"
+_QUEUE_CTORS = frozenset({"Queue"})
+_EXCHANGE_CTORS = frozenset({
+    "TopicExchange", "DirectExchange", "FanoutExchange", "HeadersExchange", "CustomExchange",
+})
+
+
+def _ctor_name(node) -> Optional[str]:
+    """Simple type name of ``new Type(...)``."""
+    if node is None or node.type != "object_creation_expression":
+        return None
+    type_node = node.child_by_field_name("type")
+    if type_node is None:
+        return None
+    name = _text(type_node).split("<", 1)[0].rsplit(".", 1)[-1].strip()
+    return name or None
+
+
+def _declared_name(node, consts, scope, ctors: frozenset[str]) -> Dest:
+    """Name of a queue or exchange argument: a constant, ``new Queue(NAME)`` or a call to a
+    same-class bean method whose only ``return`` is such a ``new``."""
+    if node is None:
+        return Dest(None, expr="<missing>")
+    if node.type == "object_creation_expression":
+        args = _args(node)
+        if _ctor_name(node) in ctors and args:
+            return _java_dest(args[0], consts, _plain_name)
+        return Dest(None, expr=" ".join(_text(node).split())[:_MAX_EXPR])
+    if node.type == "method_invocation" and scope is not None:
+        target = node.child_by_field_name("object")
+        name_node = node.child_by_field_name("name")
+        if (target is None or target.type == "this") and name_node is not None and not _args(node):
+            wanted = _text(name_node)
+            returns: list = []
+            for method in _descendants(scope, "method_declaration"):
+                method_name = method.child_by_field_name("name")
+                params = method.child_by_field_name("parameters")
+                if method_name is None or _text(method_name) != wanted:
+                    continue
+                if params is not None and params.named_child_count:
+                    continue
+                returns.extend(
+                    r.named_children[0] for r in _descendants(method, "return_statement")
+                    if r.named_children
+                )
+            if len(returns) == 1 and _ctor_name(returns[0]) in ctors:
+                inner = _args(returns[0])
+                if inner:
+                    return _java_dest(inner[0], consts, _plain_name)
+    return _java_dest(node, consts, _plain_name)
+
+
+def _bind_edge(out, source, file_path, line, queue: Dest, exchange: Dest, key: Dest,
+               resolution: str) -> int:
+    """One ``BINDS`` edge, only when queue, exchange and key are all named by the source."""
+    if queue.name is None or not queue.name or exchange.name is None or not exchange.name:
+        return 0
+    if key.name is None:
+        return 0
+    from dataclasses import replace
+
+    holder: list = []
+    _edge(
+        holder, service="rabbitmq", direction="listen", dest=exchange, source=source,
+        file_path=file_path, line=line, resolution=resolution, field="exchange",
+        extra_fields={"binding_key": key.name, "queue": queue.name, "declaration": True},
+    )
+    out.extend(replace(edge, kind=BIND_KIND) for edge in holder)
+    return len(holder)
+
+
+def _java_binding_declarations(root, consts, scope, source, file_path, out) -> int:
+    """``BINDS`` edges of every ``new QueueBinding(queue, exchange, key)`` and
+    ``BindingBuilder.bind(queue).to(exchange).with(key)`` under *root*.
+
+    ``QueueBinding`` here is the data class a service keeps in a list handed to a declarables
+    bean (not the ``@QueueBinding`` annotation, which is read with its ``@RabbitListener``).
+    """
+    count = 0
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        stack.extend(node.children)
+        if node.type == "object_creation_expression" and _ctor_name(node) == "QueueBinding":
+            args = _args(node)
+            if len(args) >= 3:
+                count += _bind_edge(
+                    out, source, file_path, node.start_point[0] + 1,
+                    _declared_name(args[0], consts, scope, _QUEUE_CTORS),
+                    _declared_name(args[1], consts, scope, _EXCHANGE_CTORS),
+                    _java_dest(args[2], consts, _plain_name), "queue_binding_class",
+                )
+        elif node.type == "method_invocation":
+            name = node.child_by_field_name("name")
+            if name is None or _text(name) != "with" or len(_args(node)) != 1:
+                continue
+            to_call = node.child_by_field_name("object")
+            if to_call is None or to_call.type != "method_invocation":
+                continue
+            to_name = to_call.child_by_field_name("name")
+            bind_call = to_call.child_by_field_name("object")
+            if to_name is None or _text(to_name) != "to" or len(_args(to_call)) != 1:
+                continue
+            if bind_call is None or bind_call.type != "method_invocation":
+                continue
+            bind_name = bind_call.child_by_field_name("name")
+            builder = bind_call.child_by_field_name("object")
+            if (
+                bind_name is None or _text(bind_name) != "bind" or len(_args(bind_call)) != 1
+                or builder is None or _text(builder) != "BindingBuilder"
+            ):
+                continue
+            count += _bind_edge(
+                out, source, file_path, node.start_point[0] + 1,
+                _declared_name(_args(bind_call)[0], consts, scope, _QUEUE_CTORS),
+                _declared_name(_args(to_call)[0], consts, scope, _EXCHANGE_CTORS),
+                _java_dest(_args(node)[0], consts, _plain_name), "binding_builder",
+            )
+    return count
+
+
+def emit_class_binding_edges(
+    class_node, source: str, file_path: str, edges: list,
+    const_index: Optional[JavaConstIndex] = None,
+) -> int:
+    """``BINDS`` edges from the field initializers of one class (``Arrays.asList(new
+    QueueBinding(...))`` in a ``static`` field). Method bodies are read with their method."""
+    body = class_node.child_by_field_name("body")
+    if body is None:
+        return 0
+    fields = [m for m in body.children if m.type == "field_declaration"]
+    if not fields:
+        return 0
+    view: Optional[dict] = None
+    if const_index:
+        root = class_node
+        while root.parent is not None:
+            root = root.parent
+        view = _ConstView(const_index, root)
+    consts = _java_collect_consts(class_node, view)
+    out: list = []
+    for field in fields:
+        _java_binding_declarations(field, consts, class_node, source, file_path, out)
+    edges.extend(out)
+    return len(out)
+
+
 # -- Python -------------------------------------------------------------------------------------
 
 _PY_SERVICES = frozenset({"sqs", "sns"})
@@ -1468,6 +1620,8 @@ def emit_messaging_edges(
         var_types = _java_var_types(node)
         listeners, listener_service = _java_listener_edges(node, consts, source, file_path, out)
         calls = _java_call_edges(node, consts, var_types, source, file_path, out)
+        bind_edges: list = []
+        _java_binding_declarations(node, consts, scope, source, file_path, bind_edges)
         if listener_service:
             method_extra["message_listener"] = listener_service
         total = listeners + calls
@@ -1480,6 +1634,9 @@ def emit_messaging_edges(
         if triggers:
             method_extra["queue_trigger"] = True
         out.extend(triggers)
+        if bind_edges:
+            # A declaration is not a trigger and not a messaging edge of the method.
+            edges.extend(bind_edges)
     elif language == "python":
         if node.type != "function_definition":
             return 0
