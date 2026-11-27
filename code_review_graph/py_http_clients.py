@@ -23,7 +23,9 @@ What is stored, and what never is:
 
 from __future__ import annotations
 
+import ast
 import re
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -118,13 +120,117 @@ class _Imports:
         return bool(self.modules or self.functions or self.classes)
 
 
+_MAX_MODULE_BYTES = 200_000
+_MAX_PARENT_LEVELS = 4
+
+
+def _module_file(base: Path, module: str, level: int) -> Optional[Path]:
+    """The ``.py`` file a ``from <module> import ...`` names, searched near *base* only.
+
+    A relative import starts at the file's own directory (one dot) or above it. An absolute one
+    is tried in the file's directory and in at most four parents (a package root or ``src``).
+    Nothing outside those directories is read.
+    """
+    parts = [p for p in module.split(".") if p]
+    if level:
+        ups = level - 1
+        if ups > len(base.parents):
+            return None
+        roots = [base.parents[ups - 1] if ups else base]
+    else:
+        roots = [base, *base.parents[:_MAX_PARENT_LEVELS]]
+    for root in roots:
+        for path in (root.joinpath(*parts).with_suffix(".py"),
+                     root.joinpath(*parts, "__init__.py")):
+            if parts and path.is_file():
+                return path
+    return None
+
+
+def _literal_constants(path: Path) -> dict[str, str]:
+    """Names bound exactly once at module level to a plain string literal in *path*."""
+    try:
+        if path.stat().st_size > _MAX_MODULE_BYTES:
+            return {}
+        tree = ast.parse(path.read_bytes())
+    except (OSError, SyntaxError, ValueError, MemoryError, RecursionError):
+        return {}
+    seen: dict[str, Optional[str]] = {}
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        value = stmt.value
+        text = value.value if isinstance(value, ast.Constant) \
+            and isinstance(value.value, str) else None
+        seen[target.id] = text if text is not None and target.id not in seen else None
+    return {k: v for k, v in seen.items() if v is not None}
+
+
+def imported_constants(root: Any, src: bytes, file_path: str) -> dict[str, str]:
+    """String constants this module imports by name from a module of the same repository.
+
+    Only ``from <module> import NAME [as ALIAS]`` of a module file found next to or above this
+    file is read, and only a name bound once at module level to a string literal is kept.
+    Environment variables, settings attributes and anything computed stay unresolved.
+    """
+    base = Path(file_path).parent
+    out: dict[str, str] = {}
+    for node in _walk(root):
+        if node.type != "import_from_statement":
+            continue
+        module = node.child_by_field_name("module_name")
+        if module is None:
+            continue
+        text = _text(module, src)
+        level = len(text) - len(text.lstrip("."))
+        name = text.lstrip(".")
+        if name in _MODULES:
+            continue
+        path = _module_file(base, name, level) if name else None
+        if path is None:
+            continue
+        consts = _literal_constants(path)
+        for child in node.named_children:
+            if child == module:
+                continue
+            real, alias = _Imports._dotted(child, src)
+            if real in consts:
+                out[alias or real] = consts[real]
+    return out
+
+
 class _Finder:
-    def __init__(self, root: Any, src: bytes) -> None:
+    def __init__(self, root: Any, src: bytes, file_path: str = "") -> None:
         self.root, self.src = root, src
         self.imports = _Imports(root, src)
         self.py = _Python(src, root, None)  # type: ignore[arg-type]
+        if file_path and b"import" in src:
+            for key, value in imported_constants(root, src, file_path).items():
+                self.py.consts.setdefault(key, value)
         #: session variable text -> (library, literal base host or None)
         self.sessions: dict[str, tuple[str, Optional[str]]] = {}
+
+    def template_of(self, node: Any) -> Optional[str]:
+        """The URL template of *node*; an f-string expands the constants it interpolates."""
+        if node.type == "string" and any(c.type == "interpolation" for c in node.children):
+            start = next((c for c in node.children if c.type == "string_start"), None)
+            if start is not None and "b" not in _text(start, self.src).lower():
+                parts: list[str] = []
+                for child in node.children:
+                    if child.type == "string_content":
+                        parts.append(_text(child, self.src))
+                    elif child.type == "interpolation":
+                        inner = child.child_by_field_name("expression")
+                        const = self.py.consts.get(_text(inner, self.src)) \
+                            if inner is not None and inner.type == "identifier" else None
+                        parts.append(const if const is not None else _DYN)
+                    elif child.type == "escape_sequence":
+                        parts.append(_DYN)
+                return "".join(parts)
+        return self.py.val(node).template
 
     # sessions
     def _session_of(self, call: Any) -> Optional[tuple[str, Optional[str]]]:
@@ -272,7 +378,7 @@ class _Finder:
             url_node = kws.get("url") or (pos[0] if pos else None)
         if url_node is None:
             return method, base, None, False
-        template = self.py.val(url_node).template
+        template = self.template_of(url_node)
         if template is not None and _DYN not in template.strip():
             host = host_of(template)
             if host is not None:
@@ -301,7 +407,7 @@ def extract(
         return 0
     if not any(marker in source for marker in _QUICK):
         return 0
-    finder = _Finder(root, source)
+    finder = _Finder(root, source, file_path)
     if not finder.imports.any():
         return 0
     finder.collect_sessions()

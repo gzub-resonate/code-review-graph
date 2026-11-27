@@ -4,6 +4,27 @@
 
 ### Added
 
+- Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.
+  `requests.get(f"{BASE}/users")` resolves when `BASE` is a module-level string literal in the same
+  file, or one imported by name (`from settings import BASE`, `from .conf import BASE`) from a module
+  file next to or up to four directories above the caller. A name bound twice, an environment
+  variable (`os.getenv("X", "default")`), a settings attribute and anything computed stay
+  `host_unresolved`. Parse time; the index fingerprint moves.
+- `origin=awssdk` reads more Python names, so more rows are `matched`. A plain function whose
+  every `return` is one literal-service boto3 client (`def _client(): return boto3.client("s3")`)
+  now binds its call sites in the same file (`_client().head_object(...)`, `self._s3()`), when the
+  call passes no argument or only literals. `NAME = {"key": "literal"}` tables resolve a
+  `NAME["key"]` / `NAME.get("key")` lookup with a literal key (a table written to, or a key with a
+  non-literal value, stays unresolved). Class attributes read as `self.X` / `Cls.X` resolve when
+  the class body assigns one literal. Function parameters and environment values stay unresolved.
+  Parse-time, so the index fingerprint moves.
+- Terraform names the parser could not read are now resolved from the files alone
+  (`terraform_names.py`, using the `terragrunt_static` evaluator in a Terraform mode): names
+  built from `locals`, `variable` defaults, interpolation, `lower`/`upper` and ternaries on known
+  strings, with the `inputs` the deploying Terragrunt unit passes; and names set inside a wrapper
+  module called with a local `source` (an SNS topic or bucket module). A name that depends on an
+  unknown value is not written. Declare edges gain `terraform_module` and `name_evaluated`.
+  This moves the index fingerprint.
 - Capped lists in replies now state their true size, additively. `cross_repo_requests_tool`
   `origin="external"` rows gain `files_total`, `files_truncated`, `samples_total`,
   `samples_truncated` and (with `hosts_seen`) `hosts_seen_total`/`hosts_seen_truncated`; the reply
@@ -209,6 +230,12 @@
   and the index fingerprint is unchanged.
 
 ### Fixed
+
+- Terragrunt `include` precedence for `inputs` now follows the documented rules: when two
+  `include` blocks set the same input the later one wins (it was the earlier one), and an
+  include with `merge_strategy = "no_merge"` contributes no inputs. The unit's own value still
+  wins, `deep` still combines maps key by key, and `expose` does not change what is merged. This
+  changes the index build path (`terragrunt_static.py`), so the index fingerprint moves.
 
 - `origin="awssdk"` no longer makes a data-store row from an AWS endpoint host that is only written
   somewhere: in a comment, a Python docstring, a log or print call, a sample config (`*.example`,
