@@ -2,6 +2,10 @@
 
 The line splits the wait for a worker slot (``queue_ms``) from the tool body (``work_ms``) and the
 provenance stamp (``provenance_ms``), so a slow call can be told apart from a queued one.
+
+The lines are read from stderr, not from pytest's log capture: ``serve`` starts without the CLI's
+``logging.basicConfig``, so in production nothing but the timing logger's own handler writes them,
+and a test that reads captured records would pass while the container log stayed empty.
 """
 
 from __future__ import annotations
@@ -15,58 +19,78 @@ import pytest
 from code_review_graph import main
 
 
-def fields(record: logging.LogRecord) -> dict[str, str]:
-    return dict(re.findall(r"(\w+)=(\S+)", record.getMessage()))
+def stderr_lines(capsys, marker):
+    return [line for line in capsys.readouterr().err.splitlines() if marker in line]
+
+
+def fields(line: str) -> dict[str, str]:
+    return dict(re.findall(r"(\w+)=(\S+)", line))
 
 
 async def run(work, **kwargs):
     return await main._offload("demo_tool", work, None, provenance=False, **kwargs)
 
 
-async def test_a_call_logs_its_stages(caplog):
-    caplog.set_level(logging.INFO, logger=main.logger.name)
+async def test_a_call_logs_its_stages(capsys):
     await run(lambda: (time.sleep(0.05), {"status": "ok"})[1])
-    (record,) = [r for r in caplog.records if "tool timing" in r.getMessage()]
-    seen = fields(record)
+    (line,) = stderr_lines(capsys, "tool timing")
+    seen = fields(line)
     assert seen["tool"] == "demo_tool"
     assert seen["status"] == "ok"
     assert int(seen["work_ms"]) >= 50
     assert int(seen["total_ms"]) >= int(seen["work_ms"])
-    assert record.levelno == logging.INFO
+    assert line.startswith("INFO: ")
 
 
-async def test_an_error_reply_is_logged_as_an_error(caplog):
-    caplog.set_level(logging.INFO, logger=main.logger.name)
+async def test_the_line_is_written_when_the_process_never_configured_logging(capsys, monkeypatch):
+    # What `serve` looks like: no root handler and the root left at WARNING.
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    await run(lambda: {"status": "ok"})
+    assert len(stderr_lines(capsys, "tool timing")) == 1
+
+
+async def test_the_line_goes_to_stderr_and_not_to_stdout(capsys):
+    await run(lambda: {"status": "ok"})
+    captured = capsys.readouterr()
+    assert "tool timing" in captured.err
+    assert "tool timing" not in captured.out
+
+
+async def test_an_error_reply_is_logged_as_an_error(capsys):
     await run(lambda: {"status": "error", "error": "boom"})
-    (record,) = [r for r in caplog.records if "tool timing" in r.getMessage()]
-    assert fields(record)["status"] == "error"
+    (line,) = stderr_lines(capsys, "tool timing")
+    assert fields(line)["status"] == "error"
 
 
-async def test_a_call_that_raises_is_still_timed(caplog):
-    caplog.set_level(logging.INFO, logger=main.logger.name)
-
+async def test_a_call_that_raises_is_still_timed(capsys):
     def fail() -> dict:
         raise RuntimeError("nope")
 
     with pytest.raises(RuntimeError):
         await run(fail)
-    (record,) = [r for r in caplog.records if "tool timing" in r.getMessage()]
-    assert fields(record)["status"] == "raised"
+    (line,) = stderr_lines(capsys, "tool timing")
+    assert fields(line)["status"] == "raised"
 
 
-async def test_a_call_over_the_slow_limit_is_a_warning(caplog, monkeypatch):
+async def test_a_call_over_the_slow_limit_is_a_warning(capsys, monkeypatch):
     monkeypatch.setenv("CRG_SLOW_TOOL_SECONDS", "1")
-    caplog.set_level(logging.INFO, logger=main.logger.name)
     await run(lambda: (time.sleep(1.05), {"status": "ok"})[1])
-    (record,) = [r for r in caplog.records if "slow tool" in r.getMessage()]
-    assert record.levelno == logging.WARNING
-    assert int(fields(record)["total_ms"]) >= 1000
+    (line,) = stderr_lines(capsys, "slow tool")
+    assert line.startswith("WARNING: ")
+    assert int(fields(line)["total_ms"]) >= 1000
 
 
-async def test_a_timed_out_call_is_logged_as_a_timeout(caplog, monkeypatch):
+async def test_a_timed_out_call_is_logged_as_a_timeout(capsys, monkeypatch):
     monkeypatch.setenv("CRG_TOOL_TIMEOUT", "1")
-    caplog.set_level(logging.INFO, logger=main.logger.name)
     reply = await run(lambda: (time.sleep(1.5), {"status": "ok"})[1])
     assert reply["status"] == "error"
-    (record,) = [r for r in caplog.records if "tool timing" in r.getMessage()]
-    assert fields(record)["status"] == "timeout"
+    (line,) = stderr_lines(capsys, "tool timing")
+    assert fields(line)["status"] == "timeout"
+
+
+def test_the_timing_logger_does_not_depend_on_the_root_logger():
+    assert main.timing_logger.handlers
+    assert main.timing_logger.propagate is False
+    assert main.timing_logger.level == logging.INFO

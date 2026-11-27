@@ -260,6 +260,32 @@ def _log_tool_error(tool_name: str, root: str | None, result: Any) -> None:
         )
 
 
+class _StderrHandler(logging.StreamHandler):
+    """A stream handler that writes to whatever ``sys.stderr`` is at the time of each record."""
+
+    @property
+    def stream(self):
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, value) -> None:
+        pass
+
+
+# ``serve`` runs the server without the CLI's ``logging.basicConfig``, so the root logger has no
+# handler and level WARNING there: an INFO line of ``code_review_graph.*`` never reaches the
+# container log. The timing lines are the only INFO lines operators need, so their logger carries
+# its own stderr handler and does not depend on how the process configured logging. (stderr, not
+# stdout, so the stdio transport's protocol stream is untouched.)
+timing_logger = logging.getLogger("code_review_graph.timing")
+timing_logger.setLevel(logging.INFO)
+timing_logger.propagate = False
+if not timing_logger.handlers:
+    _timing_handler = _StderrHandler()
+    _timing_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    timing_logger.addHandler(_timing_handler)
+
+
 def _log_tool_timing(
     tool_name: str, root: str | None, started: float, stages: dict[str, float], status: str,
     caches: dict[str, tuple[int, int, int]] | None = None,
@@ -281,7 +307,7 @@ def _log_tool_timing(
     end = stages.get("end", now)
     total = now - started
     slow = total >= env_int("CRG_SLOW_TOOL_SECONDS", 120)
-    logger.log(
+    timing_logger.log(
         logging.WARNING if slow else logging.INFO,
         "%s tool=%s repo_root=%r status=%s total_ms=%d queue_ms=%d work_ms=%d provenance_ms=%d "
         "caches=%s",
