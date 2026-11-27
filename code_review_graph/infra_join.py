@@ -33,8 +33,9 @@ from . import aws_sdk_links as al
 from . import service_aliases as sa
 from .errors import GraphStoreError
 from .graph import GraphStore, _sanitize_name
-from .repo_cache import MEMO, parallel_map
+from .repo_cache import MEMO, SKIPPED, parallel_map, parallel_map_budget
 from .terraform_links import open_store
+from .xrepo_budget import BudgetSpent
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +111,30 @@ class _Declarations:
             self._found[index] = self._read(index)
         return self._found[index]
 
-    def prefetch(self, indexes: Sequence[int], workers: int) -> None:
-        """Read the declarations of *indexes* on up to *workers* threads, ahead of ``get``."""
+    def prefetch(
+        self, indexes: Sequence[int], workers: int,
+        out_of_budget: Any = None,
+    ) -> None:
+        """Read the declarations of *indexes* on up to *workers* threads, ahead of ``get``.
+
+        With *out_of_budget* the reads stop at a spent budget (what was read stays kept) and
+        ``BudgetSpent`` is raised for the rest.
+        """
         todo = [i for i in indexes if i not in self._found]
-        for index, found in zip(todo, parallel_map(self._read, todo, workers)):
-            self._found[index] = found
+        if out_of_budget is None:
+            for index, found in zip(todo, parallel_map(self._read, todo, workers)):
+                self._found[index] = found
+            return
+        left = False
+        for index, found in zip(
+            todo, parallel_map_budget(self._read, todo, workers, out_of_budget),
+        ):
+            if found is SKIPPED:
+                left = True
+            else:
+                self._found[index] = found
+        if left:
+            raise BudgetSpent
 
     def _read(self, index: int) -> list[Declaration]:
         entry = dict(self.repos[index])
@@ -377,20 +397,40 @@ def build_infrastructure(
     ``repos_not_checked_total``), so a call with ``repos`` narrowed to them covers the rest.
     """
     started = time.monotonic()
+
+    def out_of_budget() -> bool:
+        return bool(budget) and time.monotonic() - started > budget
+
     decls = _Declarations(repos)
     code_names: dict[int, dict[tuple[str, str], tuple[str, list[str]]]] = {}
     if selected:
         # Every summary looks at every repo's facts, so read them all ahead, on *workers*
         # threads. A repo's declarations matter only against the names some selected repo's
         # code uses (and to the repo itself), so they are read for every repo only then.
-        everything = range(len(repos))
-        facts.prefetch(everything, workers)
-        todo = list(selected[:MAX_REPOS])
-        for index, names in zip(todo, parallel_map(
-            lambda i: _code_names_of(repos[i]), todo, workers,
-        )):
-            code_names[index] = names
-        decls.prefetch(everything if any(code_names.values()) else todo, workers)
+        # These reads stop at the budget too: what was read is kept, and the block then says
+        # no repo was checked (a repeat of the call goes on from what is kept).
+        try:
+            everything = range(len(repos))
+            facts.prefetch(everything, workers, out_of_budget if budget else None)
+            todo = list(selected[:MAX_REPOS])
+            found_names = parallel_map_budget(
+                lambda i: _code_names_of(repos[i]), todo, workers, out_of_budget,
+            )
+            if any(found is SKIPPED for found in found_names):
+                raise BudgetSpent
+            for index, names in zip(todo, found_names):
+                code_names[index] = names
+            decls.prefetch(
+                everything if any(code_names.values()) else todo, workers,
+                out_of_budget if budget else None,
+            )
+        except BudgetSpent:
+            left_all = [_clean(sa.repo_names(repos[i])[0]) for i in selected]
+            return {
+                "repos": {}, "repos_total": 0, "repos_checked": 0, "truncated": True,
+                "repos_not_checked": left_all[:MAX_NOT_CHECKED_NAMES],
+                "repos_not_checked_total": len(left_all),
+            }
     summaries: dict[str, Any] = {}
     checked = 0
     truncated = False

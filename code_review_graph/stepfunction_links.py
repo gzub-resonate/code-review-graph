@@ -190,14 +190,22 @@ class Definitions:
         """Whether this repo's definitions are already read, so ``defines`` needs no store."""
         return str(repo_path) in self._by_repo
 
-    def prefetch(self, entries: list[dict[str, Any]], workers: int) -> None:
-        """Read the definitions of *entries* on up to *workers* threads, kept between calls."""
+    def prefetch(
+        self, entries: list[dict[str, Any]], workers: int,
+        out_of_budget: Any = None,
+    ) -> None:
+        """Read the definitions of *entries* on up to *workers* threads, kept between calls.
+
+        With *out_of_budget* the reads stop at a spent budget (what was read stays kept) and
+        ``BudgetSpent`` is raised for the repos not read.
+        """
         import logging
         import sqlite3
 
         from .errors import GraphStoreError
-        from .repo_cache import MEMO, parallel_map
+        from .repo_cache import MEMO, SKIPPED, parallel_map, parallel_map_budget
         from .terraform_links import open_store
+        from .xrepo_budget import BudgetSpent
 
         todo = [e for e in entries if str(Path(e["path"])) not in self._by_repo]
 
@@ -222,8 +230,18 @@ class Definitions:
 
             return MEMO.get("definitions", entry, compute, cacheable=lambda _v: not failed)
 
-        for entry, found in zip(todo, parallel_map(load, todo, workers)):
-            self._by_repo[str(Path(entry["path"]))] = found
+        if out_of_budget is None:
+            for entry, found in zip(todo, parallel_map(load, todo, workers)):
+                self._by_repo[str(Path(entry["path"]))] = found
+            return
+        left = False
+        for entry, found in zip(todo, parallel_map_budget(load, todo, workers, out_of_budget)):
+            if found is SKIPPED:
+                left = True
+            else:
+                self._by_repo[str(Path(entry["path"]))] = found
+        if left:
+            raise BudgetSpent
 
     def how(self, store: GraphStore | None, repo_path: Path, target: Any) -> Any:
         key = str(repo_path)
