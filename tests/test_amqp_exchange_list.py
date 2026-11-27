@@ -214,8 +214,8 @@ def test_a_spent_budget_marks_the_service_status_unconfirmed(world, monkeypatch)
 
 @pytest.fixture
 def bound_queue_world(tmp_path, registry):  # noqa: F811
-    """Imitates services-api-attribute: queues bound by ``@QueueBinding`` to ``api.e.topic.vertical``
-    and services-api: ``api.q.projectadmin.account.created`` bound to ``api.e.topic.account``."""
+    """Imitates services-api-attribute: queues bound by ``@QueueBinding`` to the exchange
+    ``api.e.topic.vertical`` (``VerticalAmqpService``, ``PermutationWorkAmqpService``)."""
     repo = _build_repo(tmp_path / "attr", exchange_edges=False)
     _add_edges(repo, [
         ("HANDLES", "svc.refresh", {"queue": "svc.refresh"}),
