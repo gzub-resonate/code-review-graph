@@ -27,6 +27,9 @@ MAX_VALUES = 20
 MAX_URL_CHARS = 300
 
 _CONSTANT_NAME = re.compile(r"[A-Z][A-Z0-9_]{1,80}")
+#: A resource constant may be module-private (``_PROD_NBC_STATE_MACHINE_ARN`` in
+#: ``project-disrupt``'s ``_env.py``): one leading underscore is allowed there, nowhere else.
+_RESOURCE_CONSTANT_NAME = re.compile(r"_?[A-Z][A-Z0-9_]{1,80}")
 _SECRET_NAME = re.compile(
     r"SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|CREDENTIAL|PRIVATE|WEBHOOK|HOOK|SIGNED|SIGNATURE|SAS",
     re.I,
@@ -285,7 +288,7 @@ def python_resource_constants(
         name = _text(left, source)
         seen[name] = seen.get(name, 0) + 1
         value = _string_value(right, source) if right.type == "string" else None
-        if value is None or not _CONSTANT_NAME.fullmatch(name):
+        if value is None or not _RESOURCE_CONSTANT_NAME.fullmatch(name):
             continue
         value = value.strip()
         stored = storable_config_value(name, value)

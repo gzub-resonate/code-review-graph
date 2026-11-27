@@ -15,6 +15,9 @@ what each registered repo defines, by the rules the in-repo links use:
   and ``_`` (``aws_lambda_function``, ``aws_ecs_task_definition``, ``aws_sns_topic``,
   ``aws_sfn_state_machine`` and the other types in :data:`RESOURCE_TYPES`), the naming
   convention of ``asl_name_convention``;
+* a resource whose name the Terraform evaluator read (a literal, an interpolation, or the
+  ``name`` a module call passes down): the name itself, exact (``module "techops_sns_topic"
+  { name = "TechOps" }`` declares the topic ``TechOps``);
 * for a state machine, a Step Functions definition file of that name (same spelling rule),
   or a Step Functions Terragrunt unit whose ``name`` input (the deployed name, which need not
   be the file's: ``flash-1-train-cmd-prep`` deploys ``train_cmd_prep.asl.json``) is that name,
@@ -107,6 +110,28 @@ def read_target_edges(store: GraphStore) -> list[dict[str, Any]]:
     return out
 
 
+_DECLARED_SQL = (
+    "SELECT target_qualified, json_extract(extra, '$.target_kind') FROM edges "
+    "WHERE kind = 'REFERENCES' AND json_valid(extra) "
+    "AND json_extract(extra, '$.resolution') = 'aws_sdk' "
+    "AND json_extract(extra, '$.sdk') = 'terraform' "
+    "AND json_extract(extra, '$.operation') = 'declare' "
+    "AND COALESCE(json_extract(extra, '$.unresolved'), 0) = 0 "
+    "AND target_qualified LIKE 'external:aws-%'"
+)
+
+
+def _declared_names(store: GraphStore) -> list[tuple[tuple[str, str], str]]:
+    """``((service, kind), name)`` of each Terraform declaration whose name was evaluated."""
+    out: list[tuple[tuple[str, str], str]] = []
+    valid = set(RESOURCE_TYPES)
+    for target, kind in store._conn.execute(_DECLARED_SQL).fetchall():
+        service, _, name = target[len(_EXTERNAL_AWS_PREFIX):].partition(":")
+        if (service, kind) in valid and name and not name.startswith("?"):
+            out.append(((service, kind), name))
+    return out
+
+
 class Definitions:
     """What each registered repo defines, read once per repo and call."""
 
@@ -144,6 +169,13 @@ class Definitions:
                 found.setdefault(key, "terragrunt_unit")
         for unit in lambda_units(store):
             found[("lambda", "function", unit["name"])] = "lambda_unit"
+        # A resource whose name the Terraform evaluator read (``aws_terraform_wiring``: a literal,
+        # a ``var.environment`` interpolation, or the ``name`` a module call passes to a module
+        # that declares ``name = var.name``): ``module "techops_sns_topic" { name = "TechOps" }``
+        # declares the topic ``TechOps`` though no label says so. Exact name only: an AWS name is
+        # case-sensitive, so the folded spelling of the label rule is not applied to it.
+        for kind_key, name in _declared_names(store):
+            found.setdefault((*kind_key, name), "terraform_declaration")
         # Facts that only explain a miss (``not_found_reasons``): they never define a target.
         from .not_found_reasons import read_facts
 

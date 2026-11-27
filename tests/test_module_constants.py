@@ -204,3 +204,20 @@ NONASCII_B = ['https://api.example.net/café']
 ALLOWED_URLS = ['https://ok.example.net/v1/refresh;v=2']
 """
     assert _constants(source) == {"ALLOWED_URLS": ["https://ok.example.net/v1/refresh;v=2"]}
+
+
+def test_a_module_private_resource_constant_is_kept() -> None:
+    """``_PROD_NBC_STATE_MACHINE_ARN`` in project-disrupt's ``_env.py`` (leading underscore)."""
+    source = (
+        "_PROD_NBC_STATE_MACHINE_ARN = "
+        "'arn:aws:states:us-east-1:694585954309:stateMachine:disrupt-next-best-customer'\n"
+        "__DUNDER_BUCKET = 'x-bucket'\n"
+    )
+    nodes, _ = _parse(source, "_env.py")
+    values = {
+        n.name: n.extra.get("resource_value") for n in nodes if n.kind == "Variable"
+    }
+    assert values == {
+        "_PROD_NBC_STATE_MACHINE_ARN":
+            "arn:aws:states:us-east-1:ACCOUNT:stateMachine:disrupt-next-best-customer",
+    }

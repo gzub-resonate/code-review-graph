@@ -10,6 +10,9 @@
   The `not_found_reason` of an unmatched SSM or STS call is now `not_declared_in_registry`
   (or `declared_name_dynamic`); `no_owner_lookup` stays for services with no Terraform owner type.
   Parse-time change: the index fingerprint moves, so repos need one reindex.
+- `cross_repo_requests_tool origin=awssdk` lists the state machines a module constant names (`_PROD_NBC_STATE_MACHINE_ARN = 'arn:aws:states:...:stateMachine:<name>'`, or a `*_STATE_MACHINE*` name constant) as `operation: arn_reference` rows (`sdk: arn-constant`, `evidence`, `constant`) and joins them to the ASL definition, a Terraform resource or a Terragrunt unit of that name in another repo; a `states` filter written `disrupt_next_best_customer` or `disrupt-next-best-customer` finds both. Resource constants with one leading underscore are now kept at parse time (needs a reindex).
+- `origin=stepfunction` joins a Task target to a Terraform declaration whose name the name evaluator read (a topic named by `module "x" { name = "TechOps" }` or `guardians-pipeline-${var.environment}-fail`), by exact name, so those rows are `matched` instead of `not_found`.
+
 - Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.
   `requests.get(f"{BASE}/users")` resolves when `BASE` is a module-level string literal in the same
   file, or one imported by name (`from settings import BASE`, `from .conf import BASE`) from a module
