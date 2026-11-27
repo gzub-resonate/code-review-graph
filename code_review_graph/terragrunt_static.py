@@ -194,7 +194,9 @@ class TerragruntEvaluator:
         """``(value, reason, found)`` of ``inputs.<key>`` of this unit.
 
         The unit's own ``inputs`` is looked at first, then the ``inputs`` of each file it
-        includes, as Terragrunt merges them (the unit wins). Only the element named *key* is
+        includes from the last ``include`` to the first, as Terragrunt merges them (the unit
+        wins, then a later include wins over an earlier one; a ``no_merge`` include is not
+        read). Only the element named *key* is
         evaluated; no other element's value is visited. *found* is false when no file
         defines the key, and *reason* is then ``None`` unless the includes could not be read.
         """
@@ -323,9 +325,9 @@ class TerragruntEvaluator:
         return [frame for frame, _deep in self._input_frames_with_merge()]
 
     def _input_frames_with_merge(self) -> list[tuple[_Frame, bool]]:
-        """The unit and the files it includes, each once, with whether the merge is deep."""
+        """The unit and the files merged into it, highest precedence first, with deep or not."""
         if self._include_frames is None:
-            frames: list[tuple[_Frame, bool]] = [(self._entry, True)]
+            included: list[tuple[_Frame, bool]] = []
             self._include_reason = None
             blocks = _top_level_blocks(self._entry.root, "include")
             if len(blocks) > MAX_INCLUDED_FILES:
@@ -338,13 +340,17 @@ class TerragruntEvaluator:
                 try:
                     path = self._include_file(label or None, 0)
                     strategy = _attribute_expression(body, "merge_strategy")
-                    deep = strategy is not None and _text(strategy).strip() == '"deep"'
-                    frames.append((self._read_frame(path), deep))
+                    mode = _text(strategy).strip() if strategy is not None else ""
+                    frame = self._read_frame(path)
+                    if mode != '"no_merge"':
+                        included.append((frame, mode == '"deep"'))
                 except StaticDynamicError as stop:
                     self._include_reason = stop.reason
                 except RecursionError:
                     self._include_reason = "depth_limit"
-            self._include_frames = frames
+            # Highest precedence first: the unit, then the includes from the last to the first
+            # (a later ``include`` wins). ``no_merge`` merges nothing, so that file is absent.
+            self._include_frames = [(self._entry, True), *reversed(included)]
         return self._include_frames
 
     def _read_frame(self, path: Path) -> _Frame:
