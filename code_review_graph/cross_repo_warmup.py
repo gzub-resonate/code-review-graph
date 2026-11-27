@@ -16,6 +16,17 @@ itself, so a client does not.
 
 ``CRG_CROSS_REPO_WARMUP_ORIGINS`` is a comma list (default ``awssdk,feign,js``).
 ``CRG_CROSS_REPO_WARMUP_INTERVAL_SECONDS`` (default 60) is the poll for changed graphs.
+
+A second, independent warm-up reads each registered repo's Git state. Change discovery
+(``git diff`` against the base, then a scan for untracked files) stats every tracked file, and on
+a freshly started task whose disk cache is cold that takes longer than the discovery timeout on a
+large repo: measured, 17.7 s for the first run on one repo and 0.05 s for the next. A client's first
+``get_impact_radius_tool`` or ``detect_changes_tool`` call then failed with "git timed out". With
+``CRG_GIT_WARMUP=1`` a daemon thread runs those two read-only commands once per repo after the
+server starts, so the disk cache is warm before a client asks. It stops starting repos after
+``CRG_GIT_WARMUP_MAX_SECONDS`` (default 900), never raises into the server and sets
+``GIT_OPTIONAL_LOCKS=0`` so the commands cannot write to a repository.
+
 Query-only: nothing here is imported by the build code.
 """
 
@@ -23,9 +34,11 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .constants import env_float
@@ -204,4 +217,102 @@ def start_warmup() -> Warmer | None:
         return warmer
     except Exception:
         logger.warning("Cross-repo warm-up could not start.", exc_info=True)
+        return None
+
+
+GIT_WARMUP_ENV = "CRG_GIT_WARMUP"
+GIT_MAX_SECONDS_ENV = "CRG_GIT_WARMUP_MAX_SECONDS"
+DEFAULT_GIT_MAX_SECONDS = 900.0
+#: One command may run this long: far above the cold 17.7 s measured, below a hang.
+_GIT_COMMAND_TIMEOUT = 120.0
+#: The read-only commands change discovery runs (``incremental.get_changed_files``): a diff of the
+#: working tree against the previous commit, then the scan for untracked files.
+GIT_STATE_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("git", "diff", "--relative", "--name-status", "-z", "HEAD~1", "--", "."),
+    ("git", "ls-files", "--others", "--exclude-standard", "-z"),
+)
+
+
+def git_warmup_enabled() -> bool:
+    return os.environ.get(GIT_WARMUP_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def warm_git_state(
+    paths: list[str],
+    *,
+    max_seconds: float | None = None,
+    stop: threading.Event | None = None,
+    run: Callable[..., Any] = subprocess.run,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[tuple[str, float, str]]:
+    """Run the change-discovery Git commands once in each repo; ``[(path, seconds, outcome)]``.
+
+    A path with no ``.git`` is skipped. A command that times out or cannot start ends that repo
+    and the next one is tried. Never raises.
+    """
+    cap = env_float(GIT_MAX_SECONDS_ENV, DEFAULT_GIT_MAX_SECONDS) if max_seconds is None else (
+        max_seconds
+    )
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    started = clock()
+    report: list[tuple[str, float, str]] = []
+    for path in paths:
+        if stop is not None and stop.is_set():
+            break
+        if clock() - started >= cap:
+            logger.info(
+                "Git-state warm-up: stopped after %.0fs cap with %d of %d repo(s) done",
+                clock() - started, len(report), len(paths),
+            )
+            break
+        if not (Path(path) / ".git").exists():
+            continue
+        begun = clock()
+        outcome = "ok"
+        for command in GIT_STATE_COMMANDS:
+            try:
+                run(
+                    list(command), cwd=path, capture_output=True, timeout=_GIT_COMMAND_TIMEOUT,
+                    stdin=subprocess.DEVNULL, env=env, check=False,
+                )
+            except subprocess.TimeoutExpired:
+                outcome = "timeout"
+                break
+            except OSError as exc:
+                outcome = f"failed: {type(exc).__name__}"
+                break
+        report.append((path, clock() - begun, outcome))
+    slowest = sorted(report, key=lambda row: row[1], reverse=True)[:3]
+    logger.info(
+        "Git-state warm-up: %d repo(s) in %.1fs; slowest: %s", len(report), clock() - started,
+        ", ".join(f"{Path(p).name} {s:.1f}s {o}" for p, s, o in slowest) or "none",
+    )
+    return report
+
+
+def _run_git_warmup(paths: list[str]) -> None:
+    try:
+        warm_git_state(paths)
+    except Exception:  # never raise into the server
+        logger.warning("Git-state warm-up stopped on an error.", exc_info=True)
+
+
+def start_git_warmup() -> threading.Thread | None:
+    """Start the Git-state warm-up when ``CRG_GIT_WARMUP`` is on; otherwise do nothing."""
+    try:
+        if not git_warmup_enabled():
+            return None
+        from .registry import Registry
+
+        paths = [str(entry["path"]) for entry in Registry().list_repos()]
+        if not paths:
+            return None
+        thread = threading.Thread(
+            target=_run_git_warmup, args=(paths,), name="crg-git-warmup", daemon=True,
+        )
+        thread.start()
+        logger.info("Git-state warm-up on for %d repo(s)", len(paths))
+        return thread
+    except Exception:
+        logger.warning("Git-state warm-up could not start.", exc_info=True)
         return None
