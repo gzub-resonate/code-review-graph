@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 
 import pytest
@@ -55,22 +54,19 @@ def test_the_existing_lru_caches_are_registered():
     assert any(name.endswith("path_segments") for name in names)
 
 
-async def test_the_timing_line_names_the_caches_a_call_used(caplog):
-    caplog.set_level(logging.INFO, logger=main.logger.name)
-
+async def test_the_timing_line_names_the_caches_a_call_used(capsys):
     def work() -> dict:
         qc.normalize_route("/timing/line/{x}")
         qc.normalize_route("/timing/line/{x}")
         return {"status": "ok"}
 
     await main._offload("demo_tool", work, None, provenance=False)
-    (record,) = [r for r in caplog.records if "tool timing" in r.getMessage()]
-    caches = dict(re.findall(r"(\w+)=(\S+)", record.getMessage()))["caches"]
+    (line,) = [x for x in capsys.readouterr().err.splitlines() if "tool timing" in x]
+    caches = dict(re.findall(r"(\w+)=(\S+)", line))["caches"]
     assert re.search(r"normalize_route:\d+/\d+/\d+", caches)
 
 
-async def test_a_call_that_used_no_cache_logs_a_dash(caplog):
-    caplog.set_level(logging.INFO, logger=main.logger.name)
+async def test_a_call_that_used_no_cache_logs_a_dash(capsys):
     await main._offload("demo_tool", lambda: {"status": "ok"}, None, provenance=False)
-    (record,) = [r for r in caplog.records if "tool timing" in r.getMessage()]
-    assert record.getMessage().endswith("caches=-")
+    (line,) = [x for x in capsys.readouterr().err.splitlines() if "tool timing" in x]
+    assert line.endswith("caches=-")
