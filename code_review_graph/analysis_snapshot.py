@@ -45,22 +45,30 @@ _SLOT_WAIT_SECONDS = 0.0
 _slots = threading.BoundedSemaphore(_SLOTS)
 
 
+#: A WAL file is a 32-byte header followed by frames; no more than that means no committed write.
+_WAL_HEADER_BYTES = 32
+
+
 def file_state(db_path: Path) -> tuple[int, int, int, int] | None:
     """Cheap fingerprint of a graph file: size and mtime of the database and its WAL.
 
     A write to a WAL-mode database lands in the ``-wal`` file first, so the main file's
-    mtime alone can stay put after an edit. ``None`` when the file cannot be read, which a
-    caller treats as "do not cache".
+    mtime alone can stay put after an edit. A WAL with no frames says nothing about the
+    data, and SQLite deletes and recreates it as connections close and open, so its mtime
+    changes on every call: it counts only once it holds frames, or the key would never match
+    twice. ``None`` when the file cannot be read, which a caller treats as "do not cache".
     """
     try:
         main = os.stat(db_path)
     except OSError:
         return None
+    wal_state = (0, 0)
     try:
         wal = os.stat(db_path.with_name(db_path.name + "-wal"))
-        wal_state = (wal.st_mtime_ns, wal.st_size)
+        if wal.st_size > _WAL_HEADER_BYTES:
+            wal_state = (wal.st_mtime_ns, wal.st_size)
     except OSError:
-        wal_state = (0, 0)
+        pass
     return (main.st_mtime_ns, main.st_size, *wal_state)
 
 

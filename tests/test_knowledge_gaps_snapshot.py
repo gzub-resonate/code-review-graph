@@ -146,3 +146,48 @@ def test_result_cache_is_bounded():
     calls = []
     cache.get_or_compute(("k", 0), lambda: calls.append(1))
     assert calls == [1]
+
+
+def test_a_second_call_reads_the_cache_instead_of_computing(root, monkeypatch):
+    # Each call opens and closes its own store, and SQLite recreates the empty -wal file on
+    # every open, so a key built from that file's mtime would never match twice.
+    from code_review_graph.tools import analysis_tools
+
+    calls = []
+    real = analysis_tools.find_knowledge_gaps
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(analysis_tools, "find_knowledge_gaps", counting)
+    first = _ask(root, max_per_category=3)
+    second = _ask(root, max_per_category=3, cursor=first["next_cursor"])
+    third = _ask(root, max_per_category=3, cursor=second["next_cursor"])
+    assert len(calls) == 1
+    assert third["offset"] == 6
+
+
+def test_an_empty_wal_does_not_change_the_state(root):
+    db = get_db_path(root)
+    states = set()
+    for _ in range(3):
+        store = GraphStore(db)
+        states.add(analysis_snapshot.file_state(store.db_path))
+        store.close()
+    assert len(states) == 1
+
+
+def test_frames_in_the_wal_change_the_state(root):
+    db = get_db_path(root)
+    reader = GraphStore(db)
+    try:
+        before = analysis_snapshot.file_state(db)
+        writer = GraphStore(db)
+        file = normalize_file_path(root / "src/main/New.java")
+        writer.upsert_node(NodeInfo("Function", "fresh", file, 1, 3, "java"))
+        writer.commit()
+        assert analysis_snapshot.file_state(db) != before
+        writer.close()
+    finally:
+        reader.close()
