@@ -282,3 +282,54 @@ def test_a_queue_bound_to_an_unpublished_exchange_stays_unpublished(bound_queue_
         "svc.future"]
     assert future["status"] == "unpublished"
     assert future["bound_to"][0]["exchange"] == "api.e.topic.quiet"
+
+
+@pytest.fixture
+def declared_binding_world(tmp_path, registry):  # noqa: F811
+    """Imitates services-api (``SalesforceAmqpConfig``: queues bound with the ``QueueBinding``
+    data class to ``api.e.topic.salesforce``) and services-api-salesforce (the publisher)."""
+    api = _build_repo(tmp_path / "api", exchange_edges=False)
+    sf = _build_repo(tmp_path / "sf", exchange_edges=False)
+    _add_edges(api, [
+        ("HANDLES", "q.sf.create", {"queue": "q.sf.create"}),
+        ("HANDLES", "q.sf.delete", {"queue": "q.sf.delete"}),
+        ("BINDS", "api.e.topic.salesforce",
+         {"binding_key": "account.created", "queue": "q.sf.create", "declaration": True,
+          "exchange": "api.e.topic.salesforce"}),
+        ("BINDS", "api.e.topic.salesforce",
+         {"binding_key": "account.deleted", "queue": "q.sf.delete", "declaration": True,
+          "exchange": "api.e.topic.salesforce"}),
+        # Declared, never published and never listened: not an exchange to list.
+        ("BINDS", "api.e.topic.orphan",
+         {"binding_key": "o.x", "queue": "q.sf.create", "declaration": True}),
+    ])
+    _add_edges(sf, [
+        ("PRODUCES", "api.e.topic.salesforce", {"routing_key": "account.created"}),
+    ])
+    registry.register(str(api), alias="api")
+    registry.register(str(sf), alias="sf")
+    return tmp_path
+
+
+def test_a_declared_binding_links_the_queue_to_a_publisher_in_another_repo(
+    declared_binding_world,
+):
+    reply = cross_repo_requests_func(origin="amqp", repos=["api"])
+    queues = {q["queue"]: q for q in reply["queues"]}
+    create = queues["q.sf.create"]
+    assert create["status"] == "matched"
+    assert create["publisher_repos"] == ["sf"]
+    assert queues["q.sf.delete"]["status"] == "unpublished"
+
+
+def test_a_declared_binding_is_not_a_listener_of_the_exchange(declared_binding_world):
+    reply = cross_repo_requests_func(origin="amqp")
+    rows = {r["exchange"]: r for r in reply["results"]}
+    assert list(rows) == ["api.e.topic.salesforce"]
+    assert rows["api.e.topic.salesforce"]["status"] == "unlistened"
+    assert rows["api.e.topic.salesforce"]["listener_count"] == 0
+
+
+def test_the_single_exchange_mode_does_not_list_declared_bindings(declared_binding_world):
+    reply = cross_repo_requests_func(origin="amqp", service="api.e.topic.salesforce")
+    assert {r["role"] for r in reply["results"]} == {"publisher"}

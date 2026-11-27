@@ -15,7 +15,7 @@ from .graph import GraphStore
 __all__ = [
     "LIST_STATUSES", "MATCHED", "UNLISTENED", "UNPUBLISHED", "Exchange", "exchange_status",
     "list_exchange_names", "new_exchange", "add_edges", "render", "in_scope_edges", "is_queue",
-    "link_bound_queues",
+    "link_bound_queues", "has_role_edges",
 ]
 
 UNLISTENED = "unlistened"
@@ -47,7 +47,7 @@ def list_exchange_names(store: GraphStore) -> list[str]:
     rows = store._conn.execute(
         "SELECT DISTINCT target_qualified FROM edges "
         "WHERE target_qualified >= ? AND target_qualified < ? "
-        "AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES')",
+        "AND kind IN ('PUBLISHES', 'PRODUCES', 'CONSUMES', 'HANDLES', 'BINDS')",
         (aj.EXCHANGE_PREFIX, aj.EXCHANGE_PREFIX[:-1] + ";"),
     ).fetchall()
     cut = len(aj.EXCHANGE_PREFIX)
@@ -79,6 +79,15 @@ def add_edges(
     (a status is about all of them), the ``scope_*`` counts only the selected ones.
     """
     for edge in edges:
+        if edge["role"] == aj.ROLE_BINDING:
+            # A declaration ties a queue to this exchange; it is no publisher or listener.
+            queue = edge.get("queue")
+            if isinstance(queue, str) and queue:
+                key = edge.get("binding_key")
+                entry["queue_bindings"].setdefault(queue, set()).add(
+                    (repo, key if isinstance(key, str) and key else None)
+                )
+            continue
         if in_scope:
             entry["scope_publishers" if edge["role"] == "publisher" else "scope_listeners"] += 1
         entry["queue_edges" if edge.get("kind") == aj.KIND_QUEUE else "exchange_edges"] += 1
@@ -153,6 +162,12 @@ def link_bound_queues(entries: dict[str, Exchange]) -> int:
             queue["publishers"] += queue["bound_publishers"]
             queue["publisher_repos"] |= queue["bound_publisher_repos"]
     return linked
+
+
+def has_role_edges(entry: Exchange) -> bool:
+    """Whether any publisher or listener edge was seen (a name with only declared bindings has
+    none, and is not an exchange to list)."""
+    return bool(entry["publishers"] or entry["listeners"])
 
 
 def in_scope_edges(entry: Exchange) -> int:

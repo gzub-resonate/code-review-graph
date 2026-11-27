@@ -1215,6 +1215,8 @@ def _amqp_exchange_list(
     queues: list[dict[str, Any]] = []
     for name in sorted(exchanges):
         entry_data = exchanges[name]
+        if not ax.has_role_edges(entry_data):
+            continue  # only declared bindings name it
         if scoped and not ax.in_scope_edges(entry_data):
             continue
         if routing_key and not ax.has_key_containing(entry_data, routing_key):
@@ -1329,7 +1331,7 @@ def _amqp_links(
     overall = {"publisher": 0, "listener": 0}
     paths = {_sanitize_name(_repo_label(e)): Path(e["path"]) for e in all_repos}
     for label, in_scope, amap in scan.loaded:
-        found = amap.get(channel, [])
+        found = [e for e in amap.get(channel, []) if e["role"] != aj.ROLE_BINDING]
         for edge in found:
             overall[edge["role"]] += 1
         if not in_scope:

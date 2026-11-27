@@ -4,6 +4,16 @@
 
 ### Added
 
+- `origin=amqp` reads queue-to-exchange bindings declared in code, so a queue bound that way
+  joins the publishers of its exchange. New `BINDS` edges (`extra.declaration`, `queue`,
+  `binding_key`, `resolution` `queue_binding_class` or `binding_builder`) come from
+  `new QueueBinding(queue, exchange, key)` (the service-side data class kept in a static list, as
+  in services-api `SalesforceAmqpConfig` and `ProjectAdminAmqpConfig`) and from
+  `BindingBuilder.bind(queue).to(exchange).with(key)`, where the queue, exchange and key are
+  literals, constants (also of another class) or a same-class `@Bean` method returning `new
+  Queue(..)`. A binding is not a listener or a publisher: it adds no listener to the exchange,
+  and a name that only has bindings is not listed. A binding with an unresolved name is not
+  written. Parse time; the index fingerprint moves.
 - `origin=amqp` (exchange list) credits a queue with the publishers of the exchange it is bound
   to. A queue listed apart used to count only publishers that wrote to it directly, so a queue
   bound with `@RabbitListener(bindings=@QueueBinding(...))` to an exchange that has publishers
