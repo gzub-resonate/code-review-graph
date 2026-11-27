@@ -852,7 +852,7 @@ class TestMainLazyAttrsAndPromptsDirect:
         assert isinstance(docs_res, dict)
 
         monkeypatch.setattr(
-            crg_main, "list_repos_func", lambda: {"repos": []}, raising=False
+            crg_main, "list_repos_func", lambda **_kwargs: {"repos": []}, raising=False
         )
         repos_res = crg_main.list_repos_tool()
         assert repos_res == {"repos": []}

@@ -12,7 +12,7 @@ from ..endpoint_index import attach as attach_endpoints
 from ..errors import ChangeDiscoveryError
 from ..graph import _sanitize_name
 from ..incremental import get_changed_files
-from ..paging import CursorError, content_stamp, make_scope, paginate, shown_range
+from ..paging import CursorError, Page, content_stamp, make_scope, paginate_groups, shown_range
 from ._common import _error_response, _get_store, _validate_positive_int
 from .change_scope import (
     KIND_LAST_COMMIT,
@@ -30,14 +30,17 @@ _MAX_FILES_SHOWN = 50
 #: Most file rows one page may hold, whatever ``files_limit`` asks for.
 _MAX_FILES_PER_PAGE = 200
 _CONTINUATION_NOTE = (
-    "later page of the file list: endpoints, contract_changes, same_file_endpoints, "
-    "config_changes, external_callers and schema_changes are on the first page only"
+    "later page: files, contract_changes, endpoints, same_file_endpoints, config_changes, "
+    "external_callers and schema_changes each continue where the previous page stopped; "
+    "external_info is on the first page only"
 )
-_MAX_ENDPOINTS_SHOWN = 50
-_MAX_CALLERS_SHOWN = 50
+#: The lists that page with ``files``, in the order of ``lists`` in ``_build_result``.
+_PAGED_LISTS = (
+    "contract_changes", "endpoints", "same_file_endpoints", "config_changes",
+    "external_callers", "schema_changes",
+)
 _MAX_NAMES_PER_FILE = 12
 _MAX_DEPTH = 6
-_MAX_CONFIG_SHOWN = 100
 _CONFIG_CHANGES = ("added", "changed", "removed")
 
 
@@ -492,12 +495,21 @@ def _build_result(
         "external_callers": len(external),
         "config_paths_changed": len(config_rows),
     }
-    # The rows are rebuilt on every call, so the stamp is a digest of the rows themselves: a
-    # cursor is only honoured while every file row is still the same.
-    page = paginate(
-        files, files_limit, _MAX_FILES_PER_PAGE, cursor,
-        scope=scope, stamp=content_stamp(files),
+    schema_rows = [
+        {key: _sanitize_name(value) for key, value in row.items()} for row in found["schema"]
+    ]
+    # The files and the six lists page together, one cursor for all, each by at most
+    # ``files_limit`` rows a page (the way ``detect_changes_tool`` pages its lists). The rows
+    # are rebuilt on every call, so the stamp is a digest of the rows themselves: a cursor is
+    # only honoured while every row of every list is still the same.
+    lists = [files, contract, endpoints, same_file, config_rows, external, schema_rows]
+    size = min(files_limit, _MAX_FILES_PER_PAGE)
+    both = paginate_groups(
+        lists, size, len(lists) * size, len(lists) * _MAX_FILES_PER_PAGE, cursor,
+        scope=scope, stamp=content_stamp(lists),
     )
+    page = Page(list(both.groups[0]), len(files), both.group_offsets[0], both.next_cursor)
+    files_more = page.offset + len(page.items) < page.total
     result: dict[str, Any] = {
         "status": "ok",
         "summary": (
@@ -511,43 +523,25 @@ def _build_result(
                 "(see same_file_endpoints)."
                 if same_file else ""
             )
-            + (f" Files{shown_range(page).lstrip(',')}." if page.truncated or page.offset else "")
+            + (f" Files{shown_range(page).lstrip(',')}." if files_more or page.offset else "")
         ),
         "depth": depth,
         "totals": totals,
         "files": page.items,
         "files_total": page.total,
-        "files_truncated": page.truncated,
+        "files_truncated": files_more,
         **page.fields(),
         "notes": notes,
     }
-    if page.offset:
+    for index, name in enumerate(_PAGED_LISTS, start=1):
+        shown = list(both.groups[index])
+        result[name] = shown
+        result[f"{name}_total"] = len(lists[index])
+        result[f"{name}_truncated"] = both.group_offsets[index] + len(shown) < len(lists[index])
+    if any(r.config_truncated for r in reports):
+        result["config_changes_truncated"] = True
+    if cursor:
         result["continuation_note"] = _CONTINUATION_NOTE
-        return result
-    result.update({
-        "contract_changes": contract[:_MAX_ENDPOINTS_SHOWN],
-        "endpoints": endpoints[:_MAX_ENDPOINTS_SHOWN],
-        "same_file_endpoints": same_file[:_MAX_ENDPOINTS_SHOWN],
-        "contract_changes_total": len(contract),
-        "contract_changes_truncated": len(contract) > _MAX_ENDPOINTS_SHOWN,
-        "endpoints_total": len(endpoints),
-        "endpoints_truncated": len(endpoints) > _MAX_ENDPOINTS_SHOWN,
-        "same_file_endpoints_total": len(same_file),
-        "same_file_endpoints_truncated": len(same_file) > _MAX_ENDPOINTS_SHOWN,
-        "config_changes": config_rows[:_MAX_CONFIG_SHOWN],
-        "config_changes_total": len(config_rows),
-        "config_changes_truncated": (
-            len(config_rows) > _MAX_CONFIG_SHOWN or any(r.config_truncated for r in reports)
-        ),
-        "external_callers": external[:_MAX_CALLERS_SHOWN],
-        "external_callers_total": len(external),
-        "external_callers_truncated": len(external) > _MAX_CALLERS_SHOWN,
-        "external_info": external_info,
-        "schema_changes_total": len(found["schema"]),
-        "schema_changes_truncated": len(found["schema"]) > _MAX_ENDPOINTS_SHOWN,
-        "schema_changes": [
-            {key: _sanitize_name(value) for key, value in row.items()}
-            for row in found["schema"][:_MAX_ENDPOINTS_SHOWN]
-        ],
-    })
+    else:
+        result["external_info"] = external_info
     return result
