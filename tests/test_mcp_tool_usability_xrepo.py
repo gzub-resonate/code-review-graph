@@ -338,11 +338,18 @@ class TestFlowKeys(_FlowFixture):
         return reply["flows"]
 
     def reindex_in_another_order(self):
-        """Rebuild the flows table so every flow gets another id, as a reindex does."""
+        """Rebuild the flows table after the last flow became the most critical.
+
+        Ids follow criticality, then entry name, whatever order the flows were found in. So a
+        flow that ranks higher after the code changed pushes every other id down, which is how a
+        reindex of changed code moves ids while the keys stay.
+        """
         from code_review_graph.flows import store_flows, trace_flows
 
         flows = trace_flows(self.store)
-        store_flows(self.store, list(reversed(flows)))
+        last = max(flows, key=lambda f: str(f.get("name")))
+        last["criticality"] = 1.0 + max(float(f.get("criticality") or 0.0) for f in flows)
+        store_flows(self.store, flows)
 
     def test_every_flow_carries_the_entry_nodes_qualified_name_and_file(self):
         for detail in ("standard", "minimal"):

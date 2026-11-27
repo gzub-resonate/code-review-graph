@@ -159,6 +159,10 @@ def read_declarations(store: GraphStore, repo_path: Path) -> dict[str, Any]:
             "terraform_type": edge["extra"].get("terraform_type", ""), "template": False,
         })
     unnamed = 0
+    # An SSM parameter or secret block can already be a ``declare`` edge (the Terraform name
+    # evaluator writes one for it, including a name built from locals or inputs). Read the block
+    # from its file only when no edge covers it, so one resource is never listed twice.
+    covered = {(item["file"], item["line"], item["terraform_type"]) for item in items}
     rows = store._conn.execute(
         "SELECT name, file_path, line_start, line_end FROM nodes "
         "WHERE kind = 'Class' AND language = 'hcl' AND (name LIKE ? OR name LIKE ?) "
@@ -169,6 +173,8 @@ def read_declarations(store: GraphStore, repo_path: Path) -> dict[str, Any]:
         rtype = node_name.split(".", 2)[1]
         service, kind = FILE_DECLARED[rtype]
         file = _relative(file_path, repo_path)
+        if (file, start, rtype) in covered:
+            continue
         name = _block_name(repo_path, file, start or 1, end or start or 1)
         if not name:
             unnamed += 1

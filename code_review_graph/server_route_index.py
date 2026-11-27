@@ -21,7 +21,7 @@ Nothing here changes what a call matches. It is query-time only and not imported
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Optional
 from weakref import WeakKeyDictionary
 
@@ -45,8 +45,13 @@ def _keep(server: fl.ServerEndpoint, excluded: Optional[str]) -> bool:
     return excluded is None or server.origin != excluded
 
 
-class _FilteredMap:
-    """``get`` of a ``route -> endpoints`` mapping with one origin left out."""
+class _FilteredMap(Mapping):
+    """A read-only ``route -> endpoints`` mapping with one origin left out.
+
+    It answers like a mapping built from the other repos only: a key whose endpoints all belong to
+    the excluded origin is absent, so ``get``, ``in``, iteration, ``keys``, ``values`` and ``items``
+    all agree with an index that never held that repo.
+    """
 
     def __init__(self, base: dict[Any, list[Any]], excluded: str, pair: bool) -> None:
         self._base = base
@@ -56,20 +61,35 @@ class _FilteredMap:
     def _origin(self, item: Any) -> Optional[str]:
         return item[1].origin if self._pair else item.origin
 
-    def get(self, key: Any, default: Any = ()) -> Any:
-        found = self._base.get(key)
-        if found is None:
-            return default
+    def _kept(self, found: list[Any]) -> list[Any]:
         if all(self._origin(item) != self._excluded for item in found):
             return found
         return [item for item in found if self._origin(item) != self._excluded]
+
+    def __getitem__(self, key: Any) -> list[Any]:
+        found = self._base.get(key)
+        if found is None:
+            raise KeyError(key)
+        kept = self._kept(found)
+        if not kept:
+            raise KeyError(key)
+        return kept
+
+    def __iter__(self) -> Iterator[Any]:
+        for key, found in self._base.items():
+            if self._kept(found):
+                yield key
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
 
 
 class ExcludingIndex(fl.ServerIndex):
     """*base* without the endpoints of the repo at path *excluded*.
 
-    A drop-in for a :class:`~feign_links.ServerIndex` built from every other repo: the join and
-    the leads only call ``.get`` on its maps and read ``catch_all``.
+    A drop-in for a :class:`~feign_links.ServerIndex` built from every other repo: its maps are
+    read-only mappings that answer ``get``, ``in`` and iteration as that index would, and
+    ``catch_all`` is the filtered list.
     """
 
     def __init__(self, base: fl.ServerIndex, excluded: str) -> None:

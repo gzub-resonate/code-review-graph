@@ -73,6 +73,26 @@ def test_an_excluding_index_answers_as_an_index_without_that_repo(world):
             )
 
 
+def test_an_excluding_index_can_be_iterated_like_an_index_without_that_repo(world):
+    # Code that lists the routes (the JS no_route_match reasons do) must see the same keys,
+    # values and items as an index built from the other repos, not only answer ``get``.
+    repos, every, _calls = world
+    everywhere = fl.ServerIndex(every)
+    for repo in repos[:3]:
+        others = fl.ServerIndex([s for s in every if s.origin != f"/r/{repo}"])
+        view = sri.ExcludingIndex(everywhere, f"/r/{repo}")
+        for name in ("exact", "folded", "by_length"):
+            mine, theirs = getattr(view, name), getattr(others, name)
+            assert dict(mine) == theirs
+            assert sorted(mine, key=str) == sorted(theirs, key=str)
+            assert len(mine) == len(theirs)
+            assert dict(mine.items()) == dict(theirs.items())
+            assert list(mine.values()) == [mine[key] for key in mine]
+            for key in theirs:
+                assert key in mine
+        assert view.catch_all == others.catch_all
+
+
 def test_a_variable_with_no_fixed_segment_keeps_the_old_pool():
     index = fl.ServerIndex([])
     assert list(sri.variable_pool(index, ("{}", "{}"))) == []
