@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from . import aws_terraform_wiring as _wiring
+from . import terraform_names as _tfnames
 from .config_keys import normalize_spring_config_key
 from .infra_references import aws_external_target, reduce_arn
 from .java_config_hops import follow, getter_chain
@@ -1746,12 +1747,14 @@ def aws_sdk_edges(
     wants_sdk = bool(language) and any(m in source for m in sdk_markers)
     wants_uri = (suffix in _URI_SUFFIXES or is_workflow) and b"s3" in source
     wants_tf = suffix == ".tf" and any(m in source for m in _wiring.MARKERS)
+    wants_names = suffix == ".tf" and repo_root is not None and _tfnames.wants(source)
     from . import data_store_calls as _stores
 
     store_ast, store_text, store_config = _stores.wants(suffix, path.name, language, source)
     if _stores.skip_path(path, repo_root):
         store_ast = store_text = store_config = False
-    if not (wants_sdk or wants_uri or wants_tf or store_ast or store_text or store_config):
+    wants_any = wants_sdk or wants_uri or wants_tf or wants_names
+    if not (wants_any or store_ast or store_text or store_config):
         return []
     file_node = next((n for n in nodes if n.kind == "File"), None)
     if file_node is None:
@@ -1769,10 +1772,17 @@ def aws_sdk_edges(
                 runner(source, root, out).run()
             if store_ast:
                 _stores.scan_code(language, source, root, out)
-    if wants_uri or wants_tf:
+    if wants_uri or wants_tf or wants_names:
         text = source.decode("utf-8", "replace")
         if suffix == ".tf":
             _scan_terraform(text, out)
+    if wants_names:
+        hcl = get_parser("hcl")
+        if hcl is not None:
+            _tfnames.scan(
+                path, source, repo_root, lambda data: hcl.parse(data).root_node, out, Val,
+                lambda kind, name: bool(_NAME_RE[kind].match(name)), _MAX_EDGES_PER_FILE,
+            )
     if wants_uri:
         if suffix in (".sh", ".bash") or is_workflow:
             _scan_shell(text, out)

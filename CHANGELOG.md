@@ -4,6 +4,13 @@
 
 ### Added
 
+- Terraform names the parser could not read are now resolved from the files alone
+  (`terraform_names.py`, using the `terragrunt_static` evaluator in a Terraform mode): names
+  built from `locals`, `variable` defaults, interpolation, `lower`/`upper` and ternaries on known
+  strings, with the `inputs` the deploying Terragrunt unit passes; and names set inside a wrapper
+  module called with a local `source` (an SNS topic or bucket module). A name that depends on an
+  unknown value is not written. Declare edges gain `terraform_module` and `name_evaluated`.
+  This moves the index fingerprint.
 - Capped lists in replies now state their true size, additively. `cross_repo_requests_tool`
   `origin="external"` rows gain `files_total`, `files_truncated`, `samples_total`,
   `samples_truncated` and (with `hosts_seen`) `hosts_seen_total`/`hosts_seen_truncated`; the reply
