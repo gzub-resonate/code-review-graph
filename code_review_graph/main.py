@@ -2085,6 +2085,16 @@ async def cross_repo_requests_tool(
     ``unmatchable`` with a ``reason`` (placeholder service name, absolute
     ``url``, ``URI`` argument, or a route piece that could not be resolved).
     Nothing is guessed.
+    ``unmatchable`` reasons: ``service_unresolved``, ``url_from_argument``, ``url_literal``,
+    ``route_dynamic``, ``placeholder_in_route``, and for JavaScript ``non_literal_url``,
+    ``absolute_url``, ``method_dynamic``. A JavaScript ``no_route_match`` has a ``reason``:
+    ``no_servers_indexed``, ``no_endpoint_under_base_path`` (nothing registered starts with the
+    call's first path segment), ``variable_segments_unmatched`` or
+    ``route_missing_under_served_base``; a Feign ``no_route_match`` has
+    ``served_by_caller_repo`` when the calling repo itself serves that method and route (the
+    client's name probably points at the wrong repo). ``counts_by_reason`` tallies the JavaScript
+    ones, the Feign ``served_by_caller_repo`` and ``no_target_reason`` values,
+    and ``status`` accepts each reason.
     A JavaScript call with no other match may still be ``matched`` at low
     confidence (reason ``variable_matches_literal``) when its variable stands
     against a fixed server segment.
@@ -2145,9 +2155,22 @@ async def cross_repo_requests_tool(
             ``secretsmanager``, ``ssm``, ``kinesis``, ``firehose``, ``events``, ``ecs``,
             ``glue``, ``batch``, ``rds``, ``elasticloadbalancing``, ``elasticache``, ``es``),
             ``status`` is ``matched``, ``not_found``, ``ambiguous``,
-            ``unresolved`` or ``declared``; each row has ``operation`` and ``access``
-            (``read``, ``write``, ``invoke``, ``unknown``). Use it with ``service=<bucket>``
-            to see which services read or write a bucket and which repo defines it.
+            ``unresolved`` or ``declared`` (or a reason below); each row has ``operation`` and
+            ``access`` (``read``, ``write``, ``invoke``, ``unknown``). Use it with
+            ``service=<bucket>`` to see which services read or write a bucket and which repo
+            defines it. A ``not_found`` row has ``not_found_reason``: ``no_owner_lookup``,
+            ``test_double`` (mock-like name, test file or mock/fixture folder),
+            ``declared_name_dynamic`` (about the registry, not this name, which may be a plain
+            literal: some registered repo declares that kind of resource under a name that could
+            not be read as a literal, listed in ``dynamic_declared_in``) or
+            ``not_declared_in_registry``; ``origin=stepfunction`` adds ``data_source_only``,
+            ``declared_via_module``, ``source_without_unit`` and ``environment_cluster``. An
+            ``unresolved`` row has ``unresolved_reason``: ``not_defined``, ``no_value``,
+            ``env_placeholder``, ``profiles_differ``, ``ambiguous``, ``non_aws_host``,
+            ``unrecognised_endpoint``, ``custom_endpoint``, ``proxy_endpoint``,
+            ``serverless_cache``, ``internal_prefix``, ``no_resource_param``,
+            ``config_key_not_resolved``, ``constant_not_resolved``, ``host_not_literal`` or
+            ``name_not_literal``. The reply has ``counts_by_reason``; ``status`` accepts each.
             ``trigger`` answers "what invokes this Lambda, queue, state machine, topic or bucket
             handler" from the Terraform already indexed (EventBridge rules and Scheduler
             schedules, Lambda event source mappings, SNS subscriptions, S3 bucket notifications,
