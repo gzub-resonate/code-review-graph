@@ -38,6 +38,7 @@ from ..graph import GraphNode, GraphStore, _sanitize_name
 from ..incremental import get_db_path
 from ..paging import (
     CursorError,
+    Page,
     content_stamp,
     make_scope,
     paginate,
@@ -99,25 +100,49 @@ _NO_RESULTS_FOR_CURSOR = (
 # ---------------------------------------------------------------------------
 
 
-def list_repos_func() -> dict[str, Any]:
-    """List all registered repositories.
+#: Rows of ``list_repos_tool`` in one reply: the default page size and the ceiling.
+_DEFAULT_REPOS_LIMIT = 50
+_MAX_REPOS_PER_PAGE = 100
 
-    [REGISTRY] Returns the list of repositories registered in the global
-    multi-repo registry at ``~/.code-review-graph/registry.json``.
+
+def list_repos_func(
+    limit: int = _DEFAULT_REPOS_LIMIT, cursor: str | None = None,
+) -> dict[str, Any]:
+    """List the registered repositories, one page at a time.
+
+    [REGISTRY] Returns the repositories registered in the global multi-repo registry at
+    ``~/.code-review-graph/registry.json``, in registry order. ``total`` counts every
+    registered repository; when more remain the reply carries ``next_cursor``.
+
+    Args:
+        limit: Maximum repositories in one reply. Default: 50. At most 100.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
 
     Returns:
-        List of registered repos with paths and aliases.
+        A page of registered repos with paths and aliases.
     """
     from ..registry import Registry
 
+    _validate_positive_int(limit, "limit")
     try:
         registry = Registry()
         repos = registry.list_repos()
+        page = paginate(
+            repos, limit, _MAX_REPOS_PER_PAGE, cursor,
+            scope=make_scope("list_repos_tool"),
+            stamp=content_stamp(repos),
+        )
         return {
             "status": "ok",
-            "summary": f"{len(repos)} registered repository(ies)",
-            "repos": repos,
+            "summary": f"{page.total} registered repository(ies){shown_range(page)}",
+            "repos": page.items,
+            "count": len(page.items),
+            "total": page.total,
+            "truncated": page.truncated,
+            **page.fields(),
         }
+    except CursorError:
+        raise
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
 
@@ -1303,15 +1328,22 @@ def _amqp_exchange_list(
         if status and row["status"] != status:
             continue
         rows.append(row)
-    page = paginate(
-        rows, max_results, 100, cursor,
+    # The exchanges and the queue-only names page together, one cursor for both, each by at
+    # most ``max_results`` rows a page (the way ``detect_changes_tool`` pages its lists). A
+    # status filter leaves the queues out, as it always has.
+    shown_queues = queues if queues and not status else []
+    size = min(max_results, _MAX_QUEUE_ROWS)
+    both = paginate_groups(
+        [rows, shown_queues], size, 2 * size, 2 * _MAX_QUEUE_ROWS, cursor,
         scope=make_scope(
             "cross_repo_requests_tool", origin="amqp", mode="exchange_list",
             repos=sorted(repos) if repos else None, routing_key=routing_key, status=status,
         ),
-        stamp=content_stamp([rows, scan.skipped]),
+        stamp=content_stamp([rows, shown_queues, scan.skipped]),
     )
-    ordered = ", ".join(f"{counts[s]} {s}" for s in ax.LIST_STATUSES if s in counts)
+    page = Page(list(both.groups[0]), len(rows), both.group_offsets[0], both.next_cursor)
+    queues_page = both.groups[1]
+    ordered =", ".join(f"{counts[s]} {s}" for s in ax.LIST_STATUSES if s in counts)
     result: dict[str, Any] = {
         "status": "ok",
         "summary": (
@@ -1343,9 +1375,12 @@ def _amqp_exchange_list(
             [_sanitize_name(_repo_label(e)) for e in selected], _MAX_ECHOED_NAMES,
             _MAX_ECHOED_NAMES,
         )[0]
-    if queues and not status:
-        result["queues"] = queues[:_MAX_QUEUE_ROWS]
-        result["queues_total"] = len(queues)
+    if shown_queues:
+        result["queues"] = queues_page
+        result["queues_total"] = len(shown_queues)
+        result["queues_truncated"] = (
+            both.group_offsets[1] + len(queues_page) < len(shown_queues)
+        )
     if scan.without_amqp:
         result["repos_without_amqp"] = _bounded(
             scan.without_amqp, _MAX_ECHOED_NAMES, _MAX_ECHOED_NAMES,

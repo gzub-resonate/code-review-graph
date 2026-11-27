@@ -276,12 +276,20 @@ from code_review_graph.paging import CursorError  # noqa: E402
 from .test_pr_blast_radius import pull_request  # noqa: E402,F401
 from .test_pr_blast_radius import run as pr_run  # noqa: E402
 
+_PR_PAGED_LISTS = (
+    "contract_changes", "endpoints", "same_file_endpoints", "config_changes",
+    "external_callers", "schema_changes",
+)
 
-def test_pr_files_page_with_a_cursor_and_nothing_is_lost(pull_request):  # noqa: F811
+
+def test_pr_files_and_lists_page_with_one_cursor_and_nothing_is_lost(pull_request):  # noqa: F811
     whole = pr_run(pull_request)
     names = [f["file"] for f in whole["files"]]
     assert len(names) >= 3 and whole["files_truncated"] is False
+    assert all(whole[f"{key}_truncated"] is False for key in _PR_PAGED_LISTS)
+    assert "continuation_note" not in whole and "external_info" in whole
     seen: list[str] = []
+    collected: dict[str, list] = {key: [] for key in _PR_PAGED_LISTS}
     cursor = None
     pages = 0
     while True:
@@ -290,17 +298,24 @@ def test_pr_files_page_with_a_cursor_and_nothing_is_lost(pull_request):  # noqa:
         seen += [f["file"] for f in page["files"]]
         assert page["files_total"] == len(names)
         assert page["totals"]["files"] == whole["totals"]["files"]
+        assert len(page["files"]) <= 1
+        for key in _PR_PAGED_LISTS:
+            assert len(page[key]) <= 1
+            assert page[f"{key}_total"] == whole[f"{key}_total"]
+            collected[key] += page[key]
         if cursor:
-            assert page["offset"] == pages - 1
-            # the heavy lists are on the first page only
-            assert "endpoints" not in page and "continuation_note" in page
+            # the files stop at their total; the other lists may run on after them
+            assert page["offset"] == min(pages - 1, len(names))
+            assert "continuation_note" in page and "external_info" not in page
         else:
-            assert page["endpoints"] == whole["endpoints"]
+            assert "external_info" in page and "continuation_note" not in page
         cursor = page.get("next_cursor")
-        assert page["files_truncated"] is bool(cursor)
+        assert page["files_truncated"] is (len(seen) < len(names))
         if not cursor:
             break
-    assert seen == names and pages == len(names)
+    assert seen == names
+    assert collected == {key: whole[key] for key in _PR_PAGED_LISTS}
+    assert pages == max(len(names), *(len(whole[key]) for key in _PR_PAGED_LISTS))
 
 
 def test_pr_cursor_is_refused_for_other_arguments(pull_request):  # noqa: F811

@@ -2043,10 +2043,14 @@ async def traverse_graph_tool(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_repos_tool(detail_level: str = "standard") -> dict:
-    """List all registered repositories in the multi-repo registry.
+def list_repos_tool(
+    detail_level: str = "standard",
+    limit: int = 50,
+    cursor: Optional[str] = None,
+) -> dict:
+    """List the registered repositories in the multi-repo registry, one page at a time.
 
-    Returns the list of repos registered at ~/.code-review-graph/registry.json.
+    Returns the repos registered at ~/.code-review-graph/registry.json.
     Use the CLI 'register' command to add repos.
 
     Stays synchronous: one small JSON read, no graph database and no Git.
@@ -2055,8 +2059,14 @@ def list_repos_tool(detail_level: str = "standard") -> dict:
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
+        limit: Maximum repositories in one reply. Default: 50. At most 100.
+            ``total`` always counts every registered repository.
+        cursor: The ``next_cursor`` of a previous reply, to read the next page.
+            Omit it for the first page.
+
+    Returns the repos; ``next_cursor`` is present when more remain.
     """
-    return _resolve_attr("list_repos_func")()
+    return _resolve_attr("list_repos_func")(limit=limit, cursor=cursor)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -2210,8 +2220,9 @@ async def cross_repo_requests_tool(
         limit: Maximum rows per client repo. Default: 20.
         max_results: Maximum rows overall, at most 100. ``counts`` and
             ``total`` cover every call that passed the filters. Default: 50. For
-            ``amqp`` the separate ``queues`` list is not cut by it: it is capped at
-            100 rows and ``queues_total`` gives the full count.
+            ``amqp`` it also bounds the separate ``queues`` list a page; ``queues_total``
+            gives the full count, ``queues_truncated`` says whether more remain, and
+            ``next_cursor`` reads the next page of the exchanges and the queues together.
         origin: Only ``feign`` or only ``js`` calls. Default: both. ``terraform``
             lists the remote Terraform module sources (``git::...//modules/x``)
             the repos name and the registered repo and folder each resolves to:
@@ -2378,14 +2389,18 @@ async def pr_blast_radius_tool(
         detail_level: Accepted for parity with the other read tools. "minimal" has no
             smaller form here yet, so every value returns the same payload.
             Default: standard.
-        files_limit: File rows per page. Default: 50, at most 200. ``files_total`` is the
-            full count and ``files_truncated`` says whether more remain.
+        files_limit: Rows per list per page: ``files`` and each of ``contract_changes``,
+            ``endpoints``, ``same_file_endpoints``, ``config_changes``,
+            ``external_callers`` and ``schema_changes``. Default: 50, at most 200. Each
+            list's ``*_total`` is the full count and its ``*_truncated`` says whether more
+            remain.
         cursor: The ``next_cursor`` of a previous reply, to read the next page of ``files``
-            (``offset`` is set after the first page). Refused for other ``pr``, ``head``,
-            ``base``, ``depth`` or ``include_external``, or if the changed files differ now.
-            Only the first page carries ``endpoints``, ``contract_changes``,
-            ``same_file_endpoints``, ``config_changes``, ``external_callers`` and
-            ``schema_changes``; a later page says so in ``continuation_note``.
+            and of every list above (``offset`` is the index of the first file row, set
+            after the first page). Refused for other ``pr``, ``head``, ``base``, ``depth``
+            or ``include_external``, or if the rows differ now. A later page says so in
+            ``continuation_note`` and leaves out ``external_info``.
+
+    Returns the blast radius; ``next_cursor`` is present while any list has more rows.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(

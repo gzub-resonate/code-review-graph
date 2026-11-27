@@ -1168,8 +1168,13 @@ max_chars: int = 20000       # Page content returned (max 80000)
 
 #### `list_repos_tool`
 ```
-(no parameters)
+detail_level: str = "standard"  # Accepted for parity; every value returns the same payload
+limit: int = 50              # Repositories per page (max 100)
+cursor: str | None           # next_cursor of the previous reply, to read the next page
 ```
+
+`total` counts every registered repository, in registry order. When more remain the reply carries
+`next_cursor` (a later page has `offset`). A cursor is refused once the registry has changed.
 
 #### `cross_repo_search_tool`
 ```
@@ -1564,7 +1569,10 @@ listeners bind with (each list cut at 20, with a `*_total` when longer) and a `s
 `listener` belong to the one-exchange form and are refused), `route` keeps the exchanges with a
 routing or binding key containing it as a substring, and `repos` limits the repos read, so the
 roles are those of the selected repos. `counts` covers every exchange that passed `route`. It
-pages like the other origins. With `service` the reply is unchanged.
+pages like the other origins. Names used only as a queue are listed apart in `queues`; they page
+with the exchanges under the same cursor, each list by at most `max_results` rows a page, with
+`queues_total` (the full count) and `queues_truncated` on every page. A `status` filter leaves
+`queues` out. With `service` the reply is unchanged.
 
 ### `origin="trigger"`: what invokes a resource
 
@@ -1724,8 +1732,8 @@ base: str | None             # The branch the PR merges into; default: the remot
 depth: int = 3               # Hops the reach walk follows from a changed symbol (max 6)
 include_external: bool = True  # Join affected endpoints to client calls in the other registered repos
 repo_root: str | None        # Repository root; auto-detected
-files_limit: int = 50        # File rows per page (max 200)
-cursor: str | None           # next_cursor of the previous reply, to read the next page of files
+files_limit: int = 50        # Rows per list per page (max 200): files and each capped list
+cursor: str | None           # next_cursor of the previous reply, to read the next page of every list
 ```
 
 The graph holds the default branch, so a pull request's new files are not in it. This tool reads only the files the
@@ -1748,12 +1756,12 @@ repos (Feign, JavaScript and TypeScript) that reach them, read from each repo's 
 lists the DDL in migration files the pull request adds or changes. `notes` states what the answer rests on: a stacked
 pull request (pass its parent as `base`; the reply then also says how many files differ from the default branch), a shallow
 clone without a merge base, Python routes whose router prefix sits in a file the pull request does not touch, and files
-that could not be parsed. At most 300 files are parsed per request; lists are capped, with `files_truncated` and
-`external_callers_total` reporting the real size. `files` pages: `files_total` is the full count, and when
-`files_truncated` is true `next_cursor` returns the next `files_limit` rows (a later page has `offset`). A cursor is
-refused for another `pr`, `head`, `base`, `depth` or `include_external`, or when the changed files differ now. Only
-the first page carries `endpoints`, `contract_changes`, `same_file_endpoints`, `config_changes`, `external_callers`
-and `schema_changes`; a later page says so in `continuation_note`.
+that could not be parsed. At most 300 files are parsed per request. `files`, `contract_changes`, `endpoints`,
+`same_file_endpoints`, `config_changes`, `external_callers` and `schema_changes` page together, one cursor for all, each
+by at most `files_limit` rows a page: every list has a `*_total` (its full size) and a `*_truncated` flag, and while any
+list has more rows `next_cursor` returns the next page of all of them (a later page has `offset`, the index of its first
+file row). A cursor is refused for another `pr`, `head`, `base`, `depth` or `include_external`, or when the rows differ
+now. A later page says so in `continuation_note` and leaves out `external_info`.
 
 ## Result Bounds
 
