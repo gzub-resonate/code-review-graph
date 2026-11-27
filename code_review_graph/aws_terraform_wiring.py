@@ -56,6 +56,14 @@ DATA_STORES: dict[str, tuple[str, str, str]] = {
     "aws_opensearch_domain": ("es", "search-domain", "domain_name"),
     "aws_elasticsearch_domain": ("es", "search-domain", "domain_name"),
 }
+#: Terraform type -> ``(service, target kind, name attribute)`` of a name application code looks up
+#: by string: an SSM parameter (``get_parameter``) and an IAM role (``sts.assume_role`` names it by
+#: ARN). Declared like the resources above, but not in ``DECLARED`` or ``REF_TYPES``: no trigger
+#: or notification wiring points at them.
+IDENTITY_TYPES: dict[str, tuple[str, str, str]] = {
+    "aws_ssm_parameter": ("ssm", "parameter", "name"),
+    "aws_iam_role": ("sts", "role", "name"),
+}
 #: Terraform type -> ``(service, kind)`` of a resource that can be named in an ARN attribute.
 REF_TYPES: dict[str, tuple[str, str]] = {
     **{rtype: (v[0], v[1]) for rtype, v in DECLARED.items()},
@@ -70,7 +78,7 @@ MARKERS = (
     b"aws_dynamodb_table", b"aws_cloudwatch_event", b"aws_scheduler_schedule",
     b"aws_apigatewayv2", b"aws_db_instance", b"aws_rds_cluster", b"aws_db_proxy",
     b"aws_elasticache_", b"aws_lb", b"aws_alb", b"aws_elb", b"aws_opensearch_domain",
-    b"aws_elasticsearch_domain",
+    b"aws_elasticsearch_domain", b'"aws_ssm_parameter"', b'"aws_iam_role"',
 )
 _MAX_TARGETS = 20
 
@@ -200,7 +208,7 @@ def scan_wiring(
     found: dict[tuple[str, str], str] = {
         ("aws_s3_bucket", label): name for label, name in bucket_names.items()
     }
-    declarable = {**DECLARED, **DATA_STORES}
+    declarable = {**DECLARED, **DATA_STORES, **IDENTITY_TYPES}
     for _start, rtype, label, attrs, _body in parsed:
         if rtype in declarable:
             _service, kind, attr = declarable[rtype]
