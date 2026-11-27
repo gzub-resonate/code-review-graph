@@ -262,6 +262,7 @@ def _log_tool_error(tool_name: str, root: str | None, result: Any) -> None:
 
 def _log_tool_timing(
     tool_name: str, root: str | None, started: float, stages: dict[str, float], status: str,
+    caches: dict[str, tuple[int, int, int]] | None = None,
 ) -> None:
     """One ``tool timing`` line per call: queue wait, body, provenance stamp and the total.
 
@@ -269,7 +270,11 @@ def _log_tool_timing(
     worker thread took (``begin``, ``work_done``, ``end``). ``queue_ms`` is the wait for a
     worker slot, so a slow call that was mostly queued shows up as that, not as slow work.
     A call over ``CRG_SLOW_TOOL_SECONDS`` (default 120) is logged at WARNING as ``slow tool``.
+    *caches* is what the registered caches (``query_cache``) were asked during the call, as
+    ``name:hits/misses/size``; the counters are process-wide, so overlapping calls share them.
     """
+    from .query_cache import format_delta
+
     now = time.perf_counter()
     begin = stages.get("begin", now)
     work_done = stages.get("work_done", stages.get("end", now))
@@ -278,11 +283,19 @@ def _log_tool_timing(
     slow = total >= env_int("CRG_SLOW_TOOL_SECONDS", 120)
     logger.log(
         logging.WARNING if slow else logging.INFO,
-        "%s tool=%s repo_root=%r status=%s total_ms=%d queue_ms=%d work_ms=%d provenance_ms=%d",
+        "%s tool=%s repo_root=%r status=%s total_ms=%d queue_ms=%d work_ms=%d provenance_ms=%d "
+        "caches=%s",
         "slow tool" if slow else "tool timing", tool_name, root, status,
         total * 1000, (begin - started) * 1000, (work_done - begin) * 1000,
-        (end - work_done) * 1000,
+        (end - work_done) * 1000, format_delta(caches or {}),
     )
+
+
+def _cache_use(before: list[dict[str, tuple[int, int, int]]]) -> dict[str, tuple[int, int, int]]:
+    """What the registered caches were asked since *before* was taken (empty if never taken)."""
+    from .query_cache import delta, snapshot
+
+    return delta(before[0], snapshot()) if before else {}
 
 
 async def _offload(
@@ -347,6 +360,7 @@ async def _offload(
     started = time.perf_counter()
     stages: dict[str, float] = {}
     outcome = ["ok"]
+    cache_before: list[dict[str, tuple[int, int, int]]] = []
 
     def run_fn() -> Any:
         try:
@@ -364,6 +378,9 @@ async def _offload(
         # otherwise block the event loop before the timeout even starts.
         # Module __getattr__ never serves a bare global lookup, so every lazy
         # name the tool body reads must be in globals() before it runs.
+        from .query_cache import snapshot
+
+        cache_before.append(snapshot())
         stages["begin"] = time.perf_counter()
         for name in getattr(getattr(work, "__code__", None), "co_names", ()):
             if name in _LAZY_TOOL_NAMES and name not in globals():
@@ -400,7 +417,9 @@ async def _offload(
             lambda: _resolve_attr("with_provenance")(error_response, root)
         )
     finally:
-        _log_tool_timing(tool_name, root, started, stages, outcome[0])
+        _log_tool_timing(
+            tool_name, root, started, stages, outcome[0], _cache_use(cache_before),
+        )
 
 
 # What an agent reads before it loads any of these tools: with deferred tool

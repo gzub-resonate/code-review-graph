@@ -352,7 +352,7 @@ def js_no_route_reason(call: Any, pools: list[Any]) -> str:
     ``variable_segments_unmatched`` (the route has ``{}`` pieces and no endpoint shape fits),
     ``route_missing_under_served_base`` (that first segment is served, this route is not).
     """
-    from .feign_links import normalize_route
+    from .query_cache import normalize_route
 
     if not any(pool.exact or pool.catch_all for pool in pools):
         return "no_servers_indexed"

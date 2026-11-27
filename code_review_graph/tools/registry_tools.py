@@ -22,6 +22,7 @@ from .. import external_hosts as eh
 from .. import feign_links as fl
 from .. import infra_join as ij
 from .. import js_route_leads as jl
+from .. import query_cache as qc
 from .. import server_route_index as sri
 from .. import service_aliases as sa
 from .. import stepfunction_links as sl
@@ -932,7 +933,7 @@ def _load_endpoints_uncached(
 
 def _route_in_scope(call_route: str, wanted: str) -> bool:
     """Whether ``call_route`` equals ``wanted`` or sits below it, segment-wise."""
-    have = fl.normalize_route(call_route)
+    have = qc.normalize_route(call_route)
     return wanted == "/" or have == wanted or have.startswith(wanted + "/")
 
 
@@ -2423,7 +2424,7 @@ def cross_repo_requests_func(
                 shapes[index] = xf.ShapeIndex(servers)
             return shapes[index]
 
-        wanted_route = fl.normalize_route(route) if route else None
+        wanted_route = qc.normalize_route(route) if route else None
         counts: dict[str, int] = {}
         counts_by_reason: dict[str, int] = {}
         origin_counts: dict[str, int] = {}
