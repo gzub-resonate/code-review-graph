@@ -210,6 +210,12 @@
 
 ### Fixed
 
+- Terragrunt `include` precedence for `inputs` now follows the documented rules: when two
+  `include` blocks set the same input the later one wins (it was the earlier one), and an
+  include with `merge_strategy = "no_merge"` contributes no inputs. The unit's own value still
+  wins, `deep` still combines maps key by key, and `expose` does not change what is merged. This
+  changes the index build path (`terragrunt_static.py`), so the index fingerprint moves.
+
 - `origin="awssdk"` no longer makes a data-store row from an AWS endpoint host that is only written
   somewhere: in a comment, a Python docstring, a log or print call, a sample config (`*.example`,
   `*.sample`, `*.dist`), a fixture, mock, example or docs directory, or a config key that does not name
