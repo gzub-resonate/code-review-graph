@@ -223,3 +223,18 @@ def test_join_reports_what_triggers_a_declared_function() -> None:
     assert declared["triggered_by"] == ["events/nightly-rule (event_target)"]
     route = next(r for r in result if r["operation"] == "route")
     assert route["route"] == "POST /v1/jobs" and route["status"] == "declared"
+
+
+def test_ssm_parameter_and_iam_role_with_a_written_name_are_declared() -> None:
+    src = (
+        'resource "aws_ssm_parameter" "slack" {\n  name = "/config/slack/webhook_url/a"\n}\n'
+        'resource "aws_iam_role" "copy" {\n  name = "CopyDevAssumeRole"\n}\n'
+        'resource "aws_iam_role_policy" "p" {\n  name = "not-a-role"\n}\n'
+        'resource "aws_ssm_parameter" "dyn" {\n  name = "/c/${var.env}"\n}\n'
+    )
+    found = by_key(tf_edges("main.tf", src))
+    param = found[("external:aws-ssm:/config/slack/webhook_url/a", "declare")]
+    assert param.extra["terraform_type"] == "aws_ssm_parameter"
+    role = found[("external:aws-sts:CopyDevAssumeRole", "declare")]
+    assert role.extra["terraform_type"] == "aws_iam_role"
+    assert len(found) == 2

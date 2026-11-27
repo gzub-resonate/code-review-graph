@@ -10,7 +10,8 @@
   (``../../resources/sns``): the module's resource reads ``var.name``, the module block passes
   an argument that is evaluated here.
 * **S2** is the same rule for an SNS topic created through such a module (any resource type in
-  ``aws_terraform_wiring.DECLARED``, ``DATA_STORES`` or ``aws_s3_bucket``).
+  ``aws_terraform_wiring.DECLARED``, ``DATA_STORES``, ``IDENTITY_TYPES`` (an SSM parameter or an
+  IAM role) or ``aws_s3_bucket``).
 
 The expression is reduced by :class:`~code_review_graph.terragrunt_static.TerragruntEvaluator`
 in its Terraform mode (nothing is run; ``data.*``, ``each.*``, ``count.*``, module outputs and a
@@ -29,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .aws_terraform_wiring import DATA_STORES, DECLARED
+from .aws_terraform_wiring import DATA_STORES, DECLARED, IDENTITY_TYPES
 from .terragrunt_static import (
     TerragruntEvaluator,
     attribute_expression,
@@ -38,7 +39,7 @@ from .terragrunt_static import (
 
 #: Terraform type -> ``(service, target kind, name attribute)`` of what this module can name.
 NAMEABLE: dict[str, tuple[str, str, str]] = {
-    **DECLARED, **DATA_STORES, "aws_s3_bucket": ("s3", "bucket", "bucket"),
+    **DECLARED, **DATA_STORES, **IDENTITY_TYPES, "aws_s3_bucket": ("s3", "bucket", "bucket"),
 }
 
 MAX_UNITS = 5_000

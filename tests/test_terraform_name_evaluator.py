@@ -196,3 +196,41 @@ module "x" {
 }
 ''')
     assert declared(tmp_path, "main.tf") == {}
+
+
+def test_ssm_parameter_and_iam_role_names_from_locals_and_unit_inputs(tmp_path: Path) -> None:
+    write(tmp_path, "aws/dev/common.hcl", 'inputs = {\n  environment = "dev"\n}\n')
+    write(tmp_path, "aws/dev/iam/terragrunt.hcl", '''
+terraform {
+  source = "${get_parent_terragrunt_dir("root")}/modules//iam"
+}
+include {
+  path = find_in_parent_folders("common.hcl")
+}
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+''')
+    write(tmp_path, "root.hcl", "")
+    write(tmp_path, "modules/iam/variables.tf", 'variable "environment" {\n  type = string\n}\n')
+    write(tmp_path, "modules/iam/main.tf", '''
+locals {
+  prefix = "Copy-${upper(var.environment)}"
+}
+resource "aws_iam_role" "copy" {
+  name = "${local.prefix}AssumeRole"
+}
+resource "aws_ssm_parameter" "slack" {
+  name = "/config/${var.environment}/slack_url"
+}
+resource "aws_ssm_parameter" "unknown" {
+  name = "/config/${var.nobody_sets_this}/x"
+}
+''')
+    found = declared(tmp_path, "modules/iam/main.tf")
+    assert "external:aws-ssm:/config/dev/slack_url" in found
+    assert found["external:aws-ssm:/config/dev/slack_url"].extra["name_evaluated"] is True
+    assert found["external:aws-ssm:/config/dev/slack_url"].extra["terraform_label"] == "slack"
+    assert not any("nobody_sets_this" in n for n in found)
+    assert "external:aws-sts:Copy-DEVAssumeRole" in found
+    assert len(found) == 2

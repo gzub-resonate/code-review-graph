@@ -130,6 +130,7 @@ import boto3
 ssm = boto3.client("ssm")
 s3 = boto3.client("s3")
 ssm.get_parameter(Name="/app/setting")
+boto3.client("secretsmanager").get_secret_value(SecretId="app/secret")
 s3.get_object(Bucket="mock-bucket", Key="k")
 s3.get_object(Bucket="data-bucket", Key="k")
 s3.get_object(Bucket="lonely-bucket", Key="k")
@@ -146,7 +147,8 @@ class TestAwsSdkReasons:
         self.build(tmp_path, registry, None)
         reply = cross_repo_requests_func(origin="awssdk", max_results=100)
         got = reasons(reply)
-        assert got["/app/setting"] == "no_owner_lookup"
+        assert got["app/secret"] == "no_owner_lookup"
+        assert got["/app/setting"] == "not_declared_in_registry"
         assert got["mock-bucket"] == "test_double"
         assert got["lonely-bucket"] == "not_declared_in_registry"
         assert set(reply["counts"]) == {"not_found"}
@@ -162,7 +164,7 @@ class TestAwsSdkReasons:
         assert got["lonely-bucket"] == "declared_name_dynamic"
         assert got["data-bucket"] == "declared_name_dynamic"
         assert got["mock-bucket"] == "test_double"
-        assert got["/app/setting"] == "no_owner_lookup"
+        assert got["app/secret"] == "no_owner_lookup"
 
     def test_wrapper_module_marks_the_miss(self, tmp_path, registry):
         self.build(tmp_path, registry, {
@@ -185,8 +187,25 @@ class TestAwsSdkReasons:
         reply = cross_repo_requests_func(
             origin="awssdk", status="no_owner_lookup", max_results=100,
         )
-        assert [r["target_name"] for r in reply["results"]] == ["/app/setting"]
-        assert reply["counts"]["not_found"] == 4
+        assert [r["target_name"] for r in reply["results"]] == ["app/secret"]
+        assert reply["counts"]["not_found"] == 5
         old = cross_repo_requests_func(origin="awssdk", status="not_found", max_results=100)
-        assert old["total"] == 4
+        assert old["total"] == 5
         assert all(r["status"] == "not_found" for r in old["results"])
+
+
+    def test_declared_ssm_parameter_and_role_are_matched_not_missed(self, tmp_path, registry):
+        make_repo(tmp_path, registry, "app", {"app.py": (
+            "import boto3\n"
+            'boto3.client("ssm").get_parameter(Name="/app/setting")\n'
+            'boto3.client("sts").assume_role(\n'
+            '    RoleArn="arn:aws:iam::123456789012:role/CopyDevAssumeRole", RoleSessionName="s")\n'
+        )})
+        make_repo(tmp_path, registry, "infra", {"p.tf": (
+            'resource "aws_ssm_parameter" "s" {\n  name = "/app/setting"\n}\n'
+            'resource "aws_iam_role" "r" {\n  name = "CopyDevAssumeRole"\n}\n'
+        )})
+        reply = cross_repo_requests_func(origin="awssdk", repos=["app"], max_results=100)
+        status = {r["target_name"]: r["status"] for r in reply["results"]}
+        assert status["/app/setting"] == "matched"
+        assert status["CopyDevAssumeRole"] == "matched"
