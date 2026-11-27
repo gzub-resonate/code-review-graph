@@ -7,7 +7,8 @@ reads), never from a new parse-time extraction:
 
 ``awssdk``
     ``test_double`` (name looks like a mock or placeholder, or the call is in a test file),
-    ``no_owner_lookup`` (the service has no owner lookup at all: ssm, sts, secretsmanager),
+    ``no_owner_lookup`` (the service has no owner lookup at all: secretsmanager, cloudwatch ...;
+    an SSM parameter or IAM role is looked up by its ``aws_ssm_parameter`` / ``aws_iam_role``),
     ``declared_name_dynamic`` (a registered repo declares resources of that Terraform type, or
     an S3 bucket wrapper module, whose name is not a plain literal, so the miss may be a name
     that cannot be evaluated), ``not_declared_in_registry`` otherwise.
@@ -29,7 +30,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .aws_terraform_wiring import DATA_STORES, DECLARED
+from .aws_terraform_wiring import DATA_STORES, DECLARED, IDENTITY_TYPES
 
 AWSSDK_REASONS = (
     "no_owner_lookup", "declared_name_dynamic", "test_double", "not_declared_in_registry",
@@ -45,6 +46,7 @@ REASONS_BY_ORIGIN = {"awssdk": AWSSDK_REASONS, "stepfunction": STEPFUNCTION_REAS
 _TYPES: dict[str, tuple[str, str]] = {
     **{t: (v[0], v[1]) for t, v in DECLARED.items()},
     **{t: (v[0], v[1]) for t, v in DATA_STORES.items()},
+    **{t: (v[0], v[1]) for t, v in IDENTITY_TYPES.items()},
     "aws_s3_bucket": ("s3", "bucket"),
 }
 #: Services that have some owner lookup (Terraform declaration or definition rules).

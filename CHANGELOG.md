@@ -4,6 +4,12 @@
 
 ### Added
 
+- Terraform `aws_ssm_parameter` and `aws_iam_role` resources with a written (or statically
+  evaluated, `name_evaluated`) name are now `declare` edges, so an `awssdk` call that reads an SSM
+  parameter or assumes a role by name finds its Terraform owner instead of `no_owner_lookup`.
+  The `not_found_reason` of an unmatched SSM or STS call is now `not_declared_in_registry`
+  (or `declared_name_dynamic`); `no_owner_lookup` stays for services with no Terraform owner type.
+  Parse-time change: the index fingerprint moves, so repos need one reindex.
 - Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.
   `requests.get(f"{BASE}/users")` resolves when `BASE` is a module-level string literal in the same
   file, or one imported by name (`from settings import BASE`, `from .conf import BASE`) from a module
