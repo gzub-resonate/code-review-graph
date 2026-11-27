@@ -351,10 +351,22 @@ def _load_pull_request(
         return out
     ranges = pbr.diff_ranges(repo, base_ref, head_sha, merge_based)
     sizes = pbr.blob_sizes(repo, head_sha, [c.path for c in changes if c.status != "deleted"])
+    head_reader = pbr.git_file_reader(repo, head_sha)
+    base_reader = pbr.git_file_reader(repo, (common if merge_based and common else base_ref))
+    # One Git process per side for the files analyse will read, not one per file.
+    live = [c for c in changes if c.status != "deleted"]
+    head_reader.prime(
+        [c.path for c in live[:pbr.MAX_PARSED_FILES]]
+        + [c.path for c in live[pbr.MAX_PARSED_FILES:] if pbr.is_migration(c.path)]
+    )
+    base_reader.prime(
+        [c.old_path or c.path for c in changes if pbr.is_config_file(c.path)][
+            :pbr.MAX_CONFIG_FILES
+        ]
+    )
     out["found"] = pbr.analyse(
-        store, repo, changes, ranges, pbr.git_file_reader(repo, head_sha), depth=depth,
-        sizes=sizes,
-        read_base=pbr.git_file_reader(repo, (common if merge_based and common else base_ref)),
+        store, repo, changes, ranges, head_reader, depth=depth, sizes=sizes,
+        read_base=base_reader,
     )
     stacked = _stacked_note(repo, base_ref, head_sha, base)
     if stacked:
