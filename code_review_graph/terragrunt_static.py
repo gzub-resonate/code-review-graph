@@ -37,6 +37,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+#: Looks up ``var.<name>`` for a Terraform file; ``None`` when the value is not known.
+VariableLookup = Callable[[str], Optional[str]]
+
 #: Why a reference stays dynamic. ``env``: reads an environment variable (``get_env``).
 #: ``command``: runs a command (``run_cmd``). ``variable``: depends on a value that is not
 #: known from the files (``var.*``, ``each.*``, ``dependency`` outputs, a conditional).
@@ -144,7 +147,12 @@ class TerragruntEvaluator:
         root_node: Any,
         parse: Callable[[bytes], Optional[Any]],
         is_excluded: Callable[[Path], bool],
+        variables: Optional[VariableLookup] = None,
     ) -> None:
+        # ``variables`` switches on the Terraform mode used by ``terraform_names``: ``var.x``
+        # reads the lookup (``None`` stays dynamic) and a conditional whose test compares
+        # strings that are known is taken. Without it both stay dynamic, as in a Terragrunt file.
+        self._variables = variables
         self._root = repo_root
         self._parse = parse
         self._is_excluded = is_excluded
@@ -494,6 +502,8 @@ class TerragruntEvaluator:
             raise StaticDynamicError("unsupported_function")
         if kind == "function_call":
             return self._call(node, frame, depth + 1)
+        if kind == "conditional" and self._variables is not None:
+            return self._conditional(node, frame, depth + 1)
         if kind in ("variable_expr", "conditional"):
             raise StaticDynamicError("variable")
         raise StaticDynamicError("unsupported_function")
@@ -577,9 +587,72 @@ class TerragruntEvaluator:
             if len(names) != 3 or names[1] != "locals":
                 raise StaticDynamicError("unsupported_function")
             return self._include_local(names[0], names[2], depth)
+        if root == "var" and self._variables is not None:
+            if len(names) != 1:
+                raise StaticDynamicError("variable")
+            value = self._variables(names[0])
+            if value is None:
+                raise StaticDynamicError("variable")
+            return value
         if root in _VARIABLE_ROOTS:
             raise StaticDynamicError("variable")
         raise StaticDynamicError("unsupported_function")
+
+    # -- Terraform conditionals -------------------------------------------------------------
+
+    def _operand(self, group: list[Any], frame: _Frame, depth: int) -> Any:
+        """The value of one side of a comparison: a node, or ``var.x`` split into its parts."""
+        if not group:
+            raise StaticDynamicError("unsupported_function")
+        if group[0].type == "variable_expr":
+            return self._chain(group[0], group[1:], frame, depth + 1)
+        if len(group) != 1:
+            raise StaticDynamicError("unsupported_function")
+        return self._eval(group[0], frame, depth + 1)
+
+    def _truth(self, node: Any, frame: _Frame, depth: int) -> bool:
+        """A condition built from ``==``, ``!=``, ``!``, ``&&`` and ``||`` over known strings."""
+        self._nodes += 1
+        if depth > MAX_EVAL_DEPTH or self._nodes > MAX_EVAL_NODES:
+            raise StaticDynamicError("depth_limit")
+        kids = [c for c in node.named_children if c.type != "comment"]
+        if node.type in ("expression", "operation") and len(kids) == 1:
+            return self._truth(kids[0], frame, depth + 1)
+        if node.type == "literal_value" and node.children and node.children[0].type == "bool_lit":
+            return _text(node.children[0]) == "true"
+        if node.type == "unary_operation":
+            if not node.children or node.children[0].type != "!":
+                raise StaticDynamicError("unsupported_function")
+            return not self._truth_group(node.children[1:], frame, depth + 1)
+        if node.type != "binary_operation":
+            raise StaticDynamicError("variable")
+        signs = [i for i, c in enumerate(node.children) if c.type in ("==", "!=", "&&", "||")]
+        if len(signs) != 1:
+            raise StaticDynamicError("unsupported_function")
+        at = signs[0]
+        sign = node.children[at].type
+        left, right = node.children[:at], node.children[at + 1:]
+        if sign in ("&&", "||"):
+            first = self._truth_group(left, frame, depth + 1)
+            second = self._truth_group(right, frame, depth + 1)
+            return (first and second) if sign == "&&" else (first or second)
+        a = self._operand(left, frame, depth + 1)
+        b = self._operand(right, frame, depth + 1)
+        if not isinstance(a, str) or not isinstance(b, str):
+            raise StaticDynamicError("unsupported_function")
+        return (a == b) if sign == "==" else (a != b)
+
+    def _truth_group(self, group: list[Any], frame: _Frame, depth: int) -> bool:
+        if len(group) != 1:
+            raise StaticDynamicError("unsupported_function")
+        return self._truth(group[0], frame, depth + 1)
+
+    def _conditional(self, node: Any, frame: _Frame, depth: int) -> Any:
+        parts = [c for c in node.children if c.type == "expression"]
+        if len(parts) != 3:
+            raise StaticDynamicError("unsupported_function")
+        taken = parts[1] if self._truth(parts[0], frame, depth + 1) else parts[2]
+        return self._eval(taken, frame, depth + 1)
 
     # -- locals and includes --------------------------------------------------------------
 
@@ -845,6 +918,14 @@ def _vf_length(args: list[Any]) -> int:
     return len(args[0])
 
 
+def _vf_case(fold: Callable[[str], str]) -> Callable[[list[Any]], str]:
+    def apply(args: list[Any]) -> str:
+        if len(args) != 1 or not isinstance(args[0], str):
+            raise StaticDynamicError("unsupported_function")
+        return fold(args[0])
+    return apply
+
+
 def _vf_basename(args: list[Any]) -> str:
     if len(args) != 1 or not isinstance(args[0], str):
         raise StaticDynamicError("unsupported_function")
@@ -858,6 +939,8 @@ _VALUE_FUNCTIONS: dict[str, Callable[[list[Any]], Any]] = {
     "slice": _vf_slice,
     "length": _vf_length,
     "basename": _vf_basename,
+    "lower": _vf_case(str.lower),
+    "upper": _vf_case(str.upper),
 }
 
 #: Functions whose value follows from the file path, the repository root and the files.
@@ -872,3 +955,33 @@ _PATH_FUNCTIONS: dict[str, Callable[..., str]] = {
     "path_relative_from_include": TerragruntEvaluator._fn_relative_from_include,
     "dirname": TerragruntEvaluator._fn_dirname,
 }
+
+
+def labelled_blocks(root: Any, block_type: str) -> list[tuple[tuple[str, ...], Any]]:
+    """``(labels, body)`` of every top-level block of *block_type*, in file order.
+
+    Unlike the private single-label helper, a ``resource "type" "name"`` keeps both labels.
+    """
+    body = next((c for c in root.children if c.type == "body"), None)
+    found: list[tuple[tuple[str, ...], Any]] = []
+    if body is None:
+        return found
+    for block in body.children:
+        if block.type != "block" or not block.children:
+            continue
+        if block.children[0].type != "identifier" or _text(block.children[0]) != block_type:
+            continue
+        inner = next((c for c in block.children if c.type == "body"), None)
+        if inner is None:
+            continue
+        labels = tuple(
+            "".join(_text(t) for t in child.children if t.type == "template_literal")
+            for child in block.children if child.type == "string_lit"
+        )
+        found.append((labels, inner))
+    return found
+
+
+def attribute_expression(body: Any, name: str) -> Optional[Any]:
+    """Public form of :func:`_attribute_expression`."""
+    return _attribute_expression(body, name)
