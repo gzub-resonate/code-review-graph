@@ -21,6 +21,7 @@ from ..changes import (  # noqa: F401
 from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..errors import ChangeDiscoveryError
+from ..flow_twins import shared_twin_reads, with_shared_twin_reads
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
@@ -993,7 +994,8 @@ def get_affected_flows_func(
         # Convert to absolute paths for graph lookup. Graph identity uses
         # POSIX separators (#774), so normalize the joined paths.
         abs_files = [normalize_file_path(root / f) for f in changed_files]
-        result = _get_affected_flows(store, abs_files)
+        with shared_twin_reads(store):
+            result = _get_affected_flows(store, abs_files)
 
         total = result["total"]
         flows = result["affected_flows"]
@@ -1359,7 +1361,7 @@ def detect_changes_func(
             diff_ranges = DiffRanges(diff_ranges)
         abs_ranges = diff_ranges.remapped(root)
 
-        analysis = analyze_changes(
+        analysis = with_shared_twin_reads(store, analyze_changes)(
             store,
             changed_files=abs_files,
             changed_ranges=abs_ranges if abs_ranges else None,
@@ -1395,7 +1397,7 @@ def detect_changes_func(
                 if not (node.is_test or is_test_file(node.file_path, root))
             ]
             if assumed_nodes:
-                analysis = analyze_changes(
+                analysis = with_shared_twin_reads(store, analyze_changes)(
                     store,
                     changed_files=abs_files,
                     repo_root=str(root),

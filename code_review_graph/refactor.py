@@ -2664,6 +2664,8 @@ def find_dead_code(
     ).fetchall():
         name_counts[row[0]] = row[1]
 
+    plausible_pairs: dict[tuple[str, str], bool] = {}
+
     def _is_plausible_caller(
         edge_file: str, node_file: str, node_name: str = "", same_package: bool = False,
     ) -> bool:
@@ -2684,6 +2686,15 @@ def find_dead_code(
         # Unique names (only one definition) have no ambiguity -- accept all callers.
         if node_name and name_counts.get(node_name, 0) == 1:
             return True
+        # Past this point the answer depends only on the two files, never on the name, and a
+        # name shared by many definitions asks the same file pair once per definition.
+        pair = (edge_file, node_file)
+        cached = plausible_pairs.get(pair)
+        if cached is None:
+            cached = plausible_pairs[pair] = _plausible_by_imports(edge_file, node_file)
+        return cached
+
+    def _plausible_by_imports(edge_file: str, node_file: str) -> bool:
         for imp_target in importer_files.get(edge_file, ()):
             # Strip "::name" suffix — workspace-resolved imports may include it
             imp_path = imp_target.split("::")[0] if "::" in imp_target else imp_target
