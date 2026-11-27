@@ -287,6 +287,10 @@ def _spy_on_reads(monkeypatch):
     def spy(repo_root, *args, **kwargs):
         if args[0] == "show":
             shown.append(args[1].split(":", 1)[1])
+        elif args[0] == "cat-file" and args[1] == "--batch":
+            # A batched read of the files named on stdin, in place of one ``show`` each.
+            lines = kwargs["stdin"].decode().splitlines()
+            shown.extend(line.split(":", 1)[1] for line in lines)
         return real(repo_root, *args, **kwargs)
 
     monkeypatch.setattr(pbr, "_git", spy)
