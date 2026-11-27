@@ -211,7 +211,7 @@ def _graph_marker(db_path: Path) -> tuple[Any, ...] | None:
         meta = dict(conn.execute(
             "SELECT key, value FROM metadata WHERE key IN ('last_updated', 'git_head_sha')"
         ).fetchall())
-        counts = []
+        counts: list[Any] = []
         for table in ("nodes", "edges"):
             high, rows = conn.execute(f"SELECT MAX(id), COUNT(*) FROM {table}").fetchone()
             counts.extend((high, rows))
