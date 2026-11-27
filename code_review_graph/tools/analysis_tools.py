@@ -12,6 +12,7 @@ from ..analysis import (
     find_surprising_connections,
     generate_suggested_questions,
 )
+from ..analysis_snapshot import RESULTS, file_state, in_memory_snapshot
 from ..paging import graph_stamp, make_scope, paginate, shown_range
 from ._common import (
     _get_store,
@@ -392,13 +393,25 @@ def get_knowledge_gaps_func(
 
     store, root = _get_store(repo_root or None)
     try:
-        stats: dict[str, int] = {}
-        raw = find_knowledge_gaps(
-            store, repo_root=root, max_isolated=None, max_untested=None,
-            include_tests=include_tests, include_non_code=include_non_code,
-            include_generated=include_generated, stats=stats,
-            exclude_data_types=exclude_data_types,
-        )
+        flags = (include_tests, include_non_code, include_generated, exclude_data_types)
+        state = file_state(store.db_path)
+
+        def compute() -> tuple[dict[str, list[dict]], dict[str, int], str]:
+            # The analysis reads every edge and node. On the file that is hundreds of
+            # thousands of page reads, so run it on an in-memory copy (same SQL, same rows).
+            with in_memory_snapshot(store):
+                found_stats: dict[str, int] = {}
+                found = find_knowledge_gaps(
+                    store, repo_root=root, max_isolated=None, max_untested=None,
+                    include_tests=include_tests, include_non_code=include_non_code,
+                    include_generated=include_generated, stats=found_stats,
+                    exclude_data_types=exclude_data_types,
+                )
+                return found, found_stats, graph_stamp(store)
+
+        # Every cursor page asks for the same untruncated lists, so keep them per graph state.
+        key = None if state is None else ("knowledge_gaps", str(store.db_path), state, *flags)
+        (raw, stats, stamp), _ = RESULTS.get_or_compute(key, compute)
         # Totals must come from the untruncated lists: the summary counts are
         # the whole point of the tool, and capping them would hide the gap.
         totals = {category: len(rows) for category, rows in raw.items()}
@@ -410,7 +423,7 @@ def get_knowledge_gaps_func(
                 include_non_code=include_non_code, include_generated=include_generated,
                 exclude_data_types=exclude_data_types,
             ),
-            stamp=graph_stamp(store),
+            stamp=stamp,
         )
         if detail_level == "minimal":
             gaps = {c: _project(rows, _MINIMAL_GAP_FIELDS) for c, rows in gaps.items()}
