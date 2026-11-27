@@ -28,6 +28,7 @@ from .. import stepfunction_links as sl
 from .. import terraform_links as tl
 from .. import trigger_links as trl
 from .. import workflow_links as wl
+from .. import xrepo_fast as xf
 from ..constants import cross_repo_budget_seconds, cross_repo_workers
 from ..endpoint_index import attach as attach_endpoints
 from ..endpoint_index import extract_endpoints, read_endpoint_index
@@ -54,6 +55,7 @@ from ..repo_cache import (
     submit_shared,
 )
 from ..search import hybrid_search
+from ..xrepo_budget import BudgetSpent, Deadline
 from ._common import _bounded, _validate_positive_int
 
 logger = logging.getLogger(__name__)
@@ -360,14 +362,23 @@ def _open_for_search(db_path: Path, *, lookup_only: bool = False) -> GraphStore:
     return GraphStore(str(db_path))
 
 
+#: What ``_search_one_repo`` returns for a repo whose search the time budget cut off.
+_CUT_OFF: Any = object()
+#: SQLite virtual-machine steps between two looks at the clock while a search runs.
+_PROGRESS_STEPS = 20000
+
+
 def _search_one_repo(
     repo_index: int, repo_entry: dict[str, Any], query: str, kind: str | None, limit: int,
+    deadline: Deadline | None = None,
 ) -> tuple[str, list[tuple[int, int, int, dict[str, Any]]]] | None:
     """Search one repo (on a worker thread): its alias and its rows, or ``None``.
 
     ``None`` means the repo has no graph database or its search failed (logged), so it
     is not counted as searched. The graph is opened, and closed, inside this call: a
-    connection is never shared between two threads.
+    connection is never shared between two threads. With a *deadline*, a query still running
+    when it passes is stopped and the repo is reported as cut off (``_CUT_OFF``), to be named
+    in ``skipped_repos`` and searched first by the repeat.
     """
     repo_path = Path(repo_entry["path"])
     db_path = get_db_path(repo_path)
@@ -376,6 +387,10 @@ def _search_one_repo(
     try:
         store = _open_for_search(db_path)
         try:
+            if deadline is not None and deadline.at is not None:
+                store._conn.set_progress_handler(
+                    lambda: 1 if deadline.spent() else 0, _PROGRESS_STEPS,
+                )
             alias = repo_entry.get("alias", repo_path.name)
             rows: list[tuple[int, int, int, dict[str, Any]]] = _SearchedRows()
             found = _search_repo(store, query, kind, limit)
@@ -388,6 +403,11 @@ def _search_one_repo(
             return alias, rows
         finally:
             store.close()
+    except sqlite3.OperationalError as exc:
+        if deadline is not None and "interrupted" in str(exc):
+            return _CUT_OFF  # type: ignore[no-any-return]
+        logger.warning("Search failed for %s: %s", repo_path, exc)
+        return None
     except Exception as exc:
         logger.warning("Search failed for %s: %s", repo_path, exc)
         return None
@@ -448,6 +468,27 @@ def _repo_label(entry: dict[str, Any]) -> str:
 def _now() -> float:
     """The clock the call budget runs on (a seam for tests)."""
     return time.monotonic()
+
+
+#: The Feign/JS join asks the budget once per this many client calls of a repo.
+_JOIN_CHECK_EVERY = 32
+#: Repo paths whose join was cut short by the budget, so the repeat lets them finish.
+_JOINS_CUT: set[str] = set()
+_JOINS_CUT_LOCK = threading.Lock()
+_JOINS_CUT_MAX = 4096
+
+
+def _join_was_cut(entry: dict[str, Any]) -> bool:
+    """Whether the last call cut this repo's join short (the repeat then does not cut it)."""
+    with _JOINS_CUT_LOCK:
+        return str(entry["path"]) in _JOINS_CUT
+
+
+def _note_join_cut(entry: dict[str, Any]) -> None:
+    with _JOINS_CUT_LOCK:
+        if len(_JOINS_CUT) >= _JOINS_CUT_MAX:
+            _JOINS_CUT.clear()
+        _JOINS_CUT.add(str(entry["path"]))
 
 
 def _out_of_budget(deadline: float | None) -> bool:
@@ -638,7 +679,7 @@ def cross_repo_search_func(
             selected = all_repos
 
         budget = cross_repo_budget_seconds()
-        deadline = _now() + budget if budget > 0 else None
+        dl = Deadline(budget, lambda: _now())
         ranked_results: list[tuple[int, int, int, dict[str, Any]]] = []
         searched_repos: list[str] = []
         skipped: list[str] = []
@@ -647,11 +688,15 @@ def cross_repo_search_func(
         outcomes: dict[int, tuple[str, list[tuple[int, int, int, dict[str, Any]]]]] = {}
         in_flight: dict[Future[Any], int] = {}
 
+        cut_off: set[int] = set()
+
         def reap(done: Any) -> None:
             for future in done:
                 outcome = future.result()
                 index = in_flight.pop(future)
-                if outcome is not None:
+                if outcome is _CUT_OFF:
+                    cut_off.add(index)
+                elif outcome is not None:
                     outcomes[index] = outcome
 
         # Up to ``workers`` repos are searched at once, on the pool every cross-repo call shares
@@ -666,16 +711,23 @@ def cross_repo_search_func(
                 reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
             # The first repo always runs, so a call makes progress; after that no
             # new repo is started once the budget is spent, and each one left is named.
-            if position and _out_of_budget(deadline):
+            if position and dl.spent():
                 left_over = sorted(order[position:])
                 skipped.extend(_repo_label(selected[i]) for i in left_over)
                 left = [(i, selected[i]) for i in left_over]
                 break
+            # The first repo is not cut off, so a call always finishes one search.
             future = submit_shared(
                 _search_one_repo, repo_index, repo_entry, query, kind, limit,
+                dl if position else None,
             )
             in_flight[future] = repo_index
         reap(wait(in_flight).done)
+        if cut_off:
+            # Searches the budget stopped mid-query are skipped like repos never started.
+            late = sorted(cut_off)
+            left = sorted([*left, *((i, selected[i]) for i in late)], key=lambda item: item[0])
+            skipped = [_repo_label(selected[i]) for i, _entry in left]
         _remember_skipped(selected, query, kind, limit, repos, cursor, left)
 
         capped: list[str] = []
@@ -1721,6 +1773,8 @@ def _infra_links(
         if knows is not None and knows(repo_path):
             return bool(exists_in_repo(None, repo_path, subdir))
         if index not in stores:
+            if out_of_budget():
+                raise BudgetSpent
             stores[index] = tl.open_store(all_repos[index])
         store = stores[index]
         if store is None:
@@ -1754,17 +1808,24 @@ def _infra_links(
         if edge_filter is not None and (target_repo or target_path) else None
     )
     phase = _now()
-    if prefetch is not None and any(
-        keep is None or keep(edge) for found in edges_by_repo.values() for edge in found
-    ):
-        prefetch(all_repos, workers)
-    timings["prefetch"] = _now() - phase
-    phase = _now()
+    rows: list[dict[str, Any]]
     resolve_args: tuple[Any, ...] = (edges_by_repo, all_repos, folder_exists)
     if read_context is not None:
         resolve_args += (context,)
     try:
+        if prefetch is not None and any(
+            keep is None or keep(edge) for found in edges_by_repo.values() for edge in found
+        ):
+            prefetch(all_repos, workers, out_of_budget if budget else None)
+        timings["prefetch"] = _now() - phase
+        phase = _now()
         rows = resolve(*resolve_args, keep=keep) if keep is not None else resolve(*resolve_args)
+    except BudgetSpent:
+        # The owners of the targets cannot be found without the other repos' definitions, and a
+        # partial lookup would call a target unresolved that is only unread. So no row is
+        # answered; every selected repo is named, and a repeat goes on from what was read.
+        rows = []
+        skipped = [_sanitize_name(_repo_label(e)) for e in selected]
     finally:
         for opened in stores.values():
             if opened is not None:
@@ -1893,7 +1954,9 @@ def _infra_links(
     if infrastructure and scoped and not described:
         result["infrastructure_note"] = _INFRASTRUCTURE_NO_MATCHES
     elif infrastructure and page.offset == 0:
-        _attach_infrastructure(result, all_repos, described, budget)
+        # The block gets what is left of the budget, not a budget of its own.
+        left_over = max(budget - (_now() - started), 0.001) if budget else 0.0
+        _attach_infrastructure(result, all_repos, described, left_over)
         if result["infrastructure"]["truncated"]:
             reasons.append(
                 "the infrastructure block stopped at its repo cap or the time budget "
@@ -2243,6 +2306,8 @@ def cross_repo_requests_func(
         for name in names:
             folded[fl.normalize_service_name(name)].add(name)
 
+        # Every graph's stamp is read below (cache keys); read them side by side, not one by one.
+        xf.prefetch_stamps(all_repos, cross_repo_workers())
         alias_rules = sa.load_alias_rules()
         facts = sa.FactsCache(all_repos)
         identity_holder: list[sa.IdentityIndex] = []
@@ -2250,7 +2315,9 @@ def cross_repo_requests_func(
         def identity() -> sa.IdentityIndex:
             # Read lazily: only a service name nothing else resolved needs every repo's facts.
             if not identity_holder:
-                facts.prefetch(range(len(all_repos)), cross_repo_workers())
+                # Every repo's facts are read here: the budget is checked between batches, and
+                # a spent one skips the client repo being joined (the facts read stay kept).
+                facts.prefetch(range(len(all_repos)), cross_repo_workers(), dl.spent)
                 identity_holder.append(sa.IdentityIndex(all_repos, facts))
             return identity_holder[0]
 
@@ -2308,6 +2375,13 @@ def cross_repo_requests_func(
             # One index over every repo, built once per registry state (kept across calls while
             # no graph changes); each client repo searches it with its own endpoints left out.
             if not everywhere:
+                # Every repo is read once for this index; the budget is checked between repos,
+                # so a spent one skips the client repo being joined and a repeat goes on from the
+                # repos already read (they are kept).
+                for other in range(len(all_repos)):
+                    if other not in loaded:
+                        dl.check()
+                    load(other)
                 stamps = tuple(
                     (str(e["path"]), _repo_label(e), graph_stamp(e)) for e in all_repos
                 )
@@ -2341,6 +2415,14 @@ def cross_repo_requests_func(
                 )
             return js_index[client_index]
 
+        shapes: dict[int, xf.ShapeIndex] = {}
+
+        def shapes_of(index: int, servers: list[fl.ServerEndpoint]) -> xf.ShapeIndex:
+            # One route-keyed view of a repo's endpoints per call, built when a call needs it.
+            if index not in shapes:
+                shapes[index] = xf.ShapeIndex(servers)
+            return shapes[index]
+
         wanted_route = fl.normalize_route(route) if route else None
         counts: dict[str, int] = {}
         counts_by_reason: dict[str, int] = {}
@@ -2351,7 +2433,7 @@ def cross_repo_requests_func(
         skipped: list[str]
         total = 0
         budget = cross_repo_budget_seconds()
-        deadline = _now() + budget if budget > 0 else None
+        dl = Deadline(budget, lambda: _now())
         started = 0
 
         client_indexes = [i for i, e in enumerate(all_repos) if id(e) in selected_ids]
@@ -2376,25 +2458,28 @@ def cross_repo_requests_func(
         skipped_at: dict[int, str] = {}
         rows_at: dict[int, list[dict[str, Any]]] = {}
 
-        for index in order:
-            entry = all_repos[index]
-            # The first client repo always runs, so a call makes progress; after
-            # that no new one is started once the budget is spent, and each is named.
-            if started and _out_of_budget(deadline):
-                skipped_at[index] = _repo_label(entry)
-                continue
-            started += 1
-            clients, _own_servers, why, _src = load(index)
-            if why:
-                note_unreadable(entry, "client", why)
-                continue
-            searched_at[index] = _sanitize_name(_repo_label(entry))
+        def join_repo(
+            index: int, entry: dict[str, Any], clients: list[fl.ClientCall],
+        ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int], dict[str, int], int, int]:
+            """One client repo's rows and tallies; ``BudgetSpent`` when the budget ran out."""
             seen: set[tuple[Any, ...]] = set()
             repo_rows: list[dict[str, Any]] = []
+            r_counts: dict[str, int] = {}
+            r_reasons: dict[str, int] = {}
+            r_origins: dict[str, int] = {}
+            r_multiple = 0
+            r_total = 0
+            # A repo whose join was cut short once is not cut again: its reads are kept, so the
+            # repeat only repeats the join, and it must be able to finish.
+            guarded = not _join_was_cut(entry)
+            ticks = 0
             for call in sorted(
                 clients,
                 key=lambda c: (c.file or "", c.line or 0, c.route, c.http_method),
             ):
+                ticks += 1
+                if guarded and ticks % _JOIN_CHECK_EVERY == 0:
+                    dl.check()
                 key = (
                     call.file, call.line, call.http_method, call.route, call.service,
                     call.origin,
@@ -2426,15 +2511,15 @@ def cross_repo_requests_func(
                     elif not resolution.indexes:
                         result = fl.LinkResult(fl.NO_TARGET_REPO, resolution.reason)
                     else:
-                        pool: list[fl.ServerEndpoint] = []
+                        pools: list[xf.ShapeIndex] = []
                         missing = False
                         for target in resolution.indexes:
                             found = servers_of(target)
                             if found is None:
                                 missing = True
                             else:
-                                pool.extend(found)
-                        result = fl.link_call(call, pool)
+                                pools.append(shapes_of(target, found))
+                        result = xf.link_call_indexed(call, pools)
                         if missing and result.status == fl.NO_ROUTE_MATCH:
                             result = fl.LinkResult(fl.NO_TARGET_REPO, "target_unreadable")
                 if reason is None and call.origin == "js":
@@ -2445,23 +2530,25 @@ def cross_repo_requests_func(
                     eh.no_target_reason(call.service, result.reason)
                     if result.status == fl.NO_TARGET_REPO else None
                 )
-                no_route_why = nfr.cross_repo_row_reason(
-                    call, result,
-                    own_index_for(index) if call.origin == "js" else None,
-                    js_index_for(index) if call.origin == "js" else None,
-                    load(index)[1] if call.origin != "js" else (),
-                )
+                if call.origin == "js":
+                    no_route_why = nfr.cross_repo_row_reason(
+                        call, result, own_index_for(index), js_index_for(index), (),
+                    )
+                else:
+                    no_route_why = xf.feign_row_reason(
+                        call, result, shapes_of(index, load(index)[1]),
+                    )
                 if status is not None and status not in (
                     result.status, no_target_why, no_route_why,
                 ):
                     continue
 
-                counts[result.status] = counts.get(result.status, 0) + 1
+                r_counts[result.status] = r_counts.get(result.status, 0) + 1
                 for why in (no_target_why, no_route_why):
                     if why:
-                        counts_by_reason[why] = counts_by_reason.get(why, 0) + 1
-                origin_counts[call.origin] = origin_counts.get(call.origin, 0) + 1
-                total += 1
+                        r_reasons[why] = r_reasons.get(why, 0) + 1
+                r_origins[call.origin] = r_origins.get(call.origin, 0) + 1
+                r_total += 1
                 row: dict[str, Any] = {
                     "client_repo": _sanitize_name(call.repo),
                     "client_file": _sanitize_name(call.file) if call.file else None,
@@ -2511,8 +2598,44 @@ def cross_repo_requests_func(
                     if result.status == fl.MATCHED and len(result.candidates) > 1:
                         # "matched" stays as is; this says the match is not a unique one.
                         row["multiple_candidates"] = True
-                        multiple_total += 1
+                        r_multiple += 1
                 repo_rows.append(row)
+            return repo_rows, r_counts, r_reasons, r_origins, r_multiple, r_total
+
+        for index in order:
+            entry = all_repos[index]
+            # The first client repo always runs, so a call makes progress; after
+            # that no new one is started once the budget is spent, and each is named.
+            if started and dl.spent():
+                skipped_at[index] = _repo_label(entry)
+                continue
+            started += 1
+            clients, _own_servers, why, _src = load(index)
+            if why:
+                note_unreadable(entry, "client", why)
+                continue
+            try:
+                repo_rows, r_counts, r_reasons, r_origins, r_multiple, r_total = join_repo(
+                    index, entry, clients,
+                )
+            except BudgetSpent:
+                # Out of budget in the middle of this repo (its index build, its facts or its
+                # join): it is named as skipped and read again first by the repeat. What was
+                # read stays kept, so the repeat goes on from there.
+                skipped_at[index] = _repo_label(entry)
+                _note_join_cut(entry)
+                continue
+            with _JOINS_CUT_LOCK:
+                _JOINS_CUT.discard(str(entry["path"]))
+            searched_at[index] = _sanitize_name(_repo_label(entry))
+            for key, value in r_counts.items():
+                counts[key] = counts.get(key, 0) + value
+            for key, value in r_reasons.items():
+                counts_by_reason[key] = counts_by_reason.get(key, 0) + value
+            for key, value in r_origins.items():
+                origin_counts[key] = origin_counts.get(key, 0) + value
+            multiple_total += r_multiple
+            total += r_total
             rows_at[index] = repo_rows
 
         rows_by_repo = [rows_at[i] for i in sorted(rows_at)]

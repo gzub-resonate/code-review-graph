@@ -12,6 +12,7 @@ import logging
 import sqlite3
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
@@ -25,6 +26,7 @@ from ..paging import content_stamp, make_scope, paginate, shown_range
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
 from ..repo_cache import MEMO
 from ..terraform_links import open_store
+from ..xrepo_budget import BudgetSpent
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +107,11 @@ def _reply(
 class _FeignRegistry:
     """Does a Feign service name resolve to a registered repo? Facts are read lazily."""
 
-    def __init__(self, all_repos: list[dict[str, Any]]) -> None:
+    def __init__(
+        self, all_repos: list[dict[str, Any]], out_of_budget: Callable[[], bool] | None = None,
+    ) -> None:
         self.all_repos = all_repos
+        self.out_of_budget = out_of_budget
         self.resolver = RepoNameResolver(all_repos)
         self.rules = sa.load_alias_rules()
         self.facts = sa.FactsCache(all_repos)
@@ -122,7 +127,11 @@ class _FeignRegistry:
 
     def _index(self) -> sa.IdentityIndex:
         if not self._identity:
-            self.facts.prefetch(range(len(self.all_repos)), cross_repo_workers())
+            # Raises ``BudgetSpent`` when the budget runs out with facts still unread (the
+            # ones read stay kept); the caller skips the repo it was working on.
+            self.facts.prefetch(
+                range(len(self.all_repos)), cross_repo_workers(), self.out_of_budget,
+            )
             self._identity.append(sa.IdentityIndex(self.all_repos, self.facts))
         return self._identity[0]
 
@@ -174,9 +183,11 @@ def external_links(
         raise ValueError(f"status must be one of: {', '.join(eh.STATUSES)}")
     all_repos = Registry().list_repos()
     selected, unknown = _select(all_repos, repos)
-    feign = _FeignRegistry(all_repos)
     budget = cross_repo_budget_seconds()
     started = time.monotonic()
+    feign = _FeignRegistry(
+        all_repos, lambda: bool(budget) and time.monotonic() - started > budget,
+    )
     skipped: list[str] = []
     unreadable: list[str] = []
     cells: dict[tuple[str, str], dict[str, Any]] = {}
@@ -191,6 +202,12 @@ def external_links(
         if calls is None:
             unreadable.append(label)
             continue
+        if any(c["kind"] not in ("js", "py") and c.get("service") for c in calls):
+            try:
+                feign._index()  # every repo's facts, read once; the budget applies to it
+            except BudgetSpent:
+                skipped.append(label)
+                continue
         for call in calls:
             if call["kind"] == "js":
                 group = eh.classify_js(call)
