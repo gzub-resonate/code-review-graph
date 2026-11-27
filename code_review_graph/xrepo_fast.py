@@ -16,6 +16,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Optional
 
 from . import feign_links as fl
+from . import query_cache as qc
 
 __all__ = [
     "ShapeIndex",
@@ -42,7 +43,7 @@ class ShapeIndex:
             count += 1
             if server.catch_all:
                 continue
-            shape = fl.normalize_route(server.route)
+            shape = qc.normalize_route(server.route)
             self.by_shape.setdefault(shape, []).append((server, shape))
             self.by_fold.setdefault(shape.lower(), []).append((server, shape))
         #: How many endpoints the repo has, catch-alls included (``not pool`` in the old code).
@@ -51,12 +52,12 @@ class ShapeIndex:
 
 def link_call_indexed(call: fl.ClientCall, pools: Sequence[ShapeIndex]) -> fl.LinkResult:
     """``feign_links.link_call(call, endpoints of every pool, in order)``, from the indexes."""
-    wanted = fl.normalize_route(call.route)
+    wanted = qc.normalize_route(call.route)
     method = call.http_method
     by_location: dict[Any, fl.ServerEndpoint] = {}
     for pool in pools:
         for server, shape in pool.by_shape.get(wanted, ()):
-            if not fl._method_matches(method, server.http_method):
+            if not qc.method_matches(method, server.http_method):
                 continue
             by_location.setdefault(fl._location_key(server, shape), server)
     if by_location:
@@ -68,7 +69,7 @@ def link_call_indexed(call: fl.ClientCall, pools: Sequence[ShapeIndex]) -> fl.Li
     found: dict[Any, fl.ServerEndpoint] = {}
     for pool in pools:
         for server, shape in pool.by_fold.get(folded, ()):
-            if not fl._method_matches(method, server.http_method):
+            if not qc.method_matches(method, server.http_method):
                 continue
             found.setdefault(fl._location_key(server, shape), server)
     if not found:
