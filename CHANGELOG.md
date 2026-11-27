@@ -4,6 +4,14 @@
 
 ### Added
 
+- `origin=amqp` (exchange list) credits a queue with the publishers of the exchange it is bound
+  to. A queue listed apart used to count only publishers that wrote to it directly, so a queue
+  bound with `@RabbitListener(bindings=@QueueBinding(...))` to an exchange that has publishers
+  showed `unpublished`. Each queue row now has `bound_to` (exchange, binding key, publisher count,
+  `matched_via`) and, when a published routing key reaches the binding key (exact or AMQP topic
+  wildcard), `bound_publisher_count`; its `publisher_count`, `publisher_repos` and `status` include
+  those publishers. A queue with no binding, or bound to a key nobody publishes, stays
+  `unpublished`. Query time; no reindex.
 - Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.
   `requests.get(f"{BASE}/users")` resolves when `BASE` is a module-level string literal in the same
   file, or one imported by name (`from settings import BASE`, `from .conf import BASE`) from a module

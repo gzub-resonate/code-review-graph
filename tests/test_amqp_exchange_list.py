@@ -210,3 +210,75 @@ def test_a_spent_budget_marks_the_service_status_unconfirmed(world, monkeypatch)
     assert reply["exchange_status"] == "unlistened"
     assert reply["exchange_status_confirmed"] is False
     assert "searched 1 of 3 repos, 2 skipped by the time budget" in reply["summary"]
+
+
+@pytest.fixture
+def bound_queue_world(tmp_path, registry):  # noqa: F811
+    """Imitates services-api-attribute: queues bound by ``@QueueBinding`` to ``api.e.topic.vertical``
+    and services-api: ``api.q.projectadmin.account.created`` bound to ``api.e.topic.account``."""
+    repo = _build_repo(tmp_path / "attr", exchange_edges=False)
+    _add_edges(repo, [
+        ("HANDLES", "svc.refresh", {"queue": "svc.refresh"}),
+        ("HANDLES", "svc.permutation", {"queue": "svc.permutation"}),
+        ("HANDLES", "svc.lonely", {"queue": "svc.lonely"}),
+        ("HANDLES", "svc.wild", {"queue": "svc.wild"}),
+        ("HANDLES", "svc.future", {"queue": "svc.future"}),
+        ("PUBLISHES", "api.e.topic.vertical", {"routing_key": "verticals.isdirty"}),
+        ("PUBLISHES", "api.e.topic.vertical", {"routing_key": "verticals.permutation.work"}),
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.isdirty", "queue": "svc.refresh",
+          "exchange": "api.e.topic.vertical"}),
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.permutation.work", "queue": "svc.permutation",
+          "exchange": "api.e.topic.vertical"}),
+        # Bound to a key nobody publishes: stays unpublished.
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.never", "queue": "svc.lonely",
+          "exchange": "api.e.topic.vertical"}),
+        # A wildcard binding reached by a published key.
+        ("HANDLES", "api.e.topic.vertical",
+         {"binding_key": "verticals.#", "queue": "svc.wild", "exchange": "api.e.topic.vertical"}),
+        # Exchange with no publisher at all.
+        ("HANDLES", "api.e.topic.quiet",
+         {"binding_key": "q.x", "queue": "svc.future", "exchange": "api.e.topic.quiet"}),
+    ])
+    registry.register(str(repo), alias="attr")
+    return repo
+
+
+def test_a_queue_gets_the_publishers_of_the_exchange_it_is_bound_to(bound_queue_world):
+    reply = cross_repo_requests_func(origin="amqp")
+    queues = {q["queue"]: q for q in reply["queues"]}
+    refresh = queues["svc.refresh"]
+    assert refresh["status"] == "matched"
+    assert refresh["publisher_count"] == 1
+    assert refresh["publisher_repos"] == ["attr"]
+    assert refresh["bound_publisher_count"] == 1
+    assert refresh["bound_to"] == [{
+        "exchange": "api.e.topic.vertical", "binding_key": "verticals.isdirty",
+        "publisher_count": 1, "matched_via": "exact_key",
+    }]
+    assert queues["svc.permutation"]["status"] == "matched"
+
+
+def test_a_wildcard_binding_counts_every_publisher_it_reaches(bound_queue_world):
+    wild = {q["queue"]: q for q in cross_repo_requests_func(origin="amqp")["queues"]}["svc.wild"]
+    assert wild["status"] == "matched"
+    assert wild["publisher_count"] == 2
+    assert wild["bound_to"][0]["matched_via"] == "topic_pattern"
+
+
+def test_a_queue_bound_to_a_key_nobody_publishes_stays_unpublished(bound_queue_world):
+    lonely = {q["queue"]: q for q in cross_repo_requests_func(origin="amqp")["queues"]}[
+        "svc.lonely"]
+    assert lonely["status"] == "unpublished"
+    assert lonely["publisher_count"] == 0
+    assert "bound_publisher_count" not in lonely
+    assert lonely["bound_to"][0]["publisher_count"] == 0
+
+
+def test_a_queue_bound_to_an_unpublished_exchange_stays_unpublished(bound_queue_world):
+    future = {q["queue"]: q for q in cross_repo_requests_func(origin="amqp")["queues"]}[
+        "svc.future"]
+    assert future["status"] == "unpublished"
+    assert future["bound_to"][0]["exchange"] == "api.e.topic.quiet"

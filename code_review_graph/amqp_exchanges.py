@@ -15,6 +15,7 @@ from .graph import GraphStore
 __all__ = [
     "LIST_STATUSES", "MATCHED", "UNLISTENED", "UNPUBLISHED", "Exchange", "exchange_status",
     "list_exchange_names", "new_exchange", "add_edges", "render", "in_scope_edges", "is_queue",
+    "link_bound_queues",
 ]
 
 UNLISTENED = "unlistened"
@@ -61,6 +62,11 @@ def new_exchange() -> Exchange:
         # Edges that name an exchange, and edges that name only a queue.
         "exchange_edges": 0, "queue_edges": 0,
         "scope_publishers": 0, "scope_listeners": 0,
+        # (repo, routing key) of each publisher; queue -> {(repo, binding key)} of each listener
+        # edge that binds a queue to this exchange. Both feed :func:`link_bound_queues`.
+        "publisher_keys": [], "queue_bindings": {},
+        # Set on a queue by :func:`link_bound_queues`: the exchanges it is bound to.
+        "bound": [], "bound_publishers": 0, "bound_publisher_repos": set(),
     }
 
 
@@ -82,12 +88,71 @@ def add_edges(
             key = edge.get("routing_key")
             if isinstance(key, str) and key:
                 entry["routing_keys"].add(key)
+            entry["publisher_keys"].append((repo, key if isinstance(key, str) and key else None))
         else:
             entry["listeners"] += 1
             entry["listener_repos"].add(repo)
             key = edge.get("binding_key")
             if isinstance(key, str) and key:
                 entry["binding_keys"].add(key)
+            queue = edge.get("queue")
+            if edge.get("kind") != aj.KIND_QUEUE and isinstance(queue, str) and queue:
+                entry["queue_bindings"].setdefault(queue, set()).add(
+                    (repo, key if isinstance(key, str) and key else None)
+                )
+
+
+def link_bound_queues(entries: dict[str, Exchange]) -> int:
+    """Credit each queue with the publishers of the exchanges it is bound to.
+
+    A listener on a bare queue (``@RabbitListener(queues=...)``) names no exchange, so on its
+    own it has no publisher. Elsewhere a binding (``@QueueBinding``, ``BindingBuilder``, the
+    ``QueueBinding`` data class) names the queue, an exchange and a key. When a queue-only name
+    has such a binding, the publishers of that exchange whose routing key reaches the binding
+    key (:func:`~amqp_join.link_kind`; a publisher with no resolved key counts as
+    ``key_unknown``) are the queue's publishers. Each is recorded under ``bound`` with the
+    exchange, the binding key, the publisher count and how the keys met; the queue's
+    ``publishers`` and ``publisher_repos`` are raised by them. A queue nothing binds is left
+    alone, so a missing publisher stays missing. Returns how many queues gained a publisher.
+    """
+    linked = 0
+    for exchange_name, exchange in entries.items():
+        if is_queue(exchange):
+            continue
+        for queue_name, bindings in exchange["queue_bindings"].items():
+            queue = entries.get(queue_name)
+            if queue is None or not is_queue(queue):
+                continue
+            for _repo, binding_key in sorted(bindings, key=lambda b: (b[0], b[1] or "")):
+                repos: set[str] = set()
+                count = 0
+                via = None
+                for pub_repo, routing_key in exchange["publisher_keys"]:
+                    kind = aj.link_kind(binding_key, routing_key)
+                    if kind is None:
+                        continue
+                    count += 1
+                    repos.add(pub_repo)
+                    if via is None or kind == aj.MATCH_EXACT:
+                        via = kind
+                item = {
+                    "exchange": exchange_name, "binding_key": binding_key,
+                    "publisher_count": count,
+                }
+                if via:
+                    item["matched_via"] = via
+                if item not in queue["bound"]:
+                    queue["bound"].append(item)
+                    if count:
+                        if not queue["bound_publishers"]:
+                            linked += 1
+                        queue["bound_publishers"] += count
+                        queue["bound_publisher_repos"] |= repos
+    for queue in entries.values():
+        if queue["bound_publishers"]:
+            queue["publishers"] += queue["bound_publishers"]
+            queue["publisher_repos"] |= queue["bound_publisher_repos"]
+    return linked
 
 
 def in_scope_edges(entry: Exchange) -> int:
@@ -119,6 +184,10 @@ def render(name: str, entry: Exchange, scoped: bool = False) -> dict[str, Any]:
     if scoped:
         row["scoped_publisher_count"] = entry["scope_publishers"]
         row["scoped_listener_count"] = entry["scope_listeners"]
+    if queue and entry["bound"]:
+        row["bound_to"] = entry["bound"][:MAX_LISTED]
+        if entry["bound_publishers"]:
+            row["bound_publisher_count"] = entry["bound_publishers"]
     for field, source in (
         ("publisher_repos", "publisher_repos"), ("listener_repos", "listener_repos"),
         ("routing_keys", "routing_keys"), ("binding_keys", "binding_keys"),

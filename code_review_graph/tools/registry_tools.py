@@ -1201,13 +1201,15 @@ def _amqp_exchange_list(
                 {**e, "routing_key": _sanitize_name(e["routing_key"])
                  if isinstance(e.get("routing_key"), str) else None,
                  "binding_key": _sanitize_name(e["binding_key"])
-                 if isinstance(e.get("binding_key"), str) else None}
+                 if isinstance(e.get("binding_key"), str) else None,
+                 "queue": _sanitize_name(e["queue"]) if isinstance(e.get("queue"), str) else None}
                 for e in raw_edges
             ]
             ax.add_edges(
                 exchanges.setdefault(_sanitize_name(name), ax.new_exchange()), label, edges,
                 in_scope=in_scope,
             )
+    ax.link_bound_queues(exchanges)
     counts: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     queues: list[dict[str, Any]] = []
