@@ -619,6 +619,178 @@ class _Python:
                     if value.template is not None and _DYN not in value.template:
                         pairs.append((_text(left, src), value.template))
         self.consts = _unique_consts(pairs)
+        self.class_consts: dict[tuple[str, str], str] = {}
+        self.tables: dict[str, dict[str, str]] = {}
+        self._collect_literals()
+        self.wrappers: dict[str, _Binding] = {}
+        self._collect_wrappers()
+
+    # literals defined elsewhere in the module
+    def _collect_literals(self) -> None:
+        """Class attributes and ``NAME = {"key": "literal"}`` tables a lookup can be proven from.
+
+        A name assigned twice with different values, or a table written to by
+        ``NAME["key"] = ...``, is left out: only what holds on every path is read.
+        """
+        src = self.src
+        class_pairs: list[tuple[tuple[str, str], str]] = []
+        seen_tables: dict[str, Optional[dict[str, str]]] = {}
+        written: set[str] = set()
+        for node in _walk(self.root):
+            if node.type != "assignment":
+                continue
+            left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+            if left is None or right is None:
+                continue
+            if left.type == "subscript":
+                base = left.child_by_field_name("value")
+                if base is not None:
+                    written.add(_text(base, src))
+                continue
+            if left.type != "identifier":
+                continue
+            name = _text(left, src)
+            if right.type == "string":
+                owner = self._class_of(node, direct=True)
+                lit = self.val(right)
+                if owner and lit.template is not None and _DYN not in lit.template:
+                    class_pairs.append(((owner, name), lit.template))
+            elif right.type == "dictionary":
+                table = self._table(right)
+                seen_tables[name] = table if seen_tables.get(name, table) == table else None
+        seen_attrs: dict[tuple[str, str], Optional[str]] = {}
+        for key, value in class_pairs:
+            seen_attrs[key] = value if seen_attrs.get(key, value) == value else None
+        self.class_consts = {k: v for k, v in seen_attrs.items() if v is not None}
+        self.tables = {
+            k: v for k, v in seen_tables.items() if v and k not in written
+        }
+
+    def _table(self, node: Any) -> Optional[dict[str, str]]:
+        table: dict[str, str] = {}
+        banned: set[str] = set()
+        for pair in node.named_children:
+            if pair.type != "pair":
+                return None
+            key_node = pair.child_by_field_name("key")
+            value_node = pair.child_by_field_name("value")
+            if key_node is None or value_node is None:
+                return None
+            key, value = self.val(key_node), self.val(value_node)
+            if key_node.type != "string" or key.template is None or _DYN in key.template:
+                return None
+            if key.template in table or key.template in banned:
+                banned.add(key.template)
+                table.pop(key.template, None)
+                continue
+            if value_node.type == "string" and value.template is not None \
+                    and _DYN not in value.template:
+                table[key.template] = value.template
+            else:
+                banned.add(key.template)
+        return table
+
+    @staticmethod
+    def _class_of(node: Any, direct: bool = False) -> Optional[str]:
+        """Name of the class a node sits in; ``direct`` requires the class body itself."""
+        p = node.parent
+        while p is not None:
+            if p.type == "class_definition":
+                name = p.child_by_field_name("name")
+                return name.text.decode("utf-8", "replace") if name is not None else None
+            if direct and p.type in ("function_definition", "lambda"):
+                return None
+            p = p.parent
+        return None
+
+    # wrappers
+    def _collect_wrappers(self) -> None:
+        """A plain function whose every ``return`` is one literal-service boto3 client.
+
+        ``def _client(): return boto3.client("s3")``. A name defined more than once in the
+        file, or returning clients of different services, is not a wrapper.
+        """
+        defs: dict[str, list[Any]] = {}
+        for node in _walk(self.root):
+            if node.type == "function_definition":
+                name = node.child_by_field_name("name")
+                if name is not None:
+                    defs.setdefault(_text(name, self.src), []).append(node)
+        for name, nodes in defs.items():
+            if len(nodes) != 1 or name in _CLIENT_FACTORIES:
+                continue
+            binding = self._returned_client(nodes[0])
+            if binding is not None:
+                self.wrappers[name] = binding
+
+    def _returned_client(self, func: Any) -> Optional[_Binding]:
+        body = func.child_by_field_name("body")
+        if body is None:
+            return None
+        found: list[Optional[_Binding]] = []
+        local: dict[str, Optional[_Binding]] = {}
+        nodes: list[Any] = []
+        stack = list(body.children)
+        while stack:
+            cur = stack.pop()
+            if cur.type in ("function_definition", "class_definition", "lambda"):
+                continue
+            nodes.append(cur)
+            stack.extend(cur.children)
+        for cur in nodes:
+            if cur.type != "assignment":
+                continue
+            left, right = cur.child_by_field_name("left"), cur.child_by_field_name("right")
+            if left is not None and right is not None and left.type == "identifier" \
+                    and right.type == "call":
+                got = self._boto_client(right)
+                key = _text(left, self.src)
+                local[key] = got if local.get(key, got) == got else None
+        for cur in nodes:
+            if cur.type != "return_statement":
+                continue
+            value = cur.named_children[0] if cur.named_child_count else None
+            if value is not None and value.type == "call":
+                found.append(self._boto_client(value))
+            elif value is not None and value.type == "identifier":
+                found.append(local.get(_text(value, self.src)))
+            else:
+                found.append(None)
+        if not found or any(b is None for b in found) or len(set(found)) != 1:
+            return None
+        return found[0]
+
+    def _boto_client(self, call: Any) -> Optional[_Binding]:
+        """``boto3.client("s3")`` / ``session.resource("dynamodb")`` with a literal service."""
+        fn = call.child_by_field_name("function")
+        if fn is None or fn.type != "attribute":
+            return None
+        attr = fn.child_by_field_name("attribute")
+        if attr is None or _text(attr, self.src) not in ("client", "resource"):
+            return None
+        pos, kws, _splat = self._args(call)
+        arg = pos[0] if pos else kws.get("service_name")
+        service = self.val(arg).template if arg is not None else None
+        key = _BOTO_SERVICE.get((service or "").lower())
+        return _Binding(_text(attr, self.src), key) if key else None
+
+    _CONSTANT_ARGS = frozenset({
+        "string", "integer", "float", "true", "false", "none", "concatenated_string",
+        "keyword_argument", "comment",
+    })
+
+    def _constant_call(self, call: Any) -> bool:
+        """The call passes no argument, or only literals (a keyword's value must be one too)."""
+        args = call.child_by_field_name("arguments")
+        if args is None:
+            return True
+        for arg in args.named_children:
+            node = arg.child_by_field_name("value") if arg.type == "keyword_argument" else arg
+            if node is None or node.type not in self._CONSTANT_ARGS:
+                return False
+            if node.type == "string" and any(c.type == "interpolation" for c in node.children):
+                return False
+        return True
 
     # values
     def val(self, node: Any) -> Val:
@@ -666,10 +838,17 @@ class _Python:
                 if obj is not None and obj.type == "string":
                     lv = self.val(obj)
                     return Val(_FORMAT_FIELD.sub(_DYN, lv.template)) if lv.template else Val()
+            if attr is not None and _text(attr, src) == "get" and args is not None \
+                    and args.named_child_count == 1 and fn.type == "attribute":
+                return self._table_lookup(fn.child_by_field_name("object"), args.named_children[0])
             return Val()
         if t == "subscript":
             value = node.child_by_field_name("value")
             sub = node.child_by_field_name("subscript")
+            if value is not None and sub is not None:
+                found = self._table_lookup(value, sub)
+                if found.template is not None:
+                    return found
             if value is not None and sub is not None and _text(value, src) in (
                 "os.environ", "environ",
             ):
@@ -686,11 +865,37 @@ class _Python:
         if t == "attribute":
             obj = node.child_by_field_name("object")
             attr = node.child_by_field_name("attribute")
+            if obj is not None and attr is not None and obj.type == "identifier":
+                owner = self._class_of(node) if _text(obj, src) in ("self", "cls") \
+                    else _text(obj, src)
+                found_const = self.class_consts.get((owner or "", _text(attr, src)))
+                if found_const is not None:
+                    return Val(found_const)
             if obj is not None and attr is not None and obj.type == "identifier" \
                     and _CONST_NAME.fullmatch(_text(attr, src)) \
                     and _text(obj, src) not in ("self", "cls"):
                 return Val(const_ref=_text(attr, src))
         return Val()
+
+    def _table_lookup(self, table_node: Any, key_node: Any) -> Val:
+        """``TABLE["key"]`` / ``TABLE.get("key")`` when TABLE is a literal dict in this file."""
+        if table_node is None or key_node is None or key_node.type != "string":
+            return Val()
+        key = self.val(key_node).template
+        if key is None or _DYN in key:
+            return Val()
+        if table_node.type == "identifier":
+            table = self.tables.get(_text(table_node, self.src))
+        elif table_node.type == "attribute":
+            obj = table_node.child_by_field_name("object")
+            attr = table_node.child_by_field_name("attribute")
+            table = self.tables.get(_text(attr, self.src)) if attr is not None \
+                and obj is not None and obj.type == "identifier" \
+                and _text(obj, self.src) in ("self", "cls") else None
+        else:
+            table = None
+        value = table.get(key) if table else None
+        return Val(value) if value is not None else Val()
 
     @staticmethod
     def _join(parts: list[Val], keep: bool = False) -> Val:
@@ -772,10 +977,16 @@ class _Python:
         if fn is not None and fn.type == "identifier" \
                 and _text(fn, self.src) in _CLIENT_FACTORIES:
             return self._factory_binding(call)
+        if fn is not None and fn.type == "identifier":
+            wrapped = self.wrappers.get(_text(fn, self.src))
+            return wrapped if wrapped is not None and self._constant_call(call) else None
         if fn is None or fn.type != "attribute":
             return None
         attr = _text(fn.child_by_field_name("attribute"), self.src)
         recv = fn.child_by_field_name("object")
+        if recv is not None and recv.type == "identifier" \
+                and _text(recv, self.src) in ("self", "cls") and attr in self.wrappers:
+            return self.wrappers[attr] if self._constant_call(call) else None
         pos, kws, _splat = self._args(call)
         if attr in _CLIENT_FACTORIES:
             return self._factory_binding(call)

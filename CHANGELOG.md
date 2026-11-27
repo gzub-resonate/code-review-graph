@@ -10,6 +10,14 @@
   file next to or up to four directories above the caller. A name bound twice, an environment
   variable (`os.getenv("X", "default")`), a settings attribute and anything computed stay
   `host_unresolved`. Parse time; the index fingerprint moves.
+- `origin=awssdk` reads more Python names, so more rows are `matched`. A plain function whose
+  every `return` is one literal-service boto3 client (`def _client(): return boto3.client("s3")`)
+  now binds its call sites in the same file (`_client().head_object(...)`, `self._s3()`), when the
+  call passes no argument or only literals. `NAME = {"key": "literal"}` tables resolve a
+  `NAME["key"]` / `NAME.get("key")` lookup with a literal key (a table written to, or a key with a
+  non-literal value, stays unresolved). Class attributes read as `self.X` / `Cls.X` resolve when
+  the class body assigns one literal. Function parameters and environment values stay unresolved.
+  Parse-time, so the index fingerprint moves.
 - Capped lists in replies now state their true size, additively. `cross_repo_requests_tool`
   `origin="external"` rows gain `files_total`, `files_truncated`, `samples_total`,
   `samples_truncated` and (with `hosts_seen`) `hosts_seen_total`/`hosts_seen_truncated`; the reply
