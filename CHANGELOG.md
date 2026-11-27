@@ -46,6 +46,15 @@
   `not_declared_in_registry`), the reply adds `counts_by_reason` and a summary clause, and
   `status=<reason>` selects those rows. `status` and `counts` are unchanged. `origin=stepfunction`
   with `service=<indexed state machine>` and no rows adds a `hint` pointing at `origin=awssdk`.
+- `cross_repo_requests_tool` reasons (no status changes): every `unresolved` `awssdk` row now has an
+  `unresolved_reason` (new values `name_not_literal`, `constant_not_resolved`,
+  `config_key_not_resolved`, `host_not_literal`); `counts_by_reason` and the summary cover them. A call
+  under a mock, fixture or `msw` folder is `test_double`. `declared_name_dynamic` is documented as a
+  statement about the registry, and the row adds `dynamic_declared_in`. `origin=js` `no_route_match`
+  rows get a `reason` (`no_servers_indexed`, `no_endpoint_under_base_path`,
+  `variable_segments_unmatched`, `route_missing_under_served_base`), a Feign `no_route_match` the
+  caller repo serves gets `served_by_caller_repo`, and `counts_by_reason` also tallies `unmatchable`
+  and these reasons; `status` accepts each. Query-time only.
 - Cold cross-repo calls are faster to warm and stay warm. The cache stamp of a repo's graph
   (`repo_cache.graph_stamp`) no longer uses the mtime and size of the database and its `-wal`: an
   indexer writing, a checkpoint or any reader opening the database moved those and threw away

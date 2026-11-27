@@ -1766,7 +1766,14 @@ def _infra_links(
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     reason_counts = nfr.counts_by_reason(rows)
     if status:
-        rows = [r for r in rows if r["status"] == status or r.get("not_found_reason") == status]
+        rows = [
+            r for r in rows
+            if r["status"] == status or r.get("not_found_reason") == status
+            or (
+                status not in al.STATUSES and r["status"] == "unresolved"
+                and r.get("unresolved_reason") == status
+            )
+        ]
     page = paginate(
         rows, max_results, 100, cursor,
         scope=make_scope(
@@ -2083,6 +2090,7 @@ def cross_repo_requests_func(
         origins page the same way: ``max_results`` (at most 100) is the page size, ``limit`` is
         not used, and the cursor is refused when the query or the rows changed.
     """
+    from .. import not_found_reasons as nfr
     from ..registry import Registry
 
     _validate_positive_int(limit, "limit")
@@ -2091,7 +2099,7 @@ def cross_repo_requests_func(
         "terraform", "workflow", "stepfunction", "awssdk", "amqp", "trigger", "external",
         "consumers",
     )
-    accepted_statuses = (*jl.ALL_STATUSES, *eh.NO_TARGET_REASONS)
+    accepted_statuses = (*jl.ALL_STATUSES, *eh.NO_TARGET_REASONS, *nfr.CROSS_REPO_ROW_REASONS)
     if status is not None and origin not in infra_origins and status not in accepted_statuses:
         raise ValueError(f"status must be one of: {', '.join(accepted_statuses)}")
     if origin is not None and origin not in ("feign", "js", *infra_origins):
@@ -2338,12 +2346,21 @@ def cross_repo_requests_func(
                     eh.no_target_reason(call.service, result.reason)
                     if result.status == fl.NO_TARGET_REPO else None
                 )
-                if status is not None and status not in (result.status, no_target_why):
+                no_route_why = nfr.cross_repo_row_reason(
+                    call, result,
+                    own_index_for(index) if call.origin == "js" else None,
+                    js_index_for(index) if call.origin == "js" else None,
+                    load(index)[1] if call.origin != "js" else (),
+                )
+                if status is not None and status not in (
+                    result.status, no_target_why, no_route_why,
+                ):
                     continue
 
                 counts[result.status] = counts.get(result.status, 0) + 1
-                if no_target_why:
-                    counts_by_reason[no_target_why] = counts_by_reason.get(no_target_why, 0) + 1
+                for why in (no_target_why, no_route_why):
+                    if why:
+                        counts_by_reason[why] = counts_by_reason.get(why, 0) + 1
                 origin_counts[call.origin] = origin_counts.get(call.origin, 0) + 1
                 total += 1
                 row: dict[str, Any] = {
@@ -2373,6 +2390,8 @@ def cross_repo_requests_func(
                     row["served_methods"] = jl.served_methods(result.candidates)
                 if result.reason:
                     row["reason"] = result.reason
+                elif no_route_why:
+                    row["reason"] = no_route_why
                 if no_target_why:
                     row["no_target_reason"] = no_target_why
                 if resolution is not None and resolution.how:

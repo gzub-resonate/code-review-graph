@@ -1305,6 +1305,25 @@ stored. A connection row has `evidence` (`client_call`, `connection_url`, `confi
 host with no client or endpoint key around it, which also has `confidence` 0.4); a host in a comment, docstring, log
 call, sample config, test, fixture, mock or docs path makes no row.
 
+Reasons on `origin="awssdk"` rows (status is never changed by them; `status=<reason>` filters and the reply has
+`counts_by_reason` and a summary clause). A `not_found` row has `not_found_reason`: `no_owner_lookup` (the service has
+no owner lookup: secretsmanager, cloudwatch; an SSM parameter or IAM role is looked up by its Terraform
+`aws_ssm_parameter` / `aws_iam_role`, so a miss there is `not_declared_in_registry`), `test_double` (a mock-like name, a test file, or a `mock`/`mocks`/`msw`/
+`__mocks__`/`fixtures`/`stubs`/`fakes` folder), `declared_name_dynamic` or `not_declared_in_registry`.
+`declared_name_dynamic` describes the registry, not the row: the row's name can be a plain literal. It means some
+registered repo declares a resource of that service's Terraform type (or an S3 wrapper module) whose own name could not
+be read as a literal, so that unreadable declaration might be this name; `dynamic_declared_in` lists up to five such
+repos. A literal that no registered declaration names and no unreadable declaration exists for is
+`not_declared_in_registry`. An `unresolved` row always has `unresolved_reason`: `not_defined`, `no_value`,
+`env_placeholder`, `profiles_differ`, `ambiguous` (configuration join), `non_aws_host`, `unrecognised_endpoint`,
+`custom_endpoint`, `proxy_endpoint`, `serverless_cache`, `internal_prefix` (connection hosts), `no_resource_param`
+(the call names no resource parameter), and, when none of those applies, one derived from the row: `env_placeholder`
+(an environment variable stands for the name), `config_key_not_resolved` (a configuration key does and no value could
+be read), `constant_not_resolved` (a constant or field does), `host_not_literal` (a connection whose host is not
+spelled out) or `name_not_literal` (a variable, parameter, call result or concatenation). `origin="stepfunction"`
+`not_found_reason` values: `data_source_only`, `declared_via_module`, `source_without_unit`, `environment_cluster`,
+`not_declared_in_registry`.
+
 `origin="workflow"` does the same for GitHub Actions: each `uses: org/repo/path@ref` of a workflow or composite
 action (a reusable workflow at job level, an action at step level) that names another repo is joined to the
 registered repo called `repo` (the part after `org/`) and the file or folder `path` in its graph. Rows carry the
@@ -1398,6 +1417,16 @@ How a call is classified:
   are the routes that share the tail, and more than 10 distinct routes is too open to report.
   Both `status` values filter, are counted in `counts` and the summary, and `no_route_match`
   remains for a call nothing fits. Only a call that would otherwise be `no_route_match` can change.
+
+Reasons for rows with no match (statuses never change; `status=<reason>` filters; `counts_by_reason` tallies them,
+together with `no_target_reason`): a JavaScript `unmatchable` row is tallied under its `reason` (above; Feign `unmatchable` rows keep theirs on the row but are not tallied). A JavaScript `no_route_match` row has
+a `reason`: `no_servers_indexed` (no registered repo has an endpoint), `no_endpoint_under_base_path` (no endpoint of any
+repo starts with the call's first path segment, so the serving repo is probably not registered or not indexed),
+`variable_segments_unmatched` (the route has `{}` pieces and no endpoint shape fits) or
+`route_missing_under_served_base` (that first segment is served, this route is not). A Feign `no_route_match` row has
+`reason: "served_by_caller_repo"` when the calling repo itself has an inbound endpoint with the same method (or any
+method) and the same normalised route: the target repo named by the client does not serve it, the caller does, so the
+`@FeignClient` name is probably wrong. Other Feign `no_route_match` rows have no reason.
 
 Every row has an `origin`: `feign` for a Spring client method, `js` for a
 JavaScript or TypeScript call. Feign rows are classified exactly as above.
