@@ -75,6 +75,11 @@
   `get_flow_tool` takes `flow_key` as a lookup (`flow_id` still wins, then `flow_key`, then
   `flow_name`). Read from the entry node at query time: no build change, same index fingerprint.
   The minimal affected-flow rows (also in `detect_changes_tool`) gain the two fields.
+- Flow ids are now the same for two builds of the same code. A full rebuild stored flows in
+  detection order and kept counting up (`AUTOINCREMENT` survives `DELETE`), so unchanged flows moved
+  from #1, #3, #4 to #4, #6, #7. `store_flows` now orders by criticality, then the entry node's
+  qualified name, and restarts the counter. Integer ids keep working; `flow_key` stays the durable
+  reference. No schema change. Build time (flows are stored at build): the index fingerprint moves.
 - `pr_blast_radius_tool` pages its `files`: `files_limit` (default 50, at most 200) and `cursor`.
   Before, a pull request of 196 files showed the first 50 with `files_truncated` and no way to
   read the rest. `files_total` gives the full count and `next_cursor` the next page; the cursor is
