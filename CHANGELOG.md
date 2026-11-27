@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `cross_repo_requests_tool` (`feign` and `js`) is much faster on a large registry, with the same
+  rows. The JS variable-route step reads an inverted (segment count, position, segment) index
+  instead of every server route per call; one server index over all repos is built once per
+  registry state and each client repo searches it with its own endpoints left out (it was rebuilt
+  for every client repo); each repo's endpoint read is kept while its graph is unchanged; client
+  repos are read on a few threads. A call that ran out of time (`skipped_repos`) starts with those
+  repos when repeated unchanged, and says so with `resumes_skipped_on_repeat`. Query side only;
+  the index fingerprint does not move.
+
 ### Added
 
 - Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.

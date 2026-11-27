@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from code_review_graph import endpoint_index
+from code_review_graph import endpoint_index, repo_cache
 from code_review_graph import feign_links as fl
 from code_review_graph.endpoint_index import (
     METADATA_KEY,
@@ -79,6 +79,10 @@ def stored(root: Path):
 
 
 def ask(**args):
+    # These tests edit the stored row in place, which the graph stamp does not see (a build moves
+    # it); start each ask from an empty cache so the answer comes from the graph as it is now.
+    repo_cache.MEMO.clear()
+    repo_cache.SERVER_INDEXES.clear()
     args.setdefault("repos", ["ui"])
     return cross_repo_requests_func(**args)
 
