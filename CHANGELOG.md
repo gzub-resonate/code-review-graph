@@ -4,6 +4,12 @@
 
 ### Added
 
+- Python `requests`/`httpx` calls whose URL is an f-string over a string constant now get a host.
+  `requests.get(f"{BASE}/users")` resolves when `BASE` is a module-level string literal in the same
+  file, or one imported by name (`from settings import BASE`, `from .conf import BASE`) from a module
+  file next to or up to four directories above the caller. A name bound twice, an environment
+  variable (`os.getenv("X", "default")`), a settings attribute and anything computed stay
+  `host_unresolved`. Parse time; the index fingerprint moves.
 - Capped lists in replies now state their true size, additively. `cross_repo_requests_tool`
   `origin="external"` rows gain `files_total`, `files_truncated`, `samples_total`,
   `samples_truncated` and (with `hosts_seen`) `hosts_seen_total`/`hosts_seen_truncated`; the reply

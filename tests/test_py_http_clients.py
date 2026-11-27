@@ -206,3 +206,74 @@ def test_external_origin_groups_python_calls_by_host_and_unresolved_bucket() -> 
     assert unresolved.unresolved_key == "url"
     assert all(g.path == "/" for g in groups)
     assert "T0AAAAAAA" not in repr(groups)
+
+
+# Imitates resonate/axon-gateway modules/bonusly.py (f"{CONFIG[...]}/path") and
+# resonate/constellation-ai-agent src/app/client/services_api_analytics.py
+# (f"{_BASE_URL}/v1/analytics" with a module-level name).
+
+
+def test_fstring_with_same_module_constant_resolves_host() -> None:
+    src = (
+        "import requests\n"
+        "BASE = 'https://api.vendor.com/v1'\n"
+        "def f():\n"
+        "    requests.get(f'{BASE}/users/me')\n"
+    )
+    node = clients(src)[0]
+    assert node.extra["host"] == "api.vendor.com"
+    assert "host_unresolved" not in node.extra
+
+
+def test_fstring_with_unknown_name_stays_unresolved() -> None:
+    src = (
+        "import httpx\n"
+        "_CONFIG = get_config()\n"
+        "_BASE_URL = _CONFIG.services_api_analytics_domain\n"
+        "def f():\n"
+        "    httpx.post(f'{_BASE_URL}/v1/analytics')\n"
+    )
+    node = clients(src)[0]
+    assert node.extra["host_unresolved"] is True
+    assert node.extra["url_variable"] == "_BASE_URL"
+
+
+def test_environment_default_is_not_resolved() -> None:
+    src = (
+        "import os, requests\n"
+        "BASE = os.getenv('API_BASE', 'https://bonus.ly/api/v1')\n"
+        "def f():\n"
+        "    requests.get(f'{BASE}/users/me')\n"
+    )
+    node = clients(src)[0]
+    assert node.extra["host_unresolved"] is True
+
+
+def _parse_file(path: Path) -> list[Any]:
+    nodes, _edges = CodeParser().parse_bytes(path, path.read_bytes())
+    return [n for n in nodes if n.kind == "Endpoint" and n.extra.get("client") == "py_http"]
+
+
+def test_constant_imported_from_a_sibling_module_resolves(tmp_path: Path) -> None:
+    (tmp_path / "settings.py").write_text("VENDOR_URL = 'https://api.vendor.com/v2'\n")
+    app = tmp_path / "client.py"
+    app.write_text(
+        "import requests\nfrom settings import VENDOR_URL\n"
+        "def f():\n    requests.get(f'{VENDOR_URL}/items')\n    requests.get(VENDOR_URL)\n",
+    )
+    assert {n.extra.get("host") for n in _parse_file(app)} == {"api.vendor.com"}
+
+
+def test_relative_import_and_reassigned_constant(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "conf.py").write_text(
+        "A = 'https://a.example.net'\nB = 'https://b.example.net'\nB = 'https://c.example.net'\n",
+    )
+    app = pkg / "client.py"
+    app.write_text(
+        "import httpx\nfrom .conf import A, B\n"
+        "def f():\n    httpx.get(f'{A}/x')\n    httpx.get(f'{B}/x')\n",
+    )
+    hosts = [n.extra.get("host") for n in _parse_file(app)]
+    assert hosts == ["a.example.net", None]
