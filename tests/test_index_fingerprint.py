@@ -28,7 +28,8 @@ QUERY_ONLY = {
     "aws_sdk_links", "stepfunction_links", "not_found_reasons", "terraform_links",
     "workflow_links",
     "service_aliases", "infra_join", "amqp_join", "amqp_exchanges", "js_route_leads",
-    "repo_cache", "server_route_index", "cross_repo_warmup", "trigger_links", "external_hosts", "consumer_join",
+    "repo_cache", "server_route_index", "cross_repo_warmup", "trigger_links", "external_hosts",
+    "consumer_join",
     "config_values",
     # MCP tool front-ends
     "tools.change_scope",
