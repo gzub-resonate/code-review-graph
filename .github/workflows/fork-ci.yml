@@ -1,0 +1,207 @@
+# Lean checks for the Resonate fork. The inherited ci.yml runs a matrix of
+# four Pythons, three operating systems and a windows-native leg; on this
+# fork that pile queues behind runner capacity, and one failing leg cancels
+# its siblings. Every job below stands alone, uses one Python (3.12) and has
+# its own timeout, so a slow test shard cannot hold up lint.
+#
+# mypy and bandit are compared with a baseline of known findings
+# (.github/mypy-baseline.txt, .github/bandit-baseline.txt, one
+# "file:code" line per finding, no line numbers): old findings do not block,
+# a new one does. Shrink a baseline with .github/scripts/baseline_check.py
+# <tool> <baseline> <input> --update.
+name: Fork CI
+
+on:
+  push:
+    branches: ["integration/**", "release/**"]
+  pull_request:
+    branches: ["integration/**", "release/**"]
+  schedule:
+    - cron: "17 5 * * *"  # nightly, non-blocking full Python matrix
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.event_name }}-${{ github.ref }}
+  # Only a newer push to the same pull request supersedes a run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTEST_MARKERS: "not browser and not upgrade"
+
+jobs:
+  ruff:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - name: Ruff
+        run: uv run --locked --python 3.12 --extra dev ruff check code_review_graph tests
+
+  mypy:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - name: Run mypy
+        # mypy exits 1 on the known errors; the baseline comparison decides.
+        run: |
+          uv run --locked --python 3.12 --extra dev --with types-networkx \
+            mypy code_review_graph/ --ignore-missing-imports --no-strict-optional \
+            > "$RUNNER_TEMP/mypy.txt" || true
+          tail -n 1 "$RUNNER_TEMP/mypy.txt"
+      - name: Compare with baseline
+        run: python3 .github/scripts/baseline_check.py mypy .github/mypy-baseline.txt "$RUNNER_TEMP/mypy.txt"
+
+  bandit:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - name: Run bandit
+        run: |
+          uv run --python 3.12 --no-project --with 'bandit[toml]' \
+            bandit -r code_review_graph/ -c pyproject.toml -f json -q \
+            > "$RUNNER_TEMP/bandit.json" 2> "$RUNNER_TEMP/bandit.err" || true
+          test -s "$RUNNER_TEMP/bandit.json" || { cat "$RUNNER_TEMP/bandit.err"; exit 1; }
+      - name: Compare with baseline
+        run: python3 .github/scripts/baseline_check.py bandit .github/bandit-baseline.txt "$RUNNER_TEMP/bandit.json"
+
+  index-fingerprint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - name: Index fingerprint tests
+        run: uv run --locked --python 3.12 --extra dev pytest tests/test_index_fingerprint.py -q --tb=short
+      - name: Check out the base branch
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - name: Compare fingerprint with the base branch
+        id: fp
+        if: github.event_name == 'pull_request'
+        # Both trees run in the one environment synced from this checkout, so
+        # dependency versions cancel out and only the code can move the value.
+        run: |
+          uv sync --locked --python 3.12 --extra dev
+          head_fp=$(uv run --no-sync python -m code_review_graph.index_fingerprint)
+          base_fp=$(cd base && uv run --no-sync --project "$GITHUB_WORKSPACE" python -m code_review_graph.index_fingerprint)
+          echo "head: $head_fp"
+          echo "base: $base_fp"
+          {
+            echo "head=$head_fp"
+            echo "base=$base_fp"
+            if [ "$head_fp" != "$base_fp" ]; then echo "changed=true"; else echo "changed=false"; fi
+          } >> "$GITHUB_OUTPUT"
+      - name: Comment when the fingerprint changed
+        # Forked PRs get a read-only token, so the comment is best effort.
+        if: github.event_name == 'pull_request' && steps.fp.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_FP: ${{ steps.fp.outputs.head }}
+          BASE_FP: ${{ steps.fp.outputs.base }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          marker='<!-- crg-index-fingerprint -->'
+          printf '%s\n**Index fingerprint changed** (%s on %s, %s here). Merging this forces a full reindex of every graph built with the base version.\n' \
+            "$marker" "$BASE_FP" "$BASE_REF" "$HEAD_FP" > "$RUNNER_TEMP/comment.md"
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$marker\"))][0].id // empty")
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$RUNNER_TEMP/comment.md"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/comment.md"
+          fi
+      - name: Remove the comment when the fingerprint matches again
+        if: github.event_name == 'pull_request' && steps.fp.outputs.changed == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- crg-index-fingerprint -->'
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$marker\"))][0].id // empty")
+          if [ -n "$id" ]; then gh api -X DELETE "repos/$REPO/issues/comments/$id"; fi
+
+  tests:
+    name: tests (shard ${{ matrix.shard }}/4)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      # Full history with tags: tests/test_released_shapes.py reads the
+      # installer artifacts out of every released tag and skips itself in a
+      # shallow checkout.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v7
+      - name: Install
+        run: uv sync --locked --python 3.12 --extra dev
+      - name: Pick this shard's test files
+        run: |
+          uv run --no-sync pytest --collect-only -q -m "$PYTEST_MARKERS" > "$RUNNER_TEMP/collect.txt"
+          python3 .github/scripts/shard_tests.py $((${{ matrix.shard }} - 1)) 4 \
+            < "$RUNNER_TEMP/collect.txt" > "$RUNNER_TEMP/shard.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/shard.txt") files in this shard"
+      - name: Run tests
+        # A few tests assert wall-clock bounds (for example a 2 s limit) and
+        # miss them on a loaded runner. A failure is rerun once on its own;
+        # a real failure fails again.
+        run: |
+          xargs uv run --no-sync pytest --tb=short -q -m "$PYTEST_MARKERS" < "$RUNNER_TEMP/shard.txt" \
+            || uv run --no-sync pytest --lf --tb=short -q -m "$PYTEST_MARKERS"
+      - name: Check writer locks with real parser processes
+        if: matrix.shard == 1
+        run: >-
+          uv run --no-sync pytest tests/test_concurrency_and_daemon.py -m concurrency
+          -k TestSingleFlightWriteLock -q --tb=short
+
+  # Nightly only: the Pythons the pull-request job does not cover. Never
+  # blocks anything; a failure is a signal to look at, not a gate.
+  nightly-matrix:
+    name: nightly tests (${{ matrix.python-version }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v7
+      - name: Install
+        run: uv sync --locked --python ${{ matrix.python-version }} --extra dev
+      - name: Run tests
+        run: >-
+          uv run --no-sync pytest --tb=short -q -m "$PYTEST_MARKERS"
+          || uv run --no-sync pytest --lf --tb=short -q -m "$PYTEST_MARKERS"
