@@ -2606,9 +2606,10 @@ def main(
     warmer = None
     try:
         if multi_repo:
-            from .cross_repo_warmup import start_warmup
+            from .cross_repo_warmup import start_git_warmup, start_warmup
 
             warmer = start_warmup()
+            start_git_warmup()
         if auto_watch and root is not None:
             from .postprocessing import run_post_processing
 
