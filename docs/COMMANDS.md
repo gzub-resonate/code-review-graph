@@ -1259,6 +1259,8 @@ are as before; with `include_tests=false` the reply gives `tests_hidden` and the
 hidden. `path_prefix`, `source`, `machine` and `include_tests` filter before `counts`, `total` and paging (they
 reach rows a path-sorted page of 100 never got to) and a cursor is refused for different values. Each is refused
 for an origin it does not apply to.
+A row's `source` is the readable symbol name. When two symbols of a file share a name, their identity carries a
+`:S<12 hex>` suffix; the row then also has `source_id` (the identity) and `source=` matches either spelling.
 
 For the Feign and JS/TS origins `repos_searched_total` is the number of repos read and `repos_searched`
 (the names) is returned only for 10 repos or fewer, or with `include_repo_list=true`. `skipped_repos` is
