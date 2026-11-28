@@ -87,3 +87,26 @@ def test_a_single_owner_is_unchanged(world) -> None:
     row = _row()
     assert row["status"] == "matched" and row["target_repo"] == "legacy"
     assert "also_defined_in" not in row and "tie_break" not in row
+
+
+def test_a_unit_that_deploys_a_differently_spelled_name_is_not_a_deployer(world) -> None:
+    """``disrupt-look-a-like`` and ``disrupt-lookalike`` are two machines in AWS.
+
+    A repo whose unit deploys ``or-ders`` holds ``orders.asl.json`` too, so it is a candidate
+    owner of ``orders`` through the definition file, but it does not deploy ``orders``: the
+    deployed name is exact, only a definition file or a Terraform label is read leniently.
+    """
+    tmp_path, registry = world
+    make_repo(tmp_path, registry, "infra", MACHINES)
+    respelled = {
+        rel: text.replace('name                    = "orders"', 'name                    = "or-ders"')
+        for rel, text in MACHINES.items()
+    }
+    assert respelled != MACHINES
+    make_repo(tmp_path, registry, "sibling", respelled)
+    row = _row()
+    assert row["status"] == "matched"
+    assert row["target_repo"] == "infra"
+    assert row["also_defined_in"] == ["sibling"]
+    assert row["also_defined_via"] == {"sibling": "state_machine_file"}
+    assert row["tie_break"] == "deployed_declaration_over_definition_file"
