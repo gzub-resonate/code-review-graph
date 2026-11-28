@@ -11,7 +11,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from concurrent.futures import FIRST_COMPLETED, Future, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Optional
 
@@ -2820,6 +2820,82 @@ def cross_repo_requests_func(
 _ROUTE_ROWS_PER_REPO = 10
 
 
+_PROBE_SKIPPED = "skipped"
+_PROBE_NO_GRAPH = "no_graph"
+_PROBE_NOTHING = "nothing"
+_PROBE_MAYBE = "maybe"
+#: Repos probed at once. Each probe is one read of a graph that may sit on a network disk.
+_PROBE_WORKERS = 2
+#: A last route segment the probe may look for as text: it is stored unescaped in the JSON
+#: ``extra`` column and holds no LIKE wildcard other than ``_`` (escaped below).
+_PROBE_SEGMENT = re.compile(r"^[A-Za-z0-9_.~-]+$")
+
+
+def _route_probe_terms(target: str) -> tuple[str | None, tuple[str, ...]]:
+    """What a cheap read of one graph must find for ``handlers_of <route>`` to match there.
+
+    ``match_route_endpoints`` keeps an Endpoint whose normalised route equals the wanted one
+    or ends with it, so the wanted route's last segment occurs in that Endpoint's ``extra``
+    text (SQLite ``LIKE`` is case-insensitive for ASCII, as ``normalize_route`` lower-cases).
+    A placeholder or an unusual last segment gives ``None``: then no repo is ruled out.
+    The second value is the names ``query_graph`` would look the target up as before
+    treating it as a route.
+    """
+    from ..constants import normalize_file_path
+    from .query_extras import normalize_route, parse_route_target
+
+    parsed = parse_route_target(target)
+    if parsed is None:
+        return None, ()
+    last = normalize_route(parsed[1]).rsplit("/", 1)[-1]
+    names = (target, normalize_file_path(target))
+    if not last or not _PROBE_SEGMENT.match(last):
+        return None, names
+    return "%" + last.replace("_", "\\_") + "%", names
+
+
+def _probe_repo(
+    entry: dict[str, Any], pattern: str | None, names: tuple[str, ...], deadline: float | None,
+) -> str:
+    if _out_of_budget(deadline):
+        return _PROBE_SKIPPED
+    repo_path = Path(str(entry.get("path") or ""))
+    db_path = get_db_path(repo_path)
+    if not repo_path.is_dir() or not db_path.exists():
+        return _PROBE_NO_GRAPH
+    if pattern is None:
+        return _PROBE_MAYBE
+    try:
+        conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=5.0)
+        try:
+            if conn.execute(
+                "SELECT 1 FROM nodes WHERE kind = 'Endpoint' AND extra LIKE ? ESCAPE '\\' "
+                "LIMIT 1", (pattern,),
+            ).fetchone():
+                return _PROBE_MAYBE
+            if conn.execute(
+                "SELECT 1 FROM nodes WHERE qualified_name IN (?, ?) LIMIT 1", names,
+            ).fetchone():
+                return _PROBE_MAYBE
+            return _PROBE_NOTHING
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:  # cannot tell: let the full query decide
+        logger.debug("route probe of %s failed: %s", db_path, exc)
+        return _PROBE_MAYBE
+
+
+def _probe_repos(
+    entries: list[dict[str, Any]], pattern: str | None, names: tuple[str, ...],
+    deadline: float | None,
+) -> list[str]:
+    """Probe every registered repo, two at a time, in registry order."""
+    if len(entries) < 2:
+        return [_probe_repo(e, pattern, names, deadline) for e in entries]
+    with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+        return list(pool.map(lambda e: _probe_repo(e, pattern, names, deadline), entries))
+
+
 def handlers_of_route_across_repos(
     target: str,
     detail_level: str = "standard",
@@ -2845,18 +2921,24 @@ def handlers_of_route_across_repos(
     if budget > 0:
         deadline = _now() + budget
     entries = Registry().list_repos()
+    pattern, lookups = _route_probe_terms(target)
+    verdicts = _probe_repos(entries, pattern, lookups, deadline)
     matched: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     total_rows = 0
     searched = without_graph = unreadable = skipped = 0
-    for entry in entries:
-        if _out_of_budget(deadline):
+    for entry, verdict in zip(entries, verdicts):
+        if verdict == _PROBE_SKIPPED or _out_of_budget(deadline):
             skipped += 1
             continue
-        repo_path = Path(str(entry.get("path") or ""))
-        if not repo_path.is_dir() or not get_db_path(repo_path).exists():
+        if verdict == _PROBE_NO_GRAPH:
             without_graph += 1
             continue
+        if verdict == _PROBE_NOTHING:
+            # No Endpoint row could match: the full query would answer not_found.
+            searched += 1
+            continue
+        repo_path = Path(str(entry.get("path") or ""))
         try:
             reply = query_graph(
                 pattern="handlers_of", target=target, repo_root=str(repo_path),
