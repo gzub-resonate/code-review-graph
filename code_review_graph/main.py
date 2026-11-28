@@ -274,16 +274,32 @@ class _StderrHandler(logging.StreamHandler):
 
 # ``serve`` runs the server without the CLI's ``logging.basicConfig``, so the root logger has no
 # handler and level WARNING there: an INFO line of ``code_review_graph.*`` never reaches the
-# container log. The timing lines are the only INFO lines operators need, so their logger carries
-# its own stderr handler and does not depend on how the process configured logging. (stderr, not
+# container log. The timing lines and the cache warm-up lines (start, per-origin time, summary)
+# are the INFO lines operators need, so those loggers carry their own stderr handler and do not
+# depend on how the process configured logging. Other loggers keep their levels. (stderr, not
 # stdout, so the stdio transport's protocol stream is untouched.)
-timing_logger = logging.getLogger("code_review_graph.timing")
-timing_logger.setLevel(logging.INFO)
-timing_logger.propagate = False
-if not timing_logger.handlers:
-    _timing_handler = _StderrHandler()
-    _timing_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    timing_logger.addHandler(_timing_handler)
+class _StderrUnlessRootHandled(_StderrHandler):
+    """Writes only while the root logger has no handler, so a configured process (the CLI's
+    ``basicConfig``, pytest's capture) still gets each record once, through the root."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not logging.getLogger().handlers:
+            super().emit(record)
+
+
+def _own_stderr_logger(name: str, *, propagate: bool = False) -> logging.Logger:
+    own = logging.getLogger(name)
+    own.setLevel(logging.INFO)
+    own.propagate = propagate
+    if not own.handlers:
+        handler = _StderrHandler() if not propagate else _StderrUnlessRootHandled()
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        own.addHandler(handler)
+    return own
+
+
+timing_logger = _own_stderr_logger("code_review_graph.timing")
+warmup_logger = _own_stderr_logger("code_review_graph.cross_repo_warmup", propagate=True)
 
 
 def _log_tool_timing(
