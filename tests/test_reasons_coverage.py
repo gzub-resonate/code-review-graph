@@ -72,8 +72,10 @@ def test_awssdk_unresolved_row_says_why_and_filters(tmp_path, registry):  # noqa
     rows = [r for r in reply["results"] if r["status"] == "unresolved"]
     assert rows
     assert all(r["unresolved_reason"] for r in rows)
-    assert reply["counts_by_reason"]["name_not_literal"] == len(rows)
-    only = cross_repo_requests_func(origin="awssdk", status="name_not_literal")
+    # A bucket that is a function parameter has its own reason, ``name_is_parameter``, rather
+    # than the catch-all ``name_not_literal``.
+    assert reply["counts_by_reason"]["name_is_parameter"] == len(rows)
+    only = cross_repo_requests_func(origin="awssdk", status="name_is_parameter")
     assert only["total"] == len(rows)
 
 

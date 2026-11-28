@@ -69,4 +69,5 @@ async def test_the_timing_line_names_the_caches_a_call_used(capsys):
 async def test_a_call_that_used_no_cache_logs_a_dash(capsys):
     await main._offload("demo_tool", lambda: {"status": "ok"}, None, provenance=False)
     (line,) = [x for x in capsys.readouterr().err.splitlines() if "tool timing" in x]
-    assert line.endswith("caches=-")
+    # ``args=`` follows ``caches=`` on the timing line, so the dash is a field, not the end.
+    assert re.search(r"\bcaches=-( |$)", line)
