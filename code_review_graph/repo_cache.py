@@ -259,8 +259,8 @@ def graph_stamp(entry: Mapping[str, Any]) -> Stamp | None:
     or any reader opening the database moves those without changing the graph, and each such
     move used to throw away every cached cross-repo result. A rebuild that replaces the file
     changes the inode; an update changes the build time or the ids. The marker is only read
-    again when the file signature moved, so a call over 100+ repos costs ``stat`` calls. A graph whose marker cannot
-    be read falls back to the old file signature.
+    again when the file signature moved, so a call over 100+ repos costs ``stat`` calls. A graph
+    whose marker cannot be read falls back to the old file signature.
     """
     from .incremental import get_db_path
 

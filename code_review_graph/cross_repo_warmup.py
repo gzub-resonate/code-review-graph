@@ -10,6 +10,9 @@ itself, so a client does not.
 * It makes the same call a client would (unscoped, default page size), one origin at a time,
   so it fills ``MEMO`` and ``INFRASTRUCTURE_RESULTS`` through the shared bounded pool and
   ``SingleFlight``: a real request that arrives meanwhile shares the work, never repeats it.
+  For ``awssdk`` it also reads each repo's declaration context (``warm_origin_context``): a
+  call scoped with ``repos`` reads that for every repo it leaves out, and the unscoped call
+  does not, so the first scoped call after a reindex used to pay for all of it.
 * A pass stops starting origins after ``CRG_CROSS_REPO_WARMUP_MAX_SECONDS`` (default 1800). An
   origin already running is bounded by ``CRG_CROSS_REPO_BUDGET_SECONDS`` as any call is.
 * It never raises into the server and logs one line per origin with the seconds it took.
@@ -90,9 +93,13 @@ def registry_signature() -> tuple[Any, ...]:
 
 
 def _default_call(origin: str) -> Any:
-    from .tools.registry_tools import cross_repo_requests_func
+    from .tools.registry_tools import cross_repo_requests_func, warm_origin_context
 
-    return cross_repo_requests_func(origin=origin)
+    reply = cross_repo_requests_func(origin=origin)
+    # A client usually asks about some repos, and that call reads the context of the others
+    # (``<origin>-context``), which the unscoped call above never does: fill it here too.
+    warm_origin_context(origin)
+    return reply
 
 
 class Warmer:

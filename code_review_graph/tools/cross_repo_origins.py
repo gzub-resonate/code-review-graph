@@ -25,9 +25,10 @@ from ..errors import GraphStoreError
 from ..graph import _sanitize_name
 from ..paging import content_stamp, make_scope, paginate, shown_range
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
-from ..repo_cache import CONSUMER_RESULTS, MEMO, graph_stamp
+from ..repo_cache import CONSUMER_RESULTS, MEMO, graph_stamp, parallel_map_budget
 from ..terraform_links import open_store
 from ..xrepo_budget import BudgetSpent
+from ..xrepo_fast import prefetch_stamps
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,33 @@ def _read(entry: dict[str, Any], namespace: str, reader: Any) -> Optional[Any]:
             store.close()
 
     return MEMO.get(namespace, entry, compute, cacheable=lambda value: value is not None)
+
+
+def _read_ahead(
+    jobs: list[tuple[dict[str, Any], str, Any]], budget: float, started: float,
+) -> None:
+    """Run ``_read`` for each ``(entry, namespace, reader)`` on the shared worker threads.
+
+    The join loops below read one repo after another; each read waits on the graph file, which
+    on a network disk is the whole cost of a cold call. Reading ahead fills the same cache
+    (``MEMO``), so the loop finds every value in memory and its rows, order and budget checks
+    are the ones it had. A repo not started because the budget ran out is read by the loop,
+    which then skips it as before. A read that raises is left to the loop, which raises it.
+    """
+    workers = cross_repo_workers()
+    if workers <= 1 or len(jobs) <= 1:
+        return
+
+    def read(job: tuple[dict[str, Any], str, Any]) -> None:
+        entry, namespace, reader = job
+        try:
+            _read(entry, namespace, reader)
+        except Exception:  # the join loop reads it again and reports it there
+            logger.debug("Read-ahead of %s failed for %s", namespace, entry.get("path"))
+
+    parallel_map_budget(
+        read, jobs, workers, lambda: bool(budget) and time.monotonic() - started > budget,
+    )
 
 
 def _reply(
@@ -189,6 +217,7 @@ def external_links(
     feign = _FeignRegistry(
         all_repos, lambda: bool(budget) and time.monotonic() - started > budget,
     )
+    _read_ahead([(e, "external-calls", eh.read_client_calls) for e in selected], budget, started)
     skipped: list[str] = []
     unreadable: list[str] = []
     cells: dict[tuple[str, str], dict[str, Any]] = {}
@@ -376,6 +405,18 @@ def consumers_links(
         skipped: list[str] = []
         unreadable: list[str] = []
         selected_ids = {id(e) for e in selected}
+        _read_ahead(
+            [
+                job for entry in all_repos for job in (
+                    (entry, "consumer-declarations", cj.read_declarations),
+                    *(
+                        ((entry, "consumer-uses", cj.read_uses),)
+                        if id(entry) in selected_ids else ()
+                    ),
+                )
+            ],
+            budget, started,
+        )
         declared_all: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
         unresolved_reads = 0
@@ -444,6 +485,8 @@ def consumers_links(
             "unresolved_reads": unresolved_reads, "unnamed": unnamed_declarations,
         }
 
+    # Every repo's stamp is read for the key: read them side by side, not one after another.
+    prefetch_stamps(all_repos, cross_repo_workers())
     key = _consumers_key(all_repos, selected, wanted, kind, status)
     if key is None:
         computed = compute()

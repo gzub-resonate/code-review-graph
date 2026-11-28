@@ -580,6 +580,8 @@ def _search_results_key(
     ``None`` when a graph cannot be stamped. The page size and the cursor are left out: they
     only choose which of the merged rows are shown.
     """
+    # The stamps are read side by side: one after another is a wait per repo on a network disk.
+    xf.prefetch_stamps(selected, cross_repo_workers())
     stamps = []
     for entry in selected:
         stamp = graph_stamp(entry)
@@ -1744,6 +1746,59 @@ def _source_matches(row_source: str, wanted: str) -> bool:
     )
 
 
+def _read_graph(
+    origin: str, entry: dict[str, Any], reader: Any, what: str,
+) -> Optional[list[dict[str, Any]]]:
+    """What *reader* finds in one repo's graph, or ``None`` when it cannot be read."""
+    store = tl.open_store(entry)
+    if store is None:
+        return None
+    try:
+        return reader(store)  # type: ignore[no-any-return]
+    except (sqlite3.Error, GraphStoreError) as exc:
+        logger.warning("Cannot read %s %s of %s: %s", origin, what, entry["path"], exc)
+        return None
+    finally:
+        store.close()
+
+
+def _origin_context(
+    origin: str, entry: dict[str, Any], reader: Any,
+) -> Optional[list[dict[str, Any]]]:
+    """The context rows of one repo (what only helps to find an owner), kept per graph file."""
+    return MEMO.get(
+        f"{origin}-context", entry, lambda: _read_graph(origin, entry, reader, "context"),
+        cacheable=lambda found: found is not None,
+    )
+
+
+#: The origins whose join reads context from the repos it was not asked about, and the reader.
+_CONTEXT_READERS: dict[str, Any] = {"awssdk": al.read_declare_edges}
+
+
+def warm_origin_context(origin: str) -> int:
+    """Read the context rows of every registered repo into the cache; the number of repos read.
+
+    An unscoped call lists every repo's own rows (``<origin>-edges``) and so reads no context at
+    all; a call scoped with ``repos`` reads the context of every repo it left out. Without this,
+    the first scoped call after a start or a reindex read them all at the client's expense even
+    though the warm-up had run. The reads go on the shared workers and stop at the call budget.
+    """
+    from ..registry import Registry
+
+    reader = _CONTEXT_READERS.get(origin)
+    if reader is None:
+        return 0
+    all_repos = Registry().list_repos()
+    budget = cross_repo_budget_seconds()
+    started = _now()
+    done = parallel_map_budget(
+        lambda entry: _origin_context(origin, entry, reader), all_repos, cross_repo_workers(),
+        lambda: bool(budget) and _now() - started > budget,
+    )
+    return sum(1 for found in done if found is not SKIPPED)
+
+
 def _infra_links(
     origin: str,
     noun: str,
@@ -1813,16 +1868,7 @@ def _infra_links(
 
     def read_one(entry: dict[str, Any], reader: Any, what: str) -> Optional[list[dict[str, Any]]]:
         """What *reader* finds in one repo's graph, or ``None`` when it cannot be read."""
-        store = tl.open_store(entry)
-        if store is None:
-            return None
-        try:
-            return reader(store)  # type: ignore[no-any-return]
-        except (sqlite3.Error, GraphStoreError) as exc:
-            logger.warning("Cannot read %s %s of %s: %s", origin, what, entry["path"], exc)
-            return None
-        finally:
-            store.close()
+        return _read_graph(origin, entry, reader, what)
 
     def edges_of(entry: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
         return MEMO.get(
@@ -1872,10 +1918,7 @@ def _infra_links(
         others = [e for e in all_repos if id(e) not in chosen]
 
         def context_of(entry: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
-            return MEMO.get(
-                f"{origin}-context", entry, lambda: read_one(entry, read_context, "context"),
-                cacheable=lambda found: found is not None,
-            )
+            return _origin_context(origin, entry, read_context)
 
         for entry, found in zip(
             others, parallel_map_budget(context_of, others, workers, out_of_budget),
