@@ -3492,7 +3492,10 @@ def traverse_graph_func(
     store, root = _get_store(repo_root)
     try:
         result_ids: list[int] = []
-        results = hybrid_search(store, query, limit=1, _out_ids=result_ids)
+        search_mode: list[str] = []
+        results = hybrid_search(
+            store, query, limit=1, _out_ids=result_ids, _out_mode=search_mode,
+        )
         # Search cuts a long qualified name, so find the node by its id.
         start = store.get_node_by_id(result_ids[0]) if result_ids else None
         if not results or start is None:
@@ -3587,6 +3590,9 @@ def traverse_graph_func(
         )
         return {
             "start_node": _sanitize_name(start_qn),
+            # The start node is a search answer; the embedding side is skipped without a
+            # word when it is unavailable, so which paths picked it explains a changed walk.
+            "start_found_by": search_mode[0] if search_mode else "none",
             "mode": mode,
             "max_depth": depth,
             "token_budget": token_budget,

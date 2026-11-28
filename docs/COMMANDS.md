@@ -753,7 +753,9 @@ token_budget: int = 2000        # At most 10000 approximate tokens; the walk sto
 repo_root: str | None
 cursor: str | None              # next_cursor of the previous reply (see Paging)
 ```
-`truncated` means the budget ran out before the walk did.
+`truncated` means the budget ran out before the walk did. `start_found_by` says which search paths picked the start
+node (`hybrid`, `fts`, `semantic`, `keyword` or `none`): the embedding side is skipped when unavailable, which can
+choose another start node for the same query.
 
 #### `semantic_search_nodes_tool`
 ```
