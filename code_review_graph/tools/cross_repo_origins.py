@@ -8,6 +8,7 @@ and builds the reply, as the ``amqp`` origin does.
 
 from __future__ import annotations
 
+import copy
 import logging
 import sqlite3
 import time
@@ -24,7 +25,7 @@ from ..errors import GraphStoreError
 from ..graph import _sanitize_name
 from ..paging import content_stamp, make_scope, paginate, shown_range
 from ..repo_aliases import RepoNameResolver, load_repo_aliases
-from ..repo_cache import MEMO
+from ..repo_cache import CONSUMER_RESULTS, MEMO, graph_stamp
 from ..terraform_links import open_store
 from ..xrepo_budget import BudgetSpent
 
@@ -314,6 +315,24 @@ def _declaration_row(repo: str, decl: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _consumers_key(
+    all_repos: list[dict[str, Any]], selected: list[dict[str, Any]], wanted: str,
+    kind: Optional[str], status: Optional[str],
+) -> Optional[tuple[Any, ...]]:
+    """What the consumers rows depend on: the query and every repo's graph stamp, else ``None``.
+
+    The declarations of every repo are read whatever ``repos`` says, so every stamp counts.
+    The page size and the cursor are left out: they only choose which rows are shown.
+    """
+    stamps = []
+    for entry in all_repos:
+        stamp = graph_stamp(entry)
+        if stamp is None:
+            return None
+        stamps.append((str(entry["path"]), entry.get("alias"), stamp))
+    return (tuple(stamps), tuple(str(e["path"]) for e in selected), wanted, kind, status)
+
+
 def consumers_links(
     repos: Optional[list[str]], name: Optional[str], kind: Optional[str],
     status: Optional[str], max_results: int, cursor: Optional[str] = None,
@@ -351,71 +370,95 @@ def consumers_links(
                 empty, {}, len(selected), [], [], unknown,
                 refused=why, min_name_length=cj.MIN_NAME_LENGTH,
             )
-    budget = cross_repo_budget_seconds()
-    started = time.monotonic()
-    skipped: list[str] = []
-    unreadable: list[str] = []
-    selected_ids = {id(e) for e in selected}
-    declared_all: list[dict[str, Any]] = []
-    rows: list[dict[str, Any]] = []
-    unresolved_reads = 0
-    unnamed_declarations = 0
-    for entry in all_repos:
-        label = _clean(_label(entry))
-        mine = id(entry) in selected_ids
-        if budget and time.monotonic() - started > budget:
-            if mine:
-                skipped.append(label)
-            continue
-        decls = _read(entry, "consumer-declarations", cj.read_declarations)
-        uses = _read(entry, "consumer-uses", cj.read_uses) if mine else None
-        if decls is None or (uses is None and mine):
-            if mine:
-                unreadable.append(label)
-            if decls is None:
+    def compute() -> dict[str, Any]:
+        budget = cross_repo_budget_seconds()
+        started = time.monotonic()
+        skipped: list[str] = []
+        unreadable: list[str] = []
+        selected_ids = {id(e) for e in selected}
+        declared_all: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
+        unresolved_reads = 0
+        unnamed_declarations = 0
+        for entry in all_repos:
+            label = _clean(_label(entry))
+            mine = id(entry) in selected_ids
+            if budget and time.monotonic() - started > budget:
+                if mine:
+                    skipped.append(label)
                 continue
-        items = [{**d, "repo": label} for d in decls["items"]]
-        declared_all.extend(items)
-        unnamed_declarations += decls["unnamed"]
-        if wanted:
-            for decl in items:
-                if cj.declaration_matches(decl, wanted):
-                    rows.append(_declaration_row(label, decl))
-            for use in uses or []:
-                found = cj.use_matches(use, wanted)
-                if found is None:
+            decls = _read(entry, "consumer-declarations", cj.read_declarations)
+            uses = _read(entry, "consumer-uses", cj.read_uses) if mine else None
+            if decls is None or (uses is None and mine):
+                if mine:
+                    unreadable.append(label)
+                if decls is None:
                     continue
-                match, detail = found
-                row = {
-                    "role": cj.ROLE_CONSUMER, "match": match, "repo": label,
-                    "file": use["file"], "line": use["line"], "service": use["service"],
-                    "kind": use["kind"], "name": use["name"], "operation": use["operation"],
-                    "access": use["access"], "sdk": use["sdk"], **detail,
-                }
-                if use["source"]:
-                    row["source"] = use["source"]
-                rows.append(row)
-        elif mine and uses:
-            missing, unnamed = cj.undeclared_reads(uses, [])
-            unresolved_reads += unnamed
-            for use in missing:
-                use["repo"] = label
-                rows.append(use)
-    if not wanted:
-        rows = _undeclared(rows, declared_all)
-    if kind:
-        folded = kind.strip().lower()
-        rows = [r for r in rows if folded in (str(r["service"]).lower(), str(r["kind"]).lower())]
-    counts: dict[str, int] = {}
-    for r in rows:
-        key = r["role"] if r["role"] != cj.ROLE_CONSUMER else r["role"] + ":" + r["match"]
-        counts[key] = counts.get(key, 0) + 1
-    if status:
-        rows = [r for r in rows if status in (r["role"], r["match"])]
-    rows = [r for r in _clean(rows)]
-    rows.sort(key=lambda r: (
-        r["role"] != cj.ROLE_DECLARATION, r["repo"], r["file"], r["line"] or 0, r["name"],
-    ))
+            items = [{**d, "repo": label} for d in decls["items"]]
+            declared_all.extend(items)
+            unnamed_declarations += decls["unnamed"]
+            if wanted:
+                for decl in items:
+                    if cj.declaration_matches(decl, wanted):
+                        rows.append(_declaration_row(label, decl))
+                for use in uses or []:
+                    found = cj.use_matches(use, wanted)
+                    if found is None:
+                        continue
+                    match, detail = found
+                    row = {
+                        "role": cj.ROLE_CONSUMER, "match": match, "repo": label,
+                        "file": use["file"], "line": use["line"], "service": use["service"],
+                        "kind": use["kind"], "name": use["name"], "operation": use["operation"],
+                        "access": use["access"], "sdk": use["sdk"], **detail,
+                    }
+                    if use["source"]:
+                        row["source"] = use["source"]
+                    rows.append(row)
+            elif mine and uses:
+                missing, unnamed = cj.undeclared_reads(uses, [])
+                unresolved_reads += unnamed
+                for use in missing:
+                    use["repo"] = label
+                    rows.append(use)
+        if not wanted:
+            rows = _undeclared(rows, declared_all)
+        if kind:
+            folded = kind.strip().lower()
+            rows = [
+                r for r in rows
+                if folded in (str(r["service"]).lower(), str(r["kind"]).lower())
+            ]
+        counts: dict[str, int] = {}
+        for r in rows:
+            key = r["role"] if r["role"] != cj.ROLE_CONSUMER else r["role"] + ":" + r["match"]
+            counts[key] = counts.get(key, 0) + 1
+        if status:
+            rows = [r for r in rows if status in (r["role"], r["match"])]
+        rows = [r for r in _clean(rows)]
+        rows.sort(key=lambda r: (
+            r["role"] != cj.ROLE_DECLARATION, r["repo"], r["file"], r["line"] or 0, r["name"],
+        ))
+        return {
+            "rows": rows, "counts": counts, "skipped": skipped, "unreadable": unreadable,
+            "unresolved_reads": unresolved_reads, "unnamed": unnamed_declarations,
+        }
+
+    key = _consumers_key(all_repos, selected, wanted, kind, status)
+    if key is None:
+        computed = compute()
+    else:
+        # The same query over the same graph versions is built once; later calls and cursor
+        # pages reuse it. A result the time budget cut short is not kept.
+        computed = copy.deepcopy(CONSUMER_RESULTS.get(
+            key, compute, cacheable=lambda found: not found["skipped"] and not found["unreadable"],
+        ))
+    rows = computed["rows"]
+    counts = computed["counts"]
+    skipped = computed["skipped"]
+    unreadable = computed["unreadable"]
+    unresolved_reads = computed["unresolved_reads"]
+    unnamed_declarations = computed["unnamed"]
     page = paginate(rows, max_results, 100, cursor, scope=scope,
                     stamp=content_stamp([rows, skipped]))
     extra: dict[str, Any] = {

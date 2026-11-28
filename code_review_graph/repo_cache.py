@@ -172,6 +172,8 @@ class ResultCache:
             return len(self._data)
 
 
+#: Size of the header at the start of a SQLite ``-wal`` file; a file this small has no frames.
+WAL_HEADER_BYTES = 32
 _STAMP_LOCK = threading.Lock()
 #: ``db path -> (file signature, stamp)``: the stamp last read for a graph file as it looked then.
 _STAMP_MEMO: dict[str, tuple[tuple[Any, ...], Stamp]] = {}
@@ -179,7 +181,12 @@ _STAMP_MEMO_MAX = 8192
 
 
 def _file_signature(db_path: Path) -> tuple[Any, ...] | None:
-    """Inode, mtime and size of the database and of its ``-wal``; ``None`` without a database."""
+    """Inode, mtime and size of the database and of its ``-wal``; ``None`` without a database.
+
+    A ``-wal`` of at most :data:`WAL_HEADER_BYTES` holds no frames, only the header SQLite
+    writes whenever a connection opens the database, so it counts as absent: its mtime moves on
+    every open by any reader and would otherwise never match twice.
+    """
     parts: list[Any] = []
     for path in (db_path, db_path.with_name(db_path.name + "-wal")):
         try:
@@ -187,6 +194,9 @@ def _file_signature(db_path: Path) -> tuple[Any, ...] | None:
         except FileNotFoundError:
             if path is db_path:
                 return None
+            parts.append(None)
+            continue
+        if path is not db_path and info.st_size <= WAL_HEADER_BYTES:
             parts.append(None)
             continue
         parts.append((info.st_ino, info.st_mtime_ns, info.st_size))
@@ -323,6 +333,11 @@ INFRASTRUCTURE_RESULTS = ResultCache()
 #: The all-repo server index of the Feign/JS join, keyed by every repo's graph stamp. Two entries:
 #: one registry state is current, the other covers a call that began before an indexer published.
 SERVER_INDEXES = ResultCache(2)
+#: The rows of ``origin="consumers"`` before paging, keyed by the query and every graph stamp.
+CONSUMER_RESULTS = ResultCache()
+#: The merged rows of ``cross_repo_search_tool`` before paging, keyed by the query and the
+#: stamps of the searched repos.
+SEARCH_RESULTS = ResultCache()
 
 
 POOL_THREADS_CAP = 4
