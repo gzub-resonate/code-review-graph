@@ -2921,8 +2921,8 @@ def handlers_of_route_across_repos(
     if budget > 0:
         deadline = _now() + budget
     entries = Registry().list_repos()
-    pattern, names = _route_probe_terms(target)
-    verdicts = _probe_repos(entries, pattern, names, deadline)
+    pattern, lookups = _route_probe_terms(target)
+    verdicts = _probe_repos(entries, pattern, lookups, deadline)
     matched: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     total_rows = 0

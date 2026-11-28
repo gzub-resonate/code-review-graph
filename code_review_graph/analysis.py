@@ -15,6 +15,7 @@ from .constants import (
     IMPORT_CONTEXT_KEY,
     IMPORT_CONTEXT_PARENT_PACKAGE,
     IMPORT_CONTEXT_TYPE_ONLY,
+    env_int,
 )
 from .graph import (
     RESOLUTION_UNRESOLVED,
@@ -831,6 +832,56 @@ def find_import_cycles(
     return cycles
 
 
+#: Hotspot candidates whose test coverage is looked up together.
+_COVERAGE_CHUNK = 256
+
+
+def _covered_names(store: GraphStore, names: list[str]) -> set[str]:
+    """The *names* for which ``store.get_transitive_tests(name, include_callee_routes=False)``
+    finds a test.
+
+    Same answer as asking each name on its own. What a name's own call spends most of its
+    time on is the walk through test helpers (two grouped queries per call); here that walk
+    runs once for every name that no direct test covers. A class is asked together with the
+    members it contains, as ``get_transitive_tests`` does.
+    """
+    seeds_of: dict[str, list[str]] = {name: [name] for name in names}
+    for start in range(0, len(names), 450):
+        batch = names[start:start + 450]
+        marks = ",".join("?" for _ in batch)
+        classes = [
+            row["qualified_name"] for row in store._conn.execute(  # nosec B608
+                f"SELECT qualified_name FROM nodes WHERE kind = 'Class' "
+                f"AND qualified_name IN ({marks})", batch,
+            ).fetchall()
+        ]
+        for cls in classes:
+            for row in store._conn.execute(
+                "SELECT target_qualified FROM edges "
+                "WHERE source_qualified = ? AND kind = 'CONTAINS'", (cls,),
+            ).fetchall():
+                seeds_of[cls].append(row["target_qualified"])
+    covered: set[str] = set()
+    pending: list[str] = []
+    for name in names:
+        if store.get_transitive_tests(
+            name, include_helper_routes=False, include_callee_routes=False,
+        ):
+            covered.add(name)
+        else:
+            pending.append(name)
+    if pending:
+        every = list(dict.fromkeys(seed for name in pending for seed in seeds_of[name]))
+        routes = store._get_test_helper_routes(
+            every, 2, env_int("CRG_MAX_TRANSITIVE_FRONTIER", 50), store.get_repo_root(),
+        )
+        covered.update(
+            name for name in pending
+            if any(routes.get(seed, {}).get("tests") for seed in seeds_of[name])
+        )
+    return covered
+
+
 def find_knowledge_gaps(
     store: GraphStore,
     repo_root: Path | None = None,
@@ -1010,10 +1061,21 @@ def find_knowledge_gaps(
         candidates = kept
     candidates.sort(key=lambda n: (-named.get(n.qualified_name, 0), n.qualified_name))
     untested_hotspots: list[dict] = []
-    for n in candidates:
+    covered: set[str] = set()
+    settled = 0
+    for i, n in enumerate(candidates):
         if max_untested is not None and len(untested_hotspots) >= max_untested:
             break
-        if store.get_transitive_tests(n.qualified_name, include_callee_routes=False):
+        if i >= settled:
+            # Look coverage up for a chunk at a time, never for more candidates than
+            # the rows still wanted.
+            size = _COVERAGE_CHUNK
+            if max_untested is not None:
+                size = min(size, max(1, max_untested - len(untested_hotspots)))
+            chunk = candidates[i:i + size]
+            covered |= _covered_names(store, [c.qualified_name for c in chunk])
+            settled = i + len(chunk)
+        if n.qualified_name in covered:
             continue
         untested_hotspots.append({
             "name": _sanitize_name(n.name),
