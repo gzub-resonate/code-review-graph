@@ -753,7 +753,9 @@ token_budget: int = 2000        # At most 10000 approximate tokens; the walk sto
 repo_root: str | None
 cursor: str | None              # next_cursor of the previous reply (see Paging)
 ```
-`truncated` means the budget ran out before the walk did.
+`truncated` means the budget ran out before the walk did. `start_found_by` says which search paths picked the start
+node (`hybrid`, `fts`, `semantic`, `keyword` or `none`): the embedding side is skipped when unavailable, which can
+choose another start node for the same query.
 
 #### `semantic_search_nodes_tool`
 ```
@@ -1259,6 +1261,8 @@ are as before; with `include_tests=false` the reply gives `tests_hidden` and the
 hidden. `path_prefix`, `source`, `machine` and `include_tests` filter before `counts`, `total` and paging (they
 reach rows a path-sorted page of 100 never got to) and a cursor is refused for different values. Each is refused
 for an origin it does not apply to.
+A row's `source` is the readable symbol name. When two symbols of a file share a name, their identity carries a
+`:S<12 hex>` suffix; the row then also has `source_id` (the identity) and `source=` matches either spelling.
 
 For the Feign and JS/TS origins `repos_searched_total` is the number of repos read and `repos_searched`
 (the names) is returned only for 10 repos or fewer, or with `include_repo_list=true`. `skipped_repos` is
@@ -1329,7 +1333,9 @@ When a state machine has two candidate owners (`ambiguous`) and exactly one of t
 declaration, or a Terragrunt unit naming it) while the others only hold its definition file (`*.asl.json`), the row is
 `matched` to the deploying repo with `tie_break: deployed_declaration_over_definition_file`, `also_defined_in` (the
 other repos) and `also_defined_via` (`{repo: how it defines it}`). Two deploying repos, or none, stay `ambiguous`; the
-account id inside an ARN is not used. This is read-side only and does not change what a build writes.
+account id inside an ARN is not used. A Terragrunt unit or declaration deploys a machine only under exactly its name
+(`disrupt-look-a-like` does not deploy `disrupt-lookalike`); a Terraform resource label is matched ignoring case, `-` and
+`_`. A unit marked `skip = true` is still counted as a deployer (the graph does not record `skip`). This is read-side only and does not change what a build writes.
 
 Reasons on `origin="awssdk"` rows (status is never changed by them; `status=<reason>` filters and the reply has
 `counts_by_reason` and a summary clause). A `not_found` row has `not_found_reason`: `no_owner_lookup` (the service has

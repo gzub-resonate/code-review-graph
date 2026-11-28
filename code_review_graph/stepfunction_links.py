@@ -46,6 +46,9 @@ _EXTERNAL_AWS_PREFIX = "external:aws-"
 _MACHINE = ("states", "state-machine")
 #: ``kind`` of the marker ``Definitions._read`` adds for a machine that something deploys.
 _DEPLOYED_KIND = "state-machine/deployed"
+#: The deployed name exactly as a Terragrunt unit or a Terraform declaration gives it: an AWS
+#: state machine name is case-sensitive, so ``disrupt-look-a-like`` is not ``disrupt-lookalike``.
+_DEPLOYED_EXACT_KIND = "state-machine/deployed-exact"
 
 #: ``(service, target kind)`` -> the Terraform resource type that defines such a target.
 RESOURCE_TYPES: dict[tuple[str, str], str] = {
@@ -142,6 +145,10 @@ def _mark_deployed(found: dict[tuple[str, str, str], str], name: str, how: str) 
     ``(service, kind, name)`` key first, so the deploying source would otherwise be lost.
     """
     found.setdefault(("states", _DEPLOYED_KIND, "~" + _fold(name)), how)
+    if how != "terraform_resource":
+        # A unit's ``name`` input and a declaration's evaluated name are the deployed name
+        # itself, not a label that the spelling-insensitive join has to guess from.
+        found.setdefault(("states", _DEPLOYED_EXACT_KIND, name), how)
 
 
 class Definitions:
@@ -338,7 +345,10 @@ def break_machine_ties(
     repo that only holds its definition file. The row becomes ``matched`` with ``tie_break:
     deployed_declaration_over_definition_file``, ``also_defined_in`` (the other repos) and
     ``also_defined_via`` (``{repo: how}``). Two deploying repos, or none, stay ``ambiguous``.
-    Read-side only: nothing a build writes depends on it.
+    A Terragrunt unit or declaration counts only when its name is exactly the machine's
+    (``disrupt-look-a-like`` does not deploy ``disrupt-lookalike``); a Terraform resource label
+    is matched ignoring case, ``-`` and ``_``. Read-side only: nothing a build writes depends
+    on it.
     """
     by_name = {
         str(r.get("alias") or Path(r["path"]).name): known.get(str(Path(r["path"])), {})
@@ -352,10 +362,16 @@ def break_machine_ties(
         if not target or target.startswith("?") or len(names) >= 10:
             continue
         key = ("states", _DEPLOYED_KIND, "~" + _fold(target))
+        exact = ("states", _DEPLOYED_EXACT_KIND, target)
         facts = [by_name.get(n) for n in names]
         if any(f is None for f in facts):
             continue
-        deployers = [n for n, f in zip(names, facts) if f and key in f]
+        # A Terraform resource label is read spelling-insensitively; a unit's or declaration's
+        # name only when it is the same name.
+        deployers = [
+            n for n, f in zip(names, facts)
+            if f and (exact in f or f.get(key) == "terraform_resource")
+        ]
         if len(deployers) != 1:
             continue
         winner = deployers[0]

@@ -498,6 +498,12 @@ def test_traverse_first_page_is_unchanged_plus_a_cursor(repo):
     assert "next_cursor" in first
 
 
+def test_traverse_says_which_search_paths_picked_the_start_node(repo):
+    root, _ = repo
+    reply = traverse(root)(token_budget=10_000)
+    assert reply["start_found_by"] in {"hybrid", "fts", "semantic", "keyword"}
+
+
 @pytest.mark.parametrize("mode", ["bfs", "dfs"])
 @pytest.mark.parametrize("budget", [150, 400])
 def test_traverse_paging_reads_every_node_once_in_order(repo, mode, budget):

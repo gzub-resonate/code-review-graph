@@ -1946,7 +1946,11 @@ def _infra_links(
             or (r.get("file") or "").startswith(wanted_path + "/")
         ]
     if source:
-        rows = [r for r in rows if _source_matches(str(r.get("source") or ""), source)]
+        rows = [
+            r for r in rows
+            if _source_matches(str(r.get("source") or ""), source)
+            or (r.get("source_id") and _source_matches(str(r["source_id"]), source))
+        ]
     if machine:
         rows = [r for r in rows if r.get("machine") == machine]
     tests_hidden = 0

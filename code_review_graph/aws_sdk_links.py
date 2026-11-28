@@ -570,7 +570,7 @@ def resolve_links(
                 "repo": all_repos[index].get("alias") or source_path.name,
                 "file": rel,
                 "line": edge["line"],
-                "source": edge["source"].split("::", 1)[-1],
+                "source": GraphStore._collision_base(edge["source"]).split("::", 1)[-1],
                 "target_kind": edge["service"],
                 "target_name": edge["name"],
                 "target": f"{edge['service']}/{edge['name']}",
@@ -579,6 +579,11 @@ def resolve_links(
                 "sdk": edge["sdk"],
                 "status": status,
             }
+            raw_source = edge["source"].split("::", 1)[-1]
+            if raw_source != row["source"]:
+                # Two same-named symbols of a file carry ``:S<12 hex>`` in their identity;
+                # ``source`` shows the name a reader knows, ``source_id`` the identity.
+                row["source_id"] = raw_source
             if edge["service"] in DATA_STORE_SERVICES:
                 row["resource_kind"] = edge["kind"]
             if edge["placeholder"]:
