@@ -64,7 +64,8 @@ _TERRAFORM_OPS = frozenset({"declare", "notification", "policy"}) | WIRING_OPS
 _ROW_EXTRA = (
     "schedule", "event_sources", "wiring", "route", "protocol", "dead_letter_target",
     "arn_getter", "via", "target_source", "config_profile", "config_alternatives",
-    "const_ref", "client_inferred", "constant",
+    "const_ref", "client_inferred", "constant", "client_factory", "parameter", "bound_via",
+    "arg_form", "override_possible", "default_from", "target_alternatives",
 )
 #: What a client connection names besides the resource: never a user, password or query.
 _CONNECTION_FIELDS = (

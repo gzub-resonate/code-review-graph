@@ -2267,6 +2267,7 @@ async def cross_repo_requests_tool(
             ``env_placeholder``, ``profiles_differ``, ``ambiguous``, ``non_aws_host``,
             ``unrecognised_endpoint``, ``custom_endpoint``, ``proxy_endpoint``,
             ``serverless_cache``, ``internal_prefix``, ``no_resource_param``,
+            ``name_is_parameter``, ``argument_not_static``,
             ``config_key_not_resolved``, ``constant_not_resolved``, ``host_not_literal`` or
             ``name_not_literal``. The reply has ``counts_by_reason``; ``status`` accepts each.
             ``trigger`` answers "what invokes this Lambda, queue, state machine, topic or bucket

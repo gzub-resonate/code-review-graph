@@ -21,7 +21,13 @@ A name that cannot be worked out is still an edge, to ``external:aws-<service>:?
 Only names are recorded: a secret's id, never its value; a bucket and a key prefix, never an
 object. A client has to be seen being made (``boto3.client("s3")``), or a request or command
 class has to be imported from the SDK, so a local object that happens to have an ``invoke`` or
-``put_object`` method makes no edge. Helper functions that hide the client are not followed.
+``put_object`` method makes no edge. A helper function that returns the client is followed when
+it is in the same file, or in another file of the repo that the call imports and that returns a
+literal-service client on every path (``aws_cross_file``: the row has ``client_inferred:
+factory``, ``client_factory`` and confidence at most 0.5). A resource argument that is a
+parameter of its function says so (``parameter``, ``parameter_function``,
+``unresolved_reason: name_is_parameter``), and the callers that pass it by keyword get rows of
+their own (``target_source: parameter``, ``bound_via``, ``arg_form``; see ``aws_cross_file``).
 
 Also here: S3 locations written as ``s3://``/``https://...amazonaws.com`` literals in code,
 ``aws s3`` commands in shell scripts and workflow files, and the Terraform side of a bucket
@@ -52,6 +58,9 @@ UNRESOLVED_NAME = "?"
 #: ``unresolved_reason`` of a client call that names no resource parameter at all (``?`` row,
 #: confidence 0.3): the call is known, its target is not.
 NO_RESOURCE_PARAM = "no_resource_param"
+#: ``unresolved_reason`` of a call whose resource argument is a parameter of its function: the
+#: name is whatever the callers pass, and ``aws_cross_file`` binds it at their call sites.
+PARAMETER_REASON = "name_is_parameter"
 _DYN = "\x00"
 _MAX_EDGES_PER_FILE = 2000
 #: Longest line a pattern is run on, and the most text read from one file. Longer lines are
@@ -586,6 +595,21 @@ def _unique_consts(pairs: list[tuple[str, str]]) -> dict[str, str]:
     return {k: v for k, v in seen.items() if v is not None}
 
 
+def function_parameters(func: Any, src: bytes) -> list[str]:
+    """Names of a Python function's parameters, in order (``self``/``cls`` first one included)."""
+    params = func.child_by_field_name("parameters")
+    names: list[str] = []
+    for child in params.named_children if params is not None else ():
+        node = child
+        if node.type in ("default_parameter", "typed_default_parameter"):
+            node = node.child_by_field_name("name") or node
+        elif node.type == "typed_parameter" and node.named_child_count:
+            node = node.named_children[0]
+        if node.type == "identifier":
+            names.append(_text(node, src))
+    return names
+
+
 _CONST_NAME = re.compile(r"[A-Z][A-Z0-9_]{1,80}")
 #: Names of a function that returns a boto3 client of the literal service it is given.
 _CLIENT_FACTORIES = frozenset({"make_client", "get_client"})
@@ -603,6 +627,9 @@ class _Binding(NamedTuple):
     op: str = ""
     #: The client came from a factory call (``make_client("sfn")``), not ``boto3.client``.
     inferred: bool = False
+    #: ``<file>::<function>`` of the factory this client was read from, when its definition was
+    #: found and read (``aws_cross_file``); empty for a factory known by its name only.
+    factory: str = ""
 
 
 class _Python:
@@ -625,6 +652,9 @@ class _Python:
         self._collect_literals()
         self.wrappers: dict[str, _Binding] = {}
         self._collect_wrappers()
+        #: Reads the factories and callees defined in other files of the repo (see
+        #: ``aws_cross_file``); ``None`` when the caller gives no path or repo root.
+        self.xfile: Any = None
 
     # literals defined elsewhere in the module
     def _collect_literals(self) -> None:
@@ -774,6 +804,126 @@ class _Python:
         service = self.val(arg).template if arg is not None else None
         key = _BOTO_SERVICE.get((service or "").lower())
         return _Binding(_text(attr, self.src), key) if key else None
+
+    # factories read from their definition
+    def _client_call(self, call: Any) -> Optional[_Binding]:
+        """A client built by ``boto3.client("s3")`` or ``make_client("s3")``: literal service."""
+        fn = call.child_by_field_name("function")
+        if fn is None:
+            return None
+        name = _text(fn, self.src).rsplit(".", 1)[-1]
+        if name in _CLIENT_FACTORIES:
+            return self._factory_binding(call)
+        return self._boto_client(call)
+
+    @staticmethod
+    def _own_nodes(func: Any) -> list[Any]:
+        """Every node of a function body, without the nested functions and classes."""
+        body = func.child_by_field_name("body")
+        nodes: list[Any] = []
+        stack = list(body.children) if body is not None else []
+        while stack:
+            cur = stack.pop()
+            if cur.type in ("function_definition", "class_definition", "lambda"):
+                continue
+            nodes.append(cur)
+            stack.extend(cur.children)
+        return nodes
+
+    def _declares_global(self, func: Any, name: str) -> bool:
+        return any(
+            n.type == "global_statement"
+            and name in {_text(c, self.src) for c in n.named_children}
+            for n in self._own_nodes(func)
+        )
+
+    def _global_binding(self, name: str) -> Optional[_Binding]:
+        """The one client every assignment to a module-level *name* gives (``None`` is skipped).
+
+        Covers ``_client = None`` at the top of the module and ``_client = make_client("s3")``
+        in a function that declares ``global _client``: the lazy cache of a client factory. An
+        assignment of anything else, or two different clients, gives ``None``.
+        """
+        found: set[tuple[str, str]] = set()
+        for node in _walk(self.root):
+            if node.type != "assignment":
+                continue
+            left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+            if left is None or left.type != "identifier" or _text(left, self.src) != name:
+                continue
+            owner = node.parent
+            while owner is not None and owner.type not in ("function_definition", "lambda"):
+                owner = owner.parent
+            if owner is not None and (
+                owner.type != "function_definition" or not self._declares_global(owner, name)
+            ):
+                continue  # a local of the same name, not the module's
+            if right is None:
+                continue
+            if right.type == "none":
+                continue
+            got = self._client_call(right) if right.type == "call" else None
+            if got is None:
+                return None
+            found.add((got.kind, got.svc))
+        if len(found) != 1:
+            return None
+        kind, svc = next(iter(found))
+        return _Binding(kind, svc)
+
+    def returned_service(self, func: Any) -> Optional[_Binding]:
+        """The client a function returns: one literal service on every path, else ``None``.
+
+        A ``return`` of ``boto3.client("s3")``, ``boto3.Session(...).client("s3")`` or
+        ``make_client("s3")``, of a local variable assigned one of those, or of a module-level
+        name that holds one (see :meth:`_global_binding`). A service that is not a literal, a
+        ``return`` of anything else and two different services all give ``None``.
+        """
+        nodes = self._own_nodes(func)
+        local: dict[str, set[Optional[tuple[str, str]]]] = {}
+        for cur in nodes:
+            if cur.type != "assignment":
+                continue
+            left, right = cur.child_by_field_name("left"), cur.child_by_field_name("right")
+            if left is None or right is None or left.type != "identifier":
+                continue
+            built = self._client_call(right) if right.type == "call" else None
+            local.setdefault(_text(left, self.src), set()).add(
+                (built.kind, built.svc) if built is not None else None,
+            )
+        found: set[Optional[tuple[str, str]]] = set()
+        returns = 0
+        for cur in nodes:
+            if cur.type != "return_statement":
+                continue
+            returns += 1
+            value = cur.named_children[0] if cur.named_child_count else None
+            got: Optional[_Binding] = None
+            if value is not None and value.type == "call":
+                got = self._client_call(value)
+            elif value is not None and value.type == "identifier":
+                name = _text(value, self.src)
+                if name in local and not self._declares_global(func, name):
+                    kinds = local[name]
+                    if len(kinds) == 1 and None not in kinds:
+                        kind, svc = next(iter(kinds))  # type: ignore[misc]
+                        got = _Binding(kind, svc)
+                else:
+                    got = self._global_binding(name)
+            found.add((got.kind, got.svc) if got is not None else None)
+        if not returns or len(found) != 1 or None in found:
+            return None
+        kind, svc = next(iter(found))  # type: ignore[misc]
+        return _Binding(kind, svc)
+
+    def _external_factory(self, fn: Any) -> Optional[_Binding]:
+        """The client a function defined in another file of the repo returns, at low confidence.
+
+        Only when ``aws_cross_file`` finds the function and reads a literal service from it.
+        """
+        if self.xfile is None:
+            return None
+        return self.xfile.factory_binding(fn)
 
     _CONSTANT_ARGS = frozenset({
         "string", "integer", "float", "true", "false", "none", "concatenated_string",
@@ -977,10 +1127,12 @@ class _Python:
         fn = call.child_by_field_name("function")
         if fn is not None and fn.type == "identifier" \
                 and _text(fn, self.src) in _CLIENT_FACTORIES:
-            return self._factory_binding(call)
+            return self._factory_binding(call) or self._external_factory(fn)
         if fn is not None and fn.type == "identifier":
             wrapped = self.wrappers.get(_text(fn, self.src))
-            return wrapped if wrapped is not None and self._constant_call(call) else None
+            if wrapped is not None:
+                return wrapped if self._constant_call(call) else None
+            return self._external_factory(fn)
         if fn is None or fn.type != "attribute":
             return None
         attr = _text(fn.child_by_field_name("attribute"), self.src)
@@ -990,7 +1142,7 @@ class _Python:
             return self.wrappers[attr] if self._constant_call(call) else None
         pos, kws, _splat = self._args(call)
         if attr in _CLIENT_FACTORIES:
-            return self._factory_binding(call)
+            return self._factory_binding(call) or self._external_factory(fn)
         if attr in ("client", "resource"):
             arg = pos[0] if pos else kws.get("service_name")
             service = self.val(arg).template if arg is not None else None
@@ -998,7 +1150,7 @@ class _Python:
             return _Binding(attr, key) if key else None
         base = self.expr_binding(recv) if recv is not None else None
         if base is None:
-            return None
+            return self._external_factory(fn)
         if attr == "Table" and base.kind == "resource" and base.svc == "dynamodb":
             arg = pos[0] if pos else kws.get("name")
             return _Binding("table", "dynamodb", self.val(arg) if arg is not None else Val())
@@ -1007,8 +1159,9 @@ class _Python:
             return _Binding("bucket", "s3", self.val(arg) if arg is not None else Val())
         if attr == "get_paginator" and base.kind in ("client", "resource") and pos:
             op = self.val(pos[0]).template
-            return _Binding("paginator", base.svc, op=op, inferred=base.inferred) \
-                if op and _DYN not in op else None
+            return _Binding(
+                "paginator", base.svc, op=op, inferred=base.inferred, factory=base.factory,
+            ) if op and _DYN not in op else None
         return None
 
     def _factory_binding(self, call: Any) -> Optional[_Binding]:
@@ -1042,7 +1195,7 @@ class _Python:
                 self._store(_text(key_node, self.src), binding, node)
 
     # call sites
-    def run(self) -> None:
+    def run(self, bind_callers: bool = True) -> None:
         self.collect_bindings()
         for node in _walk(self.root):
             if node.type != "call":
@@ -1065,6 +1218,10 @@ class _Python:
                         confidence=min(0.5, edge.extra.get("confidence", 0.5)),
                         confidence_tier="INFERRED", client_inferred="factory",
                     )
+                    if base.factory:
+                        edge.extra["client_factory"] = base.factory[:300]
+        if bind_callers and self.xfile is not None:
+            self.xfile.bind_callers(self)
 
     def _site(self, call: Any, base: _Binding, method: str) -> None:
         line = _line(call)
@@ -1089,6 +1246,34 @@ class _Python:
                 self.out.add(svc, method, self.val(arg), line, sdk)
             return
         self._by_params(svc, method, kws, splat, line)
+
+    def _parameter_extra(self, node: Any) -> Optional[dict[str, Any]]:
+        """``parameter`` fields when the resource argument is a parameter of its function.
+
+        ``def submit(*, state_machine_arn): client.start_execution(stateMachineArn=
+        state_machine_arn)``: the name is whatever the callers pass. Only a plain parameter that
+        the function never assigns again counts; ``aws_cross_file`` binds it at the callers.
+        """
+        if node.type != "identifier":
+            return None
+        name = _text(node, self.src)
+        func = node.parent
+        while func is not None and func.type not in ("function_definition", "lambda"):
+            func = func.parent
+        if func is None or func.type != "function_definition":
+            return None
+        fname = func.child_by_field_name("name")
+        if fname is None or name not in function_parameters(func, self.src):
+            return None
+        for cur in self._own_nodes(func):
+            if cur.type in ("assignment", "augmented_assignment", "named_expression"):
+                left = cur.child_by_field_name("left") or cur.child_by_field_name("name")
+                if left is not None and _text(left, self.src) == name:
+                    return None
+        return {
+            "parameter": name[:80], "parameter_function": _text(fname, self.src)[:80],
+            "unresolved_reason": PARAMETER_REASON,
+        }
 
     def _by_params(
         self, svc: str, op: str, kws: dict[str, Any], splat: bool, line: int,
@@ -1129,7 +1314,9 @@ class _Python:
                     for item in node.named_children[:_MAX_LIST_ITEMS]:
                         self.out.add(svc, op, self.val(item), line, sdk)
                     return
-                self.out.add(svc, op, self.val(node), line, sdk)
+                self.out.add(
+                    svc, op, self.val(node), line, sdk, extra=self._parameter_extra(node),
+                )
                 return
         if splat:
             self.out.add(svc, op, Val(), line, sdk)
@@ -1956,6 +2143,10 @@ def aws_sdk_edges(
     language = _LANG_BY_SUFFIX.get(suffix)
     sdk_markers = _MARKERS.get(language or "", ())
     wants_sdk = bool(language) and any(m in source for m in sdk_markers)
+    if language == "python" and not wants_sdk:
+        from .aws_cross_file import PYTHON_PATTERNS
+
+        wants_sdk = repo_root is not None and any(p.search(source) for p in PYTHON_PATTERNS)
     wants_uri = (suffix in _URI_SUFFIXES or is_workflow) and b"s3" in source
     wants_tf = suffix == ".tf" and any(m in source for m in _wiring.MARKERS)
     wants_names = suffix == ".tf" and repo_root is not None and _tfnames.wants(source)
@@ -1979,8 +2170,15 @@ def aws_sdk_edges(
         if parser is not None:
             root = parser.parse(source).root_node
             if wants_sdk:
-                runner = {"python": _Python, "java": _Java}.get(language, _Js)
-                runner(source, root, out).run()
+                if language == "python":
+                    from .aws_cross_file import XFile
+
+                    py = _Python(source, root, out)
+                    if repo_root is not None:
+                        py.xfile = XFile(path, repo_root, get_parser, source, root)
+                    py.run()
+                else:
+                    {"java": _Java}.get(language, _Js)(source, root, out).run()
             if store_ast:
                 _stores.scan_code(language, source, root, out)
     if wants_uri or wants_tf or wants_names:
