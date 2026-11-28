@@ -43,6 +43,9 @@ from .terraform_links import _like_escape
 STATUSES = ("matched", "not_found", "ambiguous")
 
 _EXTERNAL_AWS_PREFIX = "external:aws-"
+_MACHINE = ("states", "state-machine")
+#: ``kind`` of the marker ``Definitions._read`` adds for a machine that something deploys.
+_DEPLOYED_KIND = "state-machine/deployed"
 
 #: ``(service, target kind)`` -> the Terraform resource type that defines such a target.
 RESOURCE_TYPES: dict[tuple[str, str], str] = {
@@ -132,6 +135,15 @@ def _declared_names(store: GraphStore) -> list[tuple[tuple[str, str], str]]:
     return out
 
 
+def _mark_deployed(found: dict[tuple[str, str, str], str], name: str, how: str) -> None:
+    """Record that something deploys the machine *name*, apart from how it is defined.
+
+    ``break_machine_ties`` reads it: a definition file in the same repo takes the ordinary
+    ``(service, kind, name)`` key first, so the deploying source would otherwise be lost.
+    """
+    found.setdefault(("states", _DEPLOYED_KIND, "~" + _fold(name)), how)
+
+
 class Definitions:
     """What each registered repo defines, read once per repo and call."""
 
@@ -150,6 +162,8 @@ class Definitions:
             key = by_type.get(match["type"]) if match is not None else None
             if key is not None and match is not None:
                 found.setdefault((*key, "~" + _fold(match["label"])), "terraform_resource")
+                if key == _MACHINE:
+                    _mark_deployed(found, match["label"], "terraform_resource")
         for row in store._conn.execute(
             "SELECT name FROM nodes WHERE language = 'asl' AND kind = 'Class'"
         ):
@@ -165,8 +179,9 @@ class Definitions:
             "AND json_extract(extra, '$.terragrunt_inputs.state_machine_name') IS NOT NULL"
         ):
             if isinstance(row[0], str) and row[0]:
-                key = ("states", "state-machine", "~" + _fold(row[0]))
-                found.setdefault(key, "terragrunt_unit")
+                unit_key = ("states", "state-machine", "~" + _fold(row[0]))
+                found.setdefault(unit_key, "terragrunt_unit")
+                _mark_deployed(found, row[0], "terragrunt_unit")
         for unit in lambda_units(store):
             found[("lambda", "function", unit["name"])] = "lambda_unit"
         # A resource whose name the Terraform evaluator read (``aws_terraform_wiring``: a literal,
@@ -176,6 +191,8 @@ class Definitions:
         # case-sensitive, so the folded spelling of the label rule is not applied to it.
         for kind_key, name in _declared_names(store):
             found.setdefault((*kind_key, name), "terraform_declaration")
+            if kind_key == _MACHINE:
+                _mark_deployed(found, name, "terraform_declaration")
         # Facts that only explain a miss (``not_found_reasons``): they never define a target.
         from .not_found_reasons import read_facts
 
@@ -309,3 +326,51 @@ def resolve_links(
                     row["candidates"] = names[:10]
             rows.append(row)
     return rows
+
+
+def break_machine_ties(
+    rows: list[dict[str, Any]], known: dict[str, dict[tuple[str, str, str], str]],
+    all_repos: list[dict[str, Any]],
+) -> None:
+    """Settle an ``ambiguous`` state machine owner when exactly one candidate deploys it.
+
+    A repo whose Terraform resource, declaration or Terragrunt unit names the machine beats a
+    repo that only holds its definition file. The row becomes ``matched`` with ``tie_break:
+    deployed_declaration_over_definition_file``, ``also_defined_in`` (the other repos) and
+    ``also_defined_via`` (``{repo: how}``). Two deploying repos, or none, stay ``ambiguous``.
+    Read-side only: nothing a build writes depends on it.
+    """
+    by_name = {
+        str(r.get("alias") or Path(r["path"]).name): known.get(str(Path(r["path"])), {})
+        for r in all_repos
+    }
+    for row in rows:
+        names = row.get("candidates")
+        if row.get("status") != "ambiguous" or row.get("target_kind") != "states" or not names:
+            continue
+        target = str(row.get("target_name") or "")
+        if not target or target.startswith("?") or len(names) >= 10:
+            continue
+        key = ("states", _DEPLOYED_KIND, "~" + _fold(target))
+        facts = [by_name.get(n) for n in names]
+        if any(f is None for f in facts):
+            continue
+        deployers = [n for n, f in zip(names, facts) if f and key in f]
+        if len(deployers) != 1:
+            continue
+        winner = deployers[0]
+        others = [n for n in names if n != winner]
+        via = {}
+        for n in others:
+            repo_facts = by_name[n]
+            via[n] = (
+                repo_facts.get(("states", "state-machine", target))
+                or repo_facts.get(("states", "state-machine", "~" + _fold(target)))
+                or "unknown"
+            )
+        row["status"] = "matched"
+        row["target_repo"] = winner
+        row["also_defined_in"] = others
+        row["also_defined_via"] = via
+        row["tie_break"] = "deployed_declaration_over_definition_file"
+        del row["candidates"]

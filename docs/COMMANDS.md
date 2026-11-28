@@ -1310,6 +1310,27 @@ stored. A connection row has `evidence` (`client_call`, `connection_url`, `confi
 host with no client or endpoint key around it, which also has `confidence` 0.4); a host in a comment, docstring, log
 call, sample config, test, fixture, mock or docs path makes no row.
 
+A Python call whose client comes from a factory in another file of the repo (`_sfn.get_client().start_execution(...)`)
+is listed when the factory returns, on every path and directly or through a module-level cache, a client of one literal
+service (`boto3.client("stepfunctions")`, `boto3.Session(...).client("sfn")`, `make_client("stepfunctions")`). The row
+has `client_inferred: factory`, `client_factory` (`<file>::<function>`) and `confidence` at most 0.5; a factory that
+cannot be found or whose service is not a literal makes no row. When the resource argument of such a call is a plain
+parameter of its function, the row is `unresolved` with `parameter`, `parameter_function` and `unresolved_reason:
+name_is_parameter`, and each call of that function (same file, or a file that imports it) that passes the parameter by
+keyword (`*_arn`, `arn`, `*state_machine*` names) gets a row of its own at its own line with `target_source: parameter`,
+`parameter`, `bound_via` (`<file>::<function>(<parameter>)`), `arg_form` (`literal`, `constant`, `default_function`, `or`
+or `conditional`), `confidence` 0.4 (0.3 for a default, `or` or conditional) and, as they apply, `default_from`,
+`override_possible` (a side of an `or`/conditional was not readable, so the call may name another machine) and
+`target_alternatives` (the branches name different machines; one row each, at most four). A development and a production
+ARN of one machine give one target. One hop only: the callers of a function that itself passes a parameter on stay
+`argument_not_static`.
+
+When a state machine has two candidate owners (`ambiguous`) and exactly one of them deploys it (a Terraform resource or
+declaration, or a Terragrunt unit naming it) while the others only hold its definition file (`*.asl.json`), the row is
+`matched` to the deploying repo with `tie_break: deployed_declaration_over_definition_file`, `also_defined_in` (the
+other repos) and `also_defined_via` (`{repo: how it defines it}`). Two deploying repos, or none, stay `ambiguous`; the
+account id inside an ARN is not used. This is read-side only and does not change what a build writes.
+
 Reasons on `origin="awssdk"` rows (status is never changed by them; `status=<reason>` filters and the reply has
 `counts_by_reason` and a summary clause). A `not_found` row has `not_found_reason`: `no_owner_lookup` (the service has
 no owner lookup: secretsmanager, cloudwatch; an SSM parameter or IAM role is looked up by its Terraform
@@ -1322,7 +1343,9 @@ repos. A literal that no registered declaration names and no unreadable declarat
 `not_declared_in_registry`. An `unresolved` row always has `unresolved_reason`: `not_defined`, `no_value`,
 `env_placeholder`, `profiles_differ`, `ambiguous` (configuration join), `non_aws_host`, `unrecognised_endpoint`,
 `custom_endpoint`, `proxy_endpoint`, `serverless_cache`, `internal_prefix` (connection hosts), `no_resource_param`
-(the call names no resource parameter), and, when none of those applies, one derived from the row: `env_placeholder`
+(the call names no resource parameter), `name_is_parameter` (the resource argument is a parameter of the calling
+function; its callers get their own rows), `argument_not_static` (a caller's argument for such a parameter cannot be
+reduced to a name), and, when none of those applies, one derived from the row: `env_placeholder`
 (an environment variable stands for the name), `config_key_not_resolved` (a configuration key does and no value could
 be read), `constant_not_resolved` (a constant or field does), `host_not_literal` (a connection whose host is not
 spelled out) or `name_not_literal` (a variable, parameter, call result or concatenation). `origin="stepfunction"`

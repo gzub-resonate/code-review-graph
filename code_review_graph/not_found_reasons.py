@@ -45,7 +45,8 @@ AWSSDK_REASONS = (
 UNRESOLVED_REASONS_BUILD = (
     "not_defined", "no_value", "env_placeholder", "profiles_differ", "ambiguous",
     "non_aws_host", "unrecognised_endpoint", "custom_endpoint", "proxy_endpoint",
-    "serverless_cache", "internal_prefix", "no_resource_param",
+    "serverless_cache", "internal_prefix", "no_resource_param", "name_is_parameter",
+    "argument_not_static",
 )
 UNRESOLVED_REASONS_QUERY = (
     "name_not_literal", "constant_not_resolved", "config_key_not_resolved", "host_not_literal",

@@ -741,4 +741,7 @@ def test_python_existing_rows_are_unchanged_by_the_new_services_and_fallback() -
     }
     assert got[("external:aws-s3:bkt", "put_object")]["confidence"] == 1.0
     assert got[("external:aws-s3:?", "get_object")]["confidence"] == 0.6
-    assert "unresolved_reason" not in got[("external:aws-s3:?", "get_object")]
+    # ``Bucket=b`` names a parameter of ``f``: the row says so (``name_is_parameter``) and keeps
+    # its confidence; callers that pass ``b`` by keyword get rows of their own.
+    assert got[("external:aws-s3:?", "get_object")]["unresolved_reason"] == "name_is_parameter"
+    assert got[("external:aws-s3:?", "get_object")]["parameter"] == "b"
