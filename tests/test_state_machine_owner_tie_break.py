@@ -98,8 +98,9 @@ def test_a_unit_that_deploys_a_differently_spelled_name_is_not_a_deployer(world)
     """
     tmp_path, registry = world
     make_repo(tmp_path, registry, "infra", MACHINES)
+    spelled = 'name                    = "orders"'
     respelled = {
-        rel: text.replace('name                    = "orders"', 'name                    = "or-ders"')
+        rel: text.replace(spelled, spelled.replace("orders", "or-ders"))
         for rel, text in MACHINES.items()
     }
     assert respelled != MACHINES
