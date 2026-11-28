@@ -27,7 +27,8 @@ from typing import Any
 
 from ..constants import SPRING_FEIGN_EDGE_KIND
 from ..graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
-from ..paging import graph_stamp, make_scope, paginate
+from ..graph_counts import graph_stamp
+from ..paging import make_scope, paginate
 from ..parser import normalize_file_path
 
 ENDPOINT_DIRECTIONS = ("inbound", "outbound", "simulator")

@@ -37,7 +37,7 @@ from .constants import env_int
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["RESULTS", "ResultCache", "file_state", "in_memory_snapshot"]
+__all__ = ["RESULTS", "ResultCache", "cached_on_snapshot", "file_state", "in_memory_snapshot"]
 
 _MAX_MB = env_int("CRG_SNAPSHOT_MAX_MB", 1024)
 _SLOTS = max(1, env_int("CRG_SNAPSHOT_SLOTS", 2))
@@ -103,6 +103,11 @@ def in_memory_snapshot(store: Any) -> Iterator[bool]:
             )
             file_conn.backup(mem)
             mem.row_factory = sqlite3.Row
+            # A store registers this SQL function on its own connection (the impact traversal
+            # joins on it); a copy made by ``backup`` does not carry it.
+            from .graph import _parent_dir
+
+            mem.create_function("crg_parent_dir", 1, _parent_dir, deterministic=True)
             store._conn = mem
             swapped = True
             logger.info(
@@ -170,3 +175,27 @@ class ResultCache:
 
 
 RESULTS = ResultCache(max_entries=env_int("CRG_ANALYSIS_CACHE_ENTRIES", 8))
+
+
+def cached_on_snapshot(
+    store: Any, name: str, args: tuple[Any, ...], compute: Callable[[], Any],
+) -> Any:
+    """Run *compute* on an in-memory copy of the graph, once per graph state and *args*.
+
+    *args* must hold every argument that changes what *compute* returns. The key also holds
+    the graph path and the file state, so an edit to the graph misses. Use it only for a
+    read-only *compute*: a write into the copy is lost, and *compute* must not read anything
+    outside the graph file (source files, the VCS) unless *args* covers it.
+    """
+    state = file_state(Path(store.db_path))
+    # ``ResultCache`` never stores a key that contains ``None``, and an argument left at its
+    # default is often ``None``: spell it so the key can match.
+    spelled = tuple("<none>" if a is None else a for a in args)
+    key = None if state is None else (name, str(store.db_path), state, *spelled)
+
+    def run() -> Any:
+        with in_memory_snapshot(store):
+            return compute()
+
+    value, _ = RESULTS.get_or_compute(key, run)
+    return value

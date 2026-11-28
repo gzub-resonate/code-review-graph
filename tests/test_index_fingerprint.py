@@ -21,7 +21,8 @@ PACKAGE_ROOT = Path(code_review_graph.__file__).parent
 # cannot change what a build writes.
 QUERY_ONLY = {
     # read-side analysis, review and refactor tooling
-    "analysis", "analysis_snapshot", "change_details", "changes", "graph_diff", "hints",
+    "analysis", "analysis_snapshot", "graph_counts", "change_details", "changes", "graph_diff",
+    "hints",
     "neighbourhood",
     "new_code", "pr_blast_radius", "prompts", "refactor", "uncertainty", "exports",
     "visualization", "memory", "http_access_log", "http_origin_guard",

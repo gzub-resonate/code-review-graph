@@ -9,6 +9,7 @@ from typing import Any
 
 from ..communities import config_community_ids
 from ..errors import ChangeDiscoveryError
+from ..graph_counts import count_edges, count_files, count_nodes
 from ..incremental import (
     discover_review_changes,
     get_db_path,
@@ -69,8 +70,9 @@ def get_minimal_context(
     store, root = _get_store(str(root))
     try:
         # 1. Quick stats
-        stats = store.get_stats()
-        if stats.total_nodes == 0:
+        # Three counts, kept per graph state (a full get_stats scans every node and edge).
+        total_nodes = count_nodes(store)
+        if total_nodes == 0:
             return _not_ready(
                 "empty_graph",
                 "The graph database contains no nodes. Build the graph before requesting context.",
@@ -201,8 +203,8 @@ def get_minimal_context(
 
         # Build summary
         summary_parts = [
-            f"{stats.total_nodes} nodes, {stats.total_edges} edges"
-            f" across {stats.files_count} files.",
+            f"{total_nodes} nodes, {count_edges(store)} edges"
+            f" across {count_files(store)} files.",
         ]
         if risk != "unknown":
             summary_parts.append(f"Risk: {risk} ({risk_score:.2f}).")
