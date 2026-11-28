@@ -123,6 +123,11 @@ def _resolve_attr(name: str):
 
 
 def __getattr__(name: str):
+    if name == "with_provenance":
+        # The cached stamp (query-only module); ``tools.with_provenance`` is the uncached one.
+        from .provenance_cache import with_provenance as _cached_with_provenance
+        globals()[name] = _cached_with_provenance
+        return _cached_with_provenance
     if name in _LAZY_TOOL_NAMES:
         from . import tools as _tools_mod
         val = getattr(_tools_mod, name)

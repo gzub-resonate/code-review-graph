@@ -31,6 +31,7 @@ QUERY_ONLY = {
     "workflow_links",
     "service_aliases", "infra_join", "amqp_join", "amqp_exchanges", "js_route_leads",
     "repo_cache", "server_route_index", "flow_twins", "query_cache", "xrepo_fast",
+    "provenance_cache",
     "xrepo_budget", "cross_repo_warmup", "trigger_links", "external_hosts",
     "consumer_join",
     "config_values",
