@@ -3210,15 +3210,8 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
             f"  Total edges: {stats.total_edges}",
             f"  Languages: {', '.join(stats.languages) if stats.languages else 'none'}",
             f"  Last updated: {stats.last_updated or 'never'}",
-            "",
-            "Nodes by kind:",
+            "(counts by kind: nodes_by_kind and edges_by_kind)",
         ]
-        for kind, count in sorted(stats.nodes_by_kind.items()):
-            summary_parts.append(f"  {kind}: {count}")
-        summary_parts.append("")
-        summary_parts.append("Edges by kind:")
-        for kind, count in sorted(stats.edges_by_kind.items()):
-            summary_parts.append(f"  {kind}: {count}")
 
         # CALLS is the largest edge kind and the one a reader trusts most, so
         # say up front how much of it is bound to a node and how much is a
