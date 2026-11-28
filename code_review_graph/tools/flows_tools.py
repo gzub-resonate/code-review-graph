@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..analysis_snapshot import cached_on_snapshot
 from ..flows import ENTRY_KINDS, get_flow_by_id, get_flows, group_duplicate_flows
+from ..graph_counts import graph_stamp
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
-from ..paging import graph_stamp, make_scope, paginate, shown_range
+from ..paging import make_scope, paginate, shown_range
 from ._common import _get_store, _relative_to_root, _validate_positive_int
 
 # ---------------------------------------------------------------------------
@@ -83,34 +85,40 @@ def list_flows(
 
     store, root = _get_store(repo_root)
     try:
-        # Count every matching flow, then keep the bounded prefix — the same
-        # "count all, return a prefix" contract query.py uses for max_results.
-        # The flows table has one row per entry point, so a full read is cheap
-        # relative to serializing them all back to the client.
-        flows = get_flows(
-            store, sort_by=sort_by, limit=_FETCH_ALL, with_entry_metadata=True,
-        )
-        if entry_kind:
-            flows = [f for f in flows if f.get("entry_kind") == entry_kind]
-        def _of_kind(items: list[dict]) -> list[dict]:
-            if not kind:
-                return items
-            filtered = []
-            for f in items:
-                ep_id = f.get("entry_point_id")
-                if ep_id is not None:
-                    node_kind = store.get_node_kind_by_id(ep_id)
-                    if node_kind == kind:
-                        filtered.append(f)
-            return filtered
+        def compute() -> tuple[list[dict[str, Any]], int | None]:
+            # Count every matching flow, then keep the bounded prefix: the same
+            # "count all, return a prefix" contract query.py uses for max_results.
+            found = get_flows(
+                store, sort_by=sort_by, limit=_FETCH_ALL, with_entry_metadata=True,
+            )
+            if entry_kind:
+                found = [f for f in found if f.get("entry_kind") == entry_kind]
 
-        raw_total: int | None = None
-        if group_duplicates:
-            ungrouped = flows
-            flows = group_duplicate_flows(flows)
-            if len(flows) != len(ungrouped):
-                raw_total = len(_of_kind(ungrouped))
-        flows = _of_kind(flows)
+            def _of_kind(items: list[dict]) -> list[dict]:
+                if not kind:
+                    return items
+                filtered = []
+                for f in items:
+                    ep_id = f.get("entry_point_id")
+                    if ep_id is not None:
+                        node_kind = store.get_node_kind_by_id(ep_id)
+                        if node_kind == kind:
+                            filtered.append(f)
+                return filtered
+
+            before_grouping: int | None = None
+            if group_duplicates:
+                ungrouped = found
+                found = group_duplicate_flows(found)
+                if len(found) != len(ungrouped):
+                    before_grouping = len(_of_kind(ungrouped))
+            return _of_kind(found), before_grouping
+
+        # Every flow with its path and entry metadata is read once per graph state, on an
+        # in-memory copy, and every cursor page reads the same list.
+        flows, raw_total = cached_on_snapshot(
+            store, "list_flows", (sort_by, kind, entry_kind, group_duplicates), compute,
+        )
 
         page = paginate(
             flows, limit, _MAX_FLOWS, cursor,

@@ -7,9 +7,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..graph_counts import graph_stamp
 from ..hints import generate_hints, get_session
 from ..incremental import find_project_root
-from ..paging import graph_stamp, make_scope, paginate, shown_range
+from ..paging import make_scope, paginate, shown_range
 from ..refactor import (
     apply_refactor,
     find_dead_code,

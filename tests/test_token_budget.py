@@ -1179,6 +1179,10 @@ class TestTruncationContract:
             return real(self, *args, **kwargs)
 
         monkeypatch.setattr(GraphStore, "get_nodes_by_size", spy)
+        # The ranked list is kept per graph state; the read only happens on a cold cache.
+        from code_review_graph.analysis_snapshot import RESULTS
+
+        RESULTS.clear()
         reply = _invoke(
             crg_main.find_large_functions_tool,
             repo_root=repo["root"], min_lines=1, limit=HUGE,

@@ -24,6 +24,7 @@ from ..errors import ChangeDiscoveryError
 from ..flow_twins import shared_twin_reads, with_shared_twin_reads
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
+from ..graph_counts import graph_stamp
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
@@ -35,7 +36,6 @@ from ..new_code import score_new_code
 from ..paging import (
     CursorError,
     Page,
-    graph_stamp,
     make_scope,
     paginate,
     paginate_groups,

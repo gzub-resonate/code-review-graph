@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from ..analysis_snapshot import cached_on_snapshot
 from ..communities import (
     count_hidden_config_communities,
     get_architecture_overview,
@@ -13,8 +14,9 @@ from ..communities import (
 from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
+from ..graph_counts import graph_stamp
 from ..hints import generate_hints, get_session
-from ..paging import Page, graph_stamp, make_scope, paginate, shown_range
+from ..paging import Page, make_scope, paginate, shown_range
 from ._common import _bounded, _get_store, _page_together, _validate_positive_int
 
 # ---------------------------------------------------------------------------
@@ -126,19 +128,30 @@ def list_communities_func(
 
     store, root = _get_store(repo_root)
     try:
-        items = get_communities(
-            store, sort_by=sort_by, min_size=min_size, include_config=include_config,
-        )
-        # A repository of data files has no code communities. Hiding config would
-        # leave an empty list, so the config ones are listed instead and the reply says so.
-        config_only = False
-        if not include_config and not items and count_hidden_config_communities(
-            store, min_size,
-        ):
-            items = get_communities(
-                store, sort_by=sort_by, min_size=min_size, include_config=True,
+        def compute() -> tuple[list[dict[str, Any]], bool, int]:
+            found = get_communities(
+                store, sort_by=sort_by, min_size=min_size, include_config=include_config,
             )
-            config_only = True
+            # A repository of data files has no code communities. Hiding config would
+            # leave an empty list, so the config ones are listed instead and the reply says so.
+            only_config = False
+            if not include_config and not found and count_hidden_config_communities(
+                store, min_size,
+            ):
+                found = get_communities(
+                    store, sort_by=sort_by, min_size=min_size, include_config=True,
+                )
+                only_config = True
+            hidden_count = (
+                0 if include_config or only_config
+                else count_hidden_config_communities(store, min_size)
+            )
+            return found, only_config, hidden_count
+
+        # One read of every community and its members per graph state; cursor pages reuse it.
+        items, config_only, hidden = cached_on_snapshot(
+            store, "list_communities", (sort_by, min_size, include_config), compute,
+        )
         page = paginate(
             items,
             max_results, _MAX_COMMUNITIES, cursor,
@@ -170,7 +183,6 @@ def list_communities_func(
         if config_only:
             result["note"] = _CONFIG_ONLY_NOTE
         elif not include_config:
-            hidden = count_hidden_config_communities(store, min_size)
             if hidden:
                 result["config_communities_hidden"] = hidden
         result["_hints"] = generate_hints(
@@ -390,15 +402,26 @@ def get_architecture_overview_func(
 
     store, root = _get_store(repo_root)
     try:
-        full_overview = get_architecture_overview(store, include_config=include_config)
-        config_only = False
-        if (
-            not include_config
-            and not full_overview["communities"]
-            and count_hidden_config_communities(store)
-        ):
-            full_overview = get_architecture_overview(store, include_config=True)
-            config_only = True
+        def compute() -> tuple[dict[str, Any], bool, int]:
+            found = get_architecture_overview(store, include_config=include_config)
+            only_config = False
+            if (
+                not include_config
+                and not found["communities"]
+                and count_hidden_config_communities(store)
+            ):
+                found = get_architecture_overview(store, include_config=True)
+                only_config = True
+            hidden_count = (
+                0 if include_config or only_config
+                else count_hidden_config_communities(store)
+            )
+            return found, only_config, hidden_count
+
+        # Reads every community, member and edge: run on an in-memory copy, once per state.
+        full_overview, config_only, hidden = cached_on_snapshot(
+            store, "architecture_overview", (include_config,), compute,
+        )
         overview = full_overview
         if detail_level == "minimal":
             overview = _minimal_overview(full_overview)
@@ -462,7 +485,6 @@ def get_architecture_overview_func(
         if config_only:
             result["note"] = _CONFIG_ONLY_NOTE
         elif not include_config:
-            hidden = count_hidden_config_communities(store)
             if hidden:
                 result["config_communities_hidden"] = hidden
         result["_hints"] = generate_hints(

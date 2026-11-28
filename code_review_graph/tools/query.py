@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from ..amqp_join import EXCHANGE_PREFIX, PUBLISH_KINDS, link_kind
 from ..analysis import is_generated_file
+from ..analysis_snapshot import cached_on_snapshot
 from ..aws_sdk_links import merge_resolved_names
 from ..config_keys import normalize_spring_config_key
 from ..config_values import config_value_fields
@@ -40,6 +41,7 @@ from ..graph import (
     import_scope_ancestors,
     node_to_dict,
 )
+from ..graph_counts import graph_stamp
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
@@ -47,7 +49,7 @@ from ..incremental import (
     get_db_path,
     path_within_repo,
 )
-from ..paging import CursorError, Page, graph_stamp, make_scope, paginate, shown_range
+from ..paging import CursorError, Page, make_scope, paginate, shown_range
 from ..parser import is_test_file, normalize_file_path, repo_relative_path
 from ..search import hybrid_search
 from ..uncertainty import (
@@ -1242,17 +1244,28 @@ def get_impact_radius(
                 _cursor_offset(cursor, scope, stamp)
                 + min(max_results, _MAX_IMPACT_NODES_SHOWN),
             )
-        result = store.get_impact_radius(
-            abs_files, max_depth=max_depth, max_nodes=node_cap,
-            resolution=resolution,
+
+        def traverse() -> tuple[dict[str, Any], int]:
+            found = store.get_impact_radius(
+                abs_files, max_depth=max_depth, max_nodes=node_cap,
+                resolution=resolution,
+            )
+            return found, store.count_unresolved_call_sites({
+                n.name for n in found["changed_nodes"] if n.kind != "File"
+            })
+
+        # The traversal is the cost (graph reads only; the temp tables it fills belong to the
+        # connection). Same seeds, depth, node budget and resolution give the same answer on
+        # an unchanged graph, so the result and the unresolved-call-site count are kept.
+        result, unresolved_call_sites = cached_on_snapshot(
+            store, "impact_radius",
+            (tuple(abs_files), max_depth, node_cap, resolution), traverse,
         )
 
         if detail_level == "compact":
             compact_response = _compact_impact_response(
                 result, root, changed_files, unmatched_files, max_files, resolution,
-                store.count_unresolved_call_sites({
-                    n.name for n in result["changed_nodes"] if n.kind != "File"
-                }),
+                unresolved_call_sites,
                 cursor=cursor, scope=scope, stamp=stamp,
             )
             if not result["impacted_nodes"]:
@@ -1330,10 +1343,8 @@ def get_impact_radius(
         files_omitted = files_total - len(shown_files)
         # The traversal joins qualified names, so a call site that only ever
         # names the changed symbol is unreachable and silently absent above.
-        # Counting it is what stops an empty-looking radius reading as proof.
-        unresolved_call_sites = store.count_unresolved_call_sites({
-            n.name for n in result["changed_nodes"] if n.kind != "File"
-        })
+        # ``unresolved_call_sites`` (counted with the traversal) is what stops an
+        # empty-looking radius reading as proof.
         # ``truncated`` has to mean "there is more", whichever cap bit.
         truncated = (
             impact_page.truncated
@@ -3185,7 +3196,12 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
     """
     store, root = _get_store(repo_root)
     try:
-        stats = store.get_stats()
+        def compute() -> tuple[Any, dict[str, int]]:
+            return store.get_stats(), store.count_calls_by_classification()
+
+        # Group-by scans of every node and edge (and a JSON scan of the CALLS edges): once per
+        # graph state, on an in-memory copy. Embeddings are read live below.
+        stats, calls_by_resolution = cached_on_snapshot(store, "graph_stats", (), compute)
 
         summary_parts = [
             f"Graph statistics for {root.name}:",
@@ -3207,7 +3223,6 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
         # CALLS is the largest edge kind and the one a reader trusts most, so
         # say up front how much of it is bound to a node and how much is a
         # bare name the query layer can only match by name.
-        calls_by_resolution = store.count_calls_by_classification()
         summary_parts.append("")
         summary_parts.append(
             "CALLS by target resolution: "
@@ -3340,31 +3355,41 @@ def find_large_functions(
 
     store, root = _get_store(repo_root)
     try:
-        candidates = []
-        for k in kinds:
-            candidates.extend(store.get_nodes_by_size(
-                min_lines=min_lines, kind=k, file_path_pattern=file_path_pattern, limit=-1,
-            ))
-        if not include_tests:
-            candidates = [
-                n for n in candidates
-                if n.kind != "Test" and not n.is_test
-                and not _is_non_production_file(n.file_path, root)
-            ]
+        def compute() -> list[Any]:
+            candidates = []
+            for k in kinds:
+                candidates.extend(store.get_nodes_by_size(
+                    min_lines=min_lines, kind=k, file_path_pattern=file_path_pattern,
+                    limit=-1,
+                ))
+            if not include_tests:
+                candidates = [
+                    n for n in candidates
+                    if n.kind != "Test" and not n.is_test
+                    and not _is_non_production_file(n.file_path, root)
+                ]
+            if "File" in kinds and "Class" in kinds:
+                file_lines = {n.file_path: _lines(n) for n in candidates if n.kind == "File"}
+                candidates = [
+                    n for n in candidates
+                    if not (
+                        n.kind == "Class" and n.file_path in file_lines
+                        and _lines(n) >= file_lines[n.file_path] - 1
+                    )
+                ]
+            candidates.sort(key=lambda n: (-_lines(n), n.id))
+            return candidates
 
         def _lines(n: Any) -> int:
             return n.line_end - n.line_start + 1 if n.line_start and n.line_end else 0
 
-        if "File" in kinds and "Class" in kinds:
-            file_lines = {n.file_path: _lines(n) for n in candidates if n.kind == "File"}
-            candidates = [
-                n for n in candidates
-                if not (
-                    n.kind == "Class" and n.file_path in file_lines
-                    and _lines(n) >= file_lines[n.file_path] - 1
-                )
-            ]
-        candidates.sort(key=lambda n: (-_lines(n), n.id))
+        # A scan of the whole nodes table; the ranked list is kept per graph state, so each
+        # cursor page reads it instead of scanning again. Only the path of a node decides
+        # which are test or generated files (no file is read), and ``root`` is in the key.
+        candidates = cached_on_snapshot(
+            store, "find_large_functions",
+            (min_lines, kinds, file_path_pattern, include_tests, str(root)), compute,
+        )
         total = len(candidates)
 
         scope = make_scope(

@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..graph import GraphNode, GraphStore, _sanitize_name
-from ..paging import graph_stamp, make_scope, paginate
+from ..graph_counts import graph_stamp
+from ..paging import make_scope, paginate
 from ._common import _get_store
 from .query import _asl_states_of, _choice_condition
 

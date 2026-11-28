@@ -12,8 +12,9 @@ from ..analysis import (
     find_surprising_connections,
     generate_suggested_questions,
 )
-from ..analysis_snapshot import RESULTS, file_state, in_memory_snapshot
-from ..paging import graph_stamp, make_scope, paginate, shown_range
+from ..analysis_snapshot import RESULTS, cached_on_snapshot, file_state, in_memory_snapshot
+from ..graph_counts import graph_stamp
+from ..paging import make_scope, paginate, shown_range
 from ._common import (
     _get_store,
     _page_together,
@@ -159,25 +160,36 @@ def get_hub_nodes_func(
 
     store, _root = _get_store(repo_root or None)
     try:
-        stats: dict[str, int] = {}
-        ranked = find_hub_nodes(
-            store, top_n=_FETCH_ALL, include_tests=include_tests,
-            exclude_leaf_primitives=exclude_leaf_primitives,
-            include_config=include_config, include_generated=include_generated, stats=stats,
-            exclude_data_types=exclude_data_types, rank_by=rank_by,
-        )
-        # A repository of data files has no hub but its config nodes. Hiding them
-        # would leave an empty ranking, so they are ranked instead and the reply says so.
-        config_only = False
-        if not include_config and not ranked:
-            with_config = find_hub_nodes(
+        def compute() -> tuple[list[dict[str, Any]], bool, dict[str, int]]:
+            found_stats: dict[str, int] = {}
+            found = find_hub_nodes(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
-                exclude_leaf_primitives=exclude_leaf_primitives, include_config=True,
-                include_generated=include_generated, stats=stats,
-                exclude_data_types=exclude_data_types, rank_by=rank_by,
+                exclude_leaf_primitives=exclude_leaf_primitives,
+                include_config=include_config, include_generated=include_generated,
+                stats=found_stats, exclude_data_types=exclude_data_types, rank_by=rank_by,
             )
-            if with_config:
-                ranked, config_only = with_config, True
+            # A repository of data files has no hub but its config nodes. Hiding them
+            # would leave an empty ranking, so they are ranked instead and the reply says so.
+            only_config = False
+            if not include_config and not found:
+                with_config = find_hub_nodes(
+                    store, top_n=_FETCH_ALL, include_tests=include_tests,
+                    exclude_leaf_primitives=exclude_leaf_primitives, include_config=True,
+                    include_generated=include_generated, stats=found_stats,
+                    exclude_data_types=exclude_data_types, rank_by=rank_by,
+                )
+                if with_config:
+                    found, only_config = with_config, True
+            return found, only_config, found_stats
+
+        # The ranking reads every node and edge (random page reads on the file), so it runs on
+        # an in-memory copy, and every cursor page reads the same untruncated ranking.
+        ranked, config_only, stats = cached_on_snapshot(
+            store, "hub_nodes",
+            (include_tests, exclude_leaf_primitives, include_config, include_generated,
+             exclude_data_types, rank_by),
+            compute,
+        )
         page = paginate(
             ranked, top_n, _MAX_HUB_NODES, cursor,
             scope=make_scope(
@@ -497,13 +509,19 @@ def get_surprising_connections_func(
 
     store, root = _get_store(repo_root or None)
     try:
-        stats: dict[str, int] = {}
-        page = paginate(
-            find_surprising_connections(
+        def compute() -> tuple[list[dict[str, Any]], dict[str, int]]:
+            found_stats: dict[str, int] = {}
+            found = find_surprising_connections(
                 store, top_n=_FETCH_ALL, include_tests=include_tests,
-                include_generated=include_generated, stats=stats,
-            ),
-            top_n, _MAX_SURPRISING, cursor,
+                include_generated=include_generated, stats=found_stats,
+            )
+            return found, found_stats
+
+        ranked, stats = cached_on_snapshot(
+            store, "surprising_connections", (include_tests, include_generated), compute,
+        )
+        page = paginate(
+            ranked, top_n, _MAX_SURPRISING, cursor,
             scope=make_scope(
                 "get_surprising_connections_tool", include_tests=include_tests,
                 include_generated=include_generated,
