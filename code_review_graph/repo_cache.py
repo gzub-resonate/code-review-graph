@@ -203,8 +203,25 @@ def _file_signature(db_path: Path) -> tuple[Any, ...] | None:
     return tuple(parts)
 
 
+#: The metadata rows a build or an update writes: when, at which commit, how, and how many files.
+_MARKER_KEYS = (
+    "last_updated", "git_head_sha", "last_build_type", "intentionally_incomplete",
+    "verified_file_count",
+)
+
+
 def _graph_marker(db_path: Path) -> tuple[Any, ...] | None:
-    """What the graph holds, read from the file: build time, head sha, id high-water marks, counts.
+    """What the graph holds, read from the file: build time, head sha, id high-water marks.
+
+    Every value costs a handful of page reads whatever the size of the graph: the metadata rows,
+    the highest ``id`` of the nodes and of the edges (the right edge of the rowid tree), the
+    ``AUTOINCREMENT`` counters, and the page and free-page counts from the file header. The marker
+    used to count the rows (``COUNT(*)``), which reads every page of an edge index: on a large
+    graph on a network disk that was seconds per repo, paid for every repo after a reindex. An
+    insert moves a high-water mark and a counter, a build or an update records its time, commit
+    and file count, and the rewrite of a graph moves the inode (see :func:`graph_stamp`). The
+    one change the counts saw and this does not is a deletion made by hand that frees no page
+    and records no build (``forget`` on a graph the server reads); the indexer always records.
 
     Opened ``mode=ro`` and only ever read, so it adds no write to the database. ``None`` when
     the file cannot be read as a graph (the caller then falls back to the file signature).
@@ -219,13 +236,24 @@ def _graph_marker(db_path: Path) -> tuple[Any, ...] | None:
         return None
     try:
         meta = dict(conn.execute(
-            "SELECT key, value FROM metadata WHERE key IN ('last_updated', 'git_head_sha')"
+            "SELECT key, value FROM metadata WHERE key IN (" + ", ".join("?" for _ in _MARKER_KEYS)
+            + ")", _MARKER_KEYS,
         ).fetchall())
-        counts: list[Any] = []
-        for table in ("nodes", "edges"):
-            high, rows = conn.execute(f"SELECT MAX(id), COUNT(*) FROM {table}").fetchone()
-            counts.extend((high, rows))
-        return (meta.get("last_updated"), meta.get("git_head_sha"), *counts)
+        highs = [
+            conn.execute(f"SELECT MAX(id) FROM {table}").fetchone()[0]
+            for table in ("nodes", "edges")
+        ]
+        counters = dict(conn.execute(
+            "SELECT name, seq FROM sqlite_sequence WHERE name IN ('nodes', 'edges')"
+        ).fetchall())
+        header = [
+            conn.execute(f"PRAGMA {name}").fetchone()[0]
+            for name in ("page_count", "freelist_count")
+        ]
+        return (
+            *(meta.get(key) for key in _MARKER_KEYS),
+            highs[0], counters.get("nodes"), highs[1], counters.get("edges"), *header,
+        )
     except sqlite3.Error:
         return None
     finally:
@@ -236,13 +264,13 @@ def graph_stamp(entry: Mapping[str, Any]) -> Stamp | None:
     """Identify the graph of a registry entry as it is now, or ``None`` when unreadable.
 
     The stamp is the database file's inode plus what the graph holds (build time, head sha, the
-    highest node and edge ids and their counts). It does not use the modification time or size
-    of the file or of its ``-wal``: an indexer writing, a checkpoint, or any reader opening the
-    database moves those without changing the graph, and each such move used to throw away every
-    cached cross-repo result. A rebuild that replaces the file changes the inode; an update
-    changes the build time or the ids and counts. The marker is only read again when the file
-    signature moved, so a call over 100+ repos costs ``stat`` calls. A graph whose marker cannot
-    be read falls back to the old file signature.
+    highest node and edge ids, their counters and the file's page counts). It does not use the
+    modification time or size of the file or of its ``-wal``: an indexer writing, a checkpoint,
+    or any reader opening the database moves those without changing the graph, and each such
+    move used to throw away every cached cross-repo result. A rebuild that replaces the file
+    changes the inode; an update changes the build time or the ids. The marker is only read
+    again when the file signature moved, so a call over 100+ repos costs ``stat`` calls. A graph
+    whose marker cannot be read falls back to the old file signature.
     """
     from .incremental import get_db_path
 

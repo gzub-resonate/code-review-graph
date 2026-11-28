@@ -140,16 +140,42 @@ def merge_resolved_names(into: dict[str, list[str]], raw: Any) -> None:
                 bucket.append(name[:128])
 
 
+#: ``target_qualified`` of every AWS target lies in ``[_AWS_TARGET_FROM, _AWS_TARGET_BELOW)``: the
+#: strings that start with ``external:aws-`` (``.`` is the character after ``-``). A range on
+#: the indexed column lets SQLite read only those edges instead of every ``REFERENCES`` edge,
+#: and the leading ``+`` keeps it from picking the ``kind`` index that does the latter.
+#: ``read_declare_edges`` drops a target that does not start with the prefix anyway.
+_AWS_TARGET_FROM = "external:aws-"
+_AWS_TARGET_BELOW = "external:aws."
+
+
+#: The AWS SDK edges: ``REFERENCES`` edges of the ``aws_sdk`` resolution (their target always
+#: starts with ``external:aws-``, see ``aws_external_target``) and the SQS and SNS ``CONSUMES`` and
+#: ``PRODUCES`` edges. Each part is a range on the indexed ``target_qualified`` (``:`` is followed
+#: by ``;``), so SQLite reads only the AWS edges instead of scanning the table, and the ``+``
+#: stops it choosing the ``kind`` index; the three parts cannot overlap, and the outer
+#: ``ORDER BY`` is the order the single query had.
+_EDGES_SQL = (
+    "SELECT source_qualified, file_path, line, target_qualified, extra, kind FROM ("
+    "SELECT id, source_qualified, file_path, line, target_qualified, extra, kind FROM edges "
+    "WHERE +kind = 'REFERENCES' AND target_qualified >= '" + _AWS_TARGET_FROM + "' "
+    "AND target_qualified < '" + _AWS_TARGET_BELOW + "' AND json_valid(extra) "
+    "AND json_extract(extra, '$.resolution') = ? "
+    "UNION ALL SELECT id, source_qualified, file_path, line, target_qualified, extra, kind "
+    "FROM edges WHERE +kind IN ('CONSUMES', 'PRODUCES') "
+    "AND target_qualified >= 'external:aws-sqs:' AND target_qualified < 'external:aws-sqs;' "
+    "AND json_valid(extra) "
+    "UNION ALL SELECT id, source_qualified, file_path, line, target_qualified, extra, kind "
+    "FROM edges WHERE +kind IN ('CONSUMES', 'PRODUCES') "
+    "AND target_qualified >= 'external:aws-sns:' AND target_qualified < 'external:aws-sns;' "
+    "AND json_valid(extra)"
+    ") ORDER BY file_path, line, id"
+)
+
+
 def read_edges(store: GraphStore) -> list[dict[str, Any]]:
     """The AWS SDK edges of a graph, one row per edge."""
-    rows = store._conn.execute(
-        "SELECT source_qualified, file_path, line, target_qualified, extra, kind FROM edges "
-        "WHERE json_valid(extra) AND ((kind = 'REFERENCES' "
-        "AND json_extract(extra, '$.resolution') = ?) OR (kind IN ('CONSUMES', 'PRODUCES') "
-        "AND (target_qualified LIKE 'external:aws-sqs:%' "
-        "OR target_qualified LIKE 'external:aws-sns:%'))) ORDER BY file_path, line, id",
-        (RESOLUTION,),
-    ).fetchall()
+    rows = store._conn.execute(_EDGES_SQL, (RESOLUTION,)).fetchall()
     out: list[dict[str, Any]] = []
     prefixes = config_prefixes(store._conn)
     values = _LazyValues(store)
@@ -358,7 +384,8 @@ def _resolve_arn_getters(edges: list[dict[str, Any]]) -> None:
 
 _DECLARE_SQL = (
     "SELECT target_qualified, file_path, line, extra FROM edges "
-    "WHERE kind = 'REFERENCES' AND json_valid(extra) "
+    "WHERE +kind = 'REFERENCES' AND target_qualified >= '" + _AWS_TARGET_FROM + "' "
+    "AND target_qualified < '" + _AWS_TARGET_BELOW + "' AND json_valid(extra) "
     "AND json_extract(extra, '$.resolution') = ? "
     "AND json_extract(extra, '$.sdk') = 'terraform' "
     "AND json_extract(extra, '$.operation') = 'declare' "
