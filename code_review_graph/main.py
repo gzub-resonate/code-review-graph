@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -302,9 +303,49 @@ timing_logger = _own_stderr_logger("code_review_graph.timing")
 warmup_logger = _own_stderr_logger("code_review_graph.cross_repo_warmup", propagate=True)
 
 
+_SENSITIVE_ARG = re.compile(r"token|secret|password|key|auth|cursor", re.IGNORECASE)
+_ARG_VALUE_CHARS = 40
+_ARG_TOTAL_CHARS = 200
+
+
+def summarize_args(args: dict[str, Any]) -> str:
+    """One-token ``key=value,key=value`` summary of a tool call's arguments for the timing line.
+
+    Scalars only (a list or dict shows as ``[n]``); each value is cut at 40 characters and the
+    whole at 200; whitespace in a value becomes ``_`` so the field stays one token. A key that
+    looks like a credential or a paging cursor never has its value logged: ``cursor=<set>`` when
+    present, ``<redacted>`` for the others. Unset (None, empty) arguments are left out.
+    """
+    parts: list[str] = []
+    for name, value in args.items():
+        if value is None or value == "" or name.startswith("_"):
+            continue
+        if _SENSITIVE_ARG.search(name):
+            shown = "<set>" if "cursor" in name.lower() else "<redacted>"
+        elif isinstance(value, (str, int, float, bool)):
+            shown = re.sub(r"\s+", "_", str(value))[:_ARG_VALUE_CHARS]
+        elif isinstance(value, (list, tuple, set, dict)):
+            shown = f"[{len(value)}]"
+        else:
+            continue
+        parts.append(f"{name}={shown}")
+    return ",".join(parts)[:_ARG_TOTAL_CHARS] or "-"
+
+
+def _caller_args(depth: int = 2) -> str:
+    """Summarise the parameters of the function *depth* frames up (the tool that called us)."""
+    try:
+        frame = sys._getframe(depth)
+        code = frame.f_code
+        names = code.co_varnames[: code.co_argcount + code.co_kwonlyargcount]
+        return summarize_args({n: frame.f_locals[n] for n in names if n in frame.f_locals})
+    except Exception:
+        return "-"
+
+
 def _log_tool_timing(
     tool_name: str, root: str | None, started: float, stages: dict[str, float], status: str,
-    caches: dict[str, tuple[int, int, int]] | None = None,
+    caches: dict[str, tuple[int, int, int]] | None = None, args: str = "-",
 ) -> None:
     """One ``tool timing`` line per call: queue wait, body, provenance stamp and the total.
 
@@ -312,6 +353,7 @@ def _log_tool_timing(
     worker thread took (``begin``, ``work_done``, ``end``). ``queue_ms`` is the wait for a
     worker slot, so a slow call that was mostly queued shows up as that, not as slow work.
     A call over ``CRG_SLOW_TOOL_SECONDS`` (default 120) is logged at WARNING as ``slow tool``.
+    *args* is ``summarize_args`` of the calling tool's parameters (new fields go last).
     *caches* is what the registered caches (``query_cache``) were asked during the call, as
     ``name:hits/misses/size``; the counters are process-wide, so overlapping calls share them.
     """
@@ -326,10 +368,10 @@ def _log_tool_timing(
     timing_logger.log(
         logging.WARNING if slow else logging.INFO,
         "%s tool=%s repo_root=%r status=%s total_ms=%d queue_ms=%d work_ms=%d provenance_ms=%d "
-        "caches=%s",
+        "caches=%s args=%s",
         "slow tool" if slow else "tool timing", tool_name, root, status,
         total * 1000, (begin - started) * 1000, (work_done - begin) * 1000,
-        (end - work_done) * 1000, format_delta(caches or {}),
+        (end - work_done) * 1000, format_delta(caches or {}), args,
     )
 
 
@@ -400,6 +442,7 @@ async def _offload(
         timeout_hint: Advice appended to the timeout message.
     """
     started = time.perf_counter()
+    call_args = _caller_args()  # before the first await, while the tool's frame is still live
     stages: dict[str, float] = {}
     outcome = ["ok"]
     cache_before: list[dict[str, tuple[int, int, int]]] = []
@@ -460,7 +503,7 @@ async def _offload(
         )
     finally:
         _log_tool_timing(
-            tool_name, root, started, stages, outcome[0], _cache_use(cache_before),
+            tool_name, root, started, stages, outcome[0], _cache_use(cache_before), call_args,
         )
 
 

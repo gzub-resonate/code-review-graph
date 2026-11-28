@@ -94,3 +94,39 @@ def test_the_timing_logger_does_not_depend_on_the_root_logger():
     assert main.timing_logger.handlers
     assert main.timing_logger.propagate is False
     assert main.timing_logger.level == logging.INFO
+
+
+# ---- argument summary -------------------------------------------------------------------------
+
+
+async def _fake_tool(pattern: str, target: str, cursor=None, api_token=None, limit=10, files=None):
+    return await main._offload("fake_tool", lambda: {"status": "ok"}, None, provenance=False)
+
+
+async def test_the_line_summarises_the_tool_arguments_and_hides_secrets(capsys):
+    await _fake_tool("callers_of", "a" * 100, cursor="opaque-secret-cursor", api_token="hunter2",
+                     files=["x", "y"])
+    (line,) = stderr_lines(capsys, "tool timing")
+    assert "hunter2" not in line and "opaque-secret-cursor" not in line
+    summary = line.split(" args=", 1)[1]
+    assert " " not in summary
+    assert "pattern=callers_of" in summary
+    assert "target=" + "a" * 40 + "," in summary  # cut at 40 characters
+    assert "cursor=<set>" in summary and "api_token=<redacted>" in summary
+    assert "limit=10" in summary and "files=[2]" in summary
+
+
+def test_summary_is_capped_and_new_fields_come_last():
+    assert len(main.summarize_args({f"k{i}": "v" * 30 for i in range(30)})) == 200
+    assert main.summarize_args({}) == "-"
+
+
+async def test_existing_fields_keep_their_order(capsys):
+    await run(lambda: {"status": "ok"})
+    (line,) = stderr_lines(capsys, "tool timing")
+    names = re.findall(r"(\w+)=", line)
+    assert names[:8] == [
+        "tool", "repo_root", "status", "total_ms", "queue_ms", "work_ms", "provenance_ms",
+        "caches",
+    ]
+    assert names[-1] == "args"
