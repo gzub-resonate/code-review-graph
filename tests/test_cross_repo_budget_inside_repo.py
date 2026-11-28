@@ -222,6 +222,9 @@ def test_a_search_the_budget_stops_mid_query_is_skipped_and_retried_first(
         named_repo(tmp_path, registry, alias, names)
     expected = cross_repo_search_func(query="getMetricsBatch", max_results=100)
     assert expected["skipped_repos"] == []
+    # The complete answer above is kept by the result cache; this test is about a search the
+    # budget cuts, so the next call must search afresh.
+    repo_cache.SEARCH_RESULTS.clear()
     monkeypatch.setattr(registry_tools, "_PROGRESS_STEPS", 1)
     real = registry_tools._search_one_repo
 

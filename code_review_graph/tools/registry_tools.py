@@ -50,6 +50,7 @@ from ..repo_aliases import RepoNameResolver, load_repo_aliases
 from ..repo_cache import (
     INFRASTRUCTURE_RESULTS,
     MEMO,
+    SEARCH_RESULTS,
     SERVER_INDEXES,
     SKIPPED,
     graph_stamp,
@@ -570,6 +571,26 @@ def _remember_skipped(
                 del _UNSEARCHED[next(iter(_UNSEARCHED))]
 
 
+def _search_results_key(
+    selected: list[dict[str, Any]], query: str, kind: str | None, limit: int,
+    include_fuzzy: bool, match: str,
+) -> tuple[Any, ...] | None:
+    """What the merged rows of a search depend on: the query and every searched repo's graph.
+
+    ``None`` when a graph cannot be stamped. The page size and the cursor are left out: they
+    only choose which of the merged rows are shown.
+    """
+    stamps = []
+    for entry in selected:
+        stamp = graph_stamp(entry)
+        if stamp is None:
+            return None
+        stamps.append((str(entry["path"]), entry.get("alias"), stamp))
+    # The budget is part of the key: a complete result found under one budget is not handed to
+    # a call that runs under a tighter one, which reports what that budget would have skipped.
+    return (query, kind, limit, include_fuzzy, match, cross_repo_budget_seconds(), tuple(stamps))
+
+
 def cross_repo_search_func(
     query: str,
     kind: str | None = None,
@@ -705,104 +726,127 @@ def cross_repo_search_func(
             selected = all_repos
 
         budget = cross_repo_budget_seconds()
-        dl = Deadline(budget, lambda: _now())
-        ranked_results: list[tuple[int, int, int, dict[str, Any]]] = []
-        searched_repos: list[str] = []
-        skipped: list[str] = []
-        left: list[tuple[int, dict[str, Any]]] = []
-        workers = cross_repo_workers()
-        outcomes: dict[int, tuple[str, list[tuple[int, int, int, dict[str, Any]]]]] = {}
-        in_flight: dict[Future[Any], int] = {}
+        def compute_rows() -> dict[str, Any]:
+            dl = Deadline(budget, lambda: _now())
+            ranked_results: list[tuple[int, int, int, dict[str, Any]]] = []
+            searched_repos: list[str] = []
+            skipped: list[str] = []
+            left: list[tuple[int, dict[str, Any]]] = []
+            workers = cross_repo_workers()
+            outcomes: dict[int, tuple[str, list[tuple[int, int, int, dict[str, Any]]]]] = {}
+            in_flight: dict[Future[Any], int] = {}
 
-        cut_off: set[int] = set()
+            cut_off: set[int] = set()
 
-        def reap(done: Any) -> None:
-            for future in done:
-                outcome = future.result()
-                index = in_flight.pop(future)
-                if outcome is _CUT_OFF:
-                    cut_off.add(index)
-                elif outcome is not None:
-                    outcomes[index] = outcome
+            def reap(done: Any) -> None:
+                for future in done:
+                    outcome = future.result()
+                    index = in_flight.pop(future)
+                    if outcome is _CUT_OFF:
+                        cut_off.add(index)
+                    elif outcome is not None:
+                        outcomes[index] = outcome
 
-        # Up to ``workers`` repos are searched at once, on the pool every cross-repo call shares
-        # (so concurrent calls do not each start their own threads). The budget is checked
-        # here, on the calling thread, each time a worker is free to start the next repo, so
-        # what is skipped does not depend on which search finishes first. A repo left out by a
-        # first-page call that ran out of budget is tried first by the next such call.
-        order = _retry_order(selected, query, kind, limit, repos, cursor)
-        for position, repo_index in enumerate(order):
-            repo_entry = selected[repo_index]
-            while len(in_flight) >= workers:
-                reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
-            # The first repo always runs, so a call makes progress; after that no
-            # new repo is started once the budget is spent, and each one left is named.
-            if position and dl.spent():
-                left_over = sorted(order[position:])
-                skipped.extend(_repo_label(selected[i]) for i in left_over)
-                left = [(i, selected[i]) for i in left_over]
-                break
-            # The first repo is not cut off, so a call always finishes one search.
-            future = submit_shared(
-                _search_one_repo, repo_index, repo_entry, query, kind, limit,
-                dl if position else None,
-            )
-            in_flight[future] = repo_index
-        reap(wait(in_flight).done)
-        if cut_off:
-            # Searches the budget stopped mid-query are skipped like repos never started.
-            late = sorted(cut_off)
-            left = sorted([*left, *((i, selected[i]) for i in late)], key=lambda item: item[0])
-            skipped = [_repo_label(selected[i]) for i, _entry in left]
-        _remember_skipped(selected, query, kind, limit, repos, cursor, left)
+            # Up to ``workers`` repos are searched at once, on the pool every cross-repo call shares
+            # (so concurrent calls do not each start their own threads). The budget is checked
+            # here, on the calling thread, each time a worker is free to start the next repo, so
+            # what is skipped does not depend on which search finishes first. A repo left out by a
+            # first-page call that ran out of budget is tried first by the next such call.
+            order = _retry_order(selected, query, kind, limit, repos, cursor)
+            for position, repo_index in enumerate(order):
+                repo_entry = selected[repo_index]
+                while len(in_flight) >= workers:
+                    reap(wait(in_flight, return_when=FIRST_COMPLETED).done)
+                # The first repo always runs, so a call makes progress; after that no
+                # new repo is started once the budget is spent, and each one left is named.
+                if position and dl.spent():
+                    left_over = sorted(order[position:])
+                    skipped.extend(_repo_label(selected[i]) for i in left_over)
+                    left = [(i, selected[i]) for i in left_over]
+                    break
+                # The first repo is not cut off, so a call always finishes one search.
+                future = submit_shared(
+                    _search_one_repo, repo_index, repo_entry, query, kind, limit,
+                    dl if position else None,
+                )
+                in_flight[future] = repo_index
+            reap(wait(in_flight).done)
+            if cut_off:
+                # Searches the budget stopped mid-query are skipped like repos never started.
+                late = sorted(cut_off)
+                left = sorted([*left, *((i, selected[i]) for i in late)], key=lambda item: item[0])
+                skipped = [_repo_label(selected[i]) for i, _entry in left]
+            _remember_skipped(selected, query, kind, limit, repos, cursor, left)
 
-        capped: list[str] = []
-        # Whatever order the searches finished in, the rows go in registry order.
-        for repo_index in sorted(outcomes):
-            alias, rows = outcomes[repo_index]
-            searched_repos.append(alias)
-            ranked_results.extend(rows)
-            if getattr(rows, "more", False):
-                capped.append(alias)
+            capped: list[str] = []
+            # Whatever order the searches finished in, the rows go in registry order.
+            for repo_index in sorted(outcomes):
+                alias, rows = outcomes[repo_index]
+                searched_repos.append(alias)
+                ranked_results.extend(rows)
+                if getattr(rows, "more", False):
+                    capped.append(alias)
 
-        # The repos the budget kept out of the full search still get the cheap exact-name
-        # lookup, so an exact match in a late repo is not lost to the time limit.
-        exact_rows, exact_looked_in = _exact_pass(left, query, kind, limit)
-        ranked_results.extend(exact_rows)
+            # The repos the budget kept out of the full search still get the cheap exact-name
+            # lookup, so an exact match in a late repo is not lost to the time limit.
+            exact_rows, exact_looked_in = _exact_pass(left, query, kind, limit)
+            ranked_results.extend(exact_rows)
 
-        # Scores from different search paths are not comparable across repos.
-        # Order by match tier first (an exact name beats any fuzzy hit, whatever
-        # its repo), then by each repo's local rank, with registry order as a
-        # stable tie-breaker.
-        ranked_results.sort(key=lambda item: item[:3])
-        merged = [item[3] for item in ranked_results]
-        fuzzy_dropped = 0
-        has_exact = any(r.get("match") in _STRONG_TIERS for r in merged)
-        if match == "exact":
-            kept = [r for r in merged if r.get("match") in _STRONG_TIERS]
-            fuzzy_dropped = len(merged) - len(kept)
-            merged = kept
-        elif not include_fuzzy and has_exact:
-            kept = [r for r in merged if r.get("match") not in _WEAK_TIERS]
-            fuzzy_dropped = len(merged) - len(kept)
-            merged = kept
-        elif not include_fuzzy:
-            # No exact hit: the weak list is all there is, and an unmatched name returned
-            # hundreds of rows. Keep the ``prefix``/``tokens`` rows and the few ``fuzzy`` rows
-            # that share at least half of the query's words.
-            wanted = _name_tokens(query)
-            need = (len(wanted) + 1) // 2 if len(wanted) > 1 else 0
-            kept = []
-            fuzzy_kept = 0
-            for row in merged:
-                if row.get("match") == "fuzzy":
-                    shared = len(wanted & _name_tokens(str(row.get("name") or "")))
-                    if shared < need or fuzzy_kept >= _FUZZY_CAP_NO_EXACT:
-                        continue
-                    fuzzy_kept += 1
-                kept.append(row)
-            fuzzy_dropped = len(merged) - len(kept)
-            merged = kept
+            # Scores from different search paths are not comparable across repos.
+            # Order by match tier first (an exact name beats any fuzzy hit, whatever
+            # its repo), then by each repo's local rank, with registry order as a
+            # stable tie-breaker.
+            ranked_results.sort(key=lambda item: item[:3])
+            merged = [item[3] for item in ranked_results]
+            fuzzy_dropped = 0
+            has_exact = any(r.get("match") in _STRONG_TIERS for r in merged)
+            if match == "exact":
+                kept = [r for r in merged if r.get("match") in _STRONG_TIERS]
+                fuzzy_dropped = len(merged) - len(kept)
+                merged = kept
+            elif not include_fuzzy and has_exact:
+                kept = [r for r in merged if r.get("match") not in _WEAK_TIERS]
+                fuzzy_dropped = len(merged) - len(kept)
+                merged = kept
+            elif not include_fuzzy:
+                # No exact hit: the weak list is all there is, and an unmatched name returned
+                # hundreds of rows. Keep the ``prefix``/``tokens`` rows and the few ``fuzzy`` rows
+                # that share at least half of the query's words.
+                wanted = _name_tokens(query)
+                need = (len(wanted) + 1) // 2 if len(wanted) > 1 else 0
+                kept = []
+                fuzzy_kept = 0
+                for row in merged:
+                    if row.get("match") == "fuzzy":
+                        shared = len(wanted & _name_tokens(str(row.get("name") or "")))
+                        if shared < need or fuzzy_kept >= _FUZZY_CAP_NO_EXACT:
+                            continue
+                        fuzzy_kept += 1
+                    kept.append(row)
+                fuzzy_dropped = len(merged) - len(kept)
+                merged = kept
+            return {
+                "merged": merged, "fuzzy_dropped": fuzzy_dropped, "has_exact": has_exact,
+                "searched": searched_repos, "skipped": skipped, "capped": capped,
+                "exact_in": exact_looked_in,
+            }
+
+        key = _search_results_key(selected, query, kind, limit, include_fuzzy, match)
+        if key is None:
+            computed = compute_rows()
+        else:
+            # The same search over the same graph versions is made once; a repeat and later
+            # cursor pages reuse the merged rows. A search the budget cut short is not kept.
+            computed = copy.deepcopy(SEARCH_RESULTS.get(
+                key, compute_rows, cacheable=lambda found: not found["skipped"],
+            ))
+        merged = computed["merged"]
+        fuzzy_dropped = computed["fuzzy_dropped"]
+        has_exact = computed["has_exact"]
+        searched_repos = computed["searched"]
+        skipped = computed["skipped"]
+        capped = computed["capped"]
+        exact_looked_in = computed["exact_in"]
         skipped_shown, skipped_total, skipped_truncated = _listed(skipped), len(skipped), False
         # The rows come from several graph databases and are searched afresh on every
         # call, so the stamp is a digest of the rows themselves, and of the repos left
