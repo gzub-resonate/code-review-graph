@@ -1325,6 +1325,12 @@ or `conditional`), `confidence` 0.4 (0.3 for a default, `or` or conditional) and
 ARN of one machine give one target. One hop only: the callers of a function that itself passes a parameter on stay
 `argument_not_static`.
 
+When a state machine has two candidate owners (`ambiguous`) and exactly one of them deploys it (a Terraform resource or
+declaration, or a Terragrunt unit naming it) while the others only hold its definition file (`*.asl.json`), the row is
+`matched` to the deploying repo with `tie_break: deployed_declaration_over_definition_file`, `also_defined_in` (the
+other repos) and `also_defined_via` (`{repo: how it defines it}`). Two deploying repos, or none, stay `ambiguous`; the
+account id inside an ARN is not used. This is read-side only and does not change what a build writes.
+
 Reasons on `origin="awssdk"` rows (status is never changed by them; `status=<reason>` filters and the reply has
 `counts_by_reason` and a summary clause). A `not_found` row has `not_found_reason`: `no_owner_lookup` (the service has
 no owner lookup: secretsmanager, cloudwatch; an SSM parameter or IAM role is looked up by its Terraform

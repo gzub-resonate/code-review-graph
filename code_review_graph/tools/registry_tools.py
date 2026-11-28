@@ -1149,6 +1149,7 @@ def _awssdk_links(
     definitions = sl.Definitions()
 
     def annotate(rows, all_repos, edges_by_repo, context):
+        sl.break_machine_ties(rows, definitions._by_repo, all_repos)
         nfr.annotate_awssdk(rows, definitions._by_repo, all_repos, edges_by_repo, context)
 
     result = _infra_links(
