@@ -189,8 +189,9 @@ def cached_on_snapshot(
     """
     state = file_state(Path(store.db_path))
     # ``ResultCache`` never stores a key that contains ``None``, and an argument left at its
-    # default is often ``None``: spell it so the key can match.
-    spelled = tuple("<none>" if a is None else a for a in args)
+    # default is often ``None``: spell it so the key can match. Every argument is tagged so a
+    # caller's own string can never equal the stand-in for ``None``.
+    spelled = tuple(("none",) if a is None else ("value", a) for a in args)
     key = None if state is None else (name, str(store.db_path), state, *spelled)
 
     def run() -> Any:

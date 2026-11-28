@@ -442,6 +442,22 @@ def test_cached_on_snapshot_restores_the_connection_even_when_compute_fails(root
         assert s.get_all_nodes()
 
 
+def test_cached_on_snapshot_does_not_confuse_none_with_a_string_that_looks_like_it(root):
+    # An argument left at ``None`` and a caller's own text must never share a cache entry.
+    with GraphStore(get_db_path(root)) as s:
+        RESULTS.clear()
+        calls = []
+
+        def compute():
+            calls.append(1)
+            return {"n": len(calls)}
+
+        for value in (None, "<none>", "none", ("none",), None):
+            cached_on_snapshot(s, "t_none_key", (value,), compute)
+        # None twice is one computation; the three other spellings are one each.
+        assert len(calls) == 4
+
+
 def test_cached_on_snapshot_hands_out_copies_and_keys_on_args(root):
     with GraphStore(get_db_path(root)) as s:
         calls = []
