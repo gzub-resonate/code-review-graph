@@ -165,11 +165,17 @@ def read_declarations(store: GraphStore, repo_path: Path) -> dict[str, Any]:
     # evaluator writes one for it, including a name built from locals or inputs). Read the block
     # from its file only when no edge covers it, so one resource is never listed twice.
     covered = {(item["file"], item["line"], item["terraform_type"]) for item in items}
+    # One range per type (``resource.<type>.`` up to the character after the dot) reads only
+    # those nodes through the name index; the ``+`` keeps SQLite from scanning every class.
+    ranges = " OR ".join("(name >= ? AND name < ?)" for _ in FILE_DECLARED)
     rows = store._conn.execute(
         "SELECT name, file_path, line_start, line_end FROM nodes "
-        "WHERE kind = 'Class' AND language = 'hcl' AND (name LIKE ? OR name LIKE ?) "
-        "ORDER BY file_path, line_start",
-        tuple(f"resource.{rtype}.%" for rtype in FILE_DECLARED),
+        "WHERE +kind = 'Class' AND +language = 'hcl' AND (" + ranges + ") "
+        "ORDER BY file_path, line_start, id",
+        tuple(
+            bound for rtype in FILE_DECLARED
+            for bound in (f"resource.{rtype}.", f"resource.{rtype}/")
+        ),
     ).fetchall()
     for node_name, file_path, start, end in rows:
         rtype = node_name.split(".", 2)[1]

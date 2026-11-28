@@ -113,14 +113,18 @@ def read_target_edges(store: GraphStore) -> list[dict[str, Any]]:
     return out
 
 
+#: The range on ``target_qualified`` (the strings that start with ``external:aws-``) lets SQLite
+#: read only those edges through the index, not every ``REFERENCES`` edge; the leading ``+``
+#: keeps it from choosing the ``kind`` index; ``ORDER BY id`` keeps the order of the old scan.
+#: Targets are written in lower case, so the case sensitive range keeps the rows the ``LIKE`` kept.
 _DECLARED_SQL = (
     "SELECT target_qualified, json_extract(extra, '$.target_kind') FROM edges "
-    "WHERE kind = 'REFERENCES' AND json_valid(extra) "
+    "WHERE +kind = 'REFERENCES' AND target_qualified >= 'external:aws-' "
+    "AND target_qualified < 'external:aws.' AND json_valid(extra) "
     "AND json_extract(extra, '$.resolution') = 'aws_sdk' "
     "AND json_extract(extra, '$.sdk') = 'terraform' "
     "AND json_extract(extra, '$.operation') = 'declare' "
-    "AND COALESCE(json_extract(extra, '$.unresolved'), 0) = 0 "
-    "AND target_qualified LIKE 'external:aws-%'"
+    "AND COALESCE(json_extract(extra, '$.unresolved'), 0) = 0 ORDER BY id"
 )
 
 
@@ -154,9 +158,12 @@ class Definitions:
         """``(service, kind, name key) -> how it is defined`` for one graph."""
         found: dict[tuple[str, str, str], str] = {}
         by_type = {resource: key for key, resource in RESOURCE_TYPES.items()}
+        # A range on ``name`` (up to the character after ``_``) reads the ``resource.aws_``
+        # nodes through the name index. The match below accepts only a lower-case type, which
+        # the case-sensitive range finds as well as the old ``LIKE`` did.
         for row in store._conn.execute(
-            "SELECT name FROM nodes WHERE language = 'hcl' AND kind = 'Class' "
-            "AND name LIKE 'resource.aws\\_%' ESCAPE '\\'"
+            "SELECT name FROM nodes WHERE +language = 'hcl' AND +kind = 'Class' "
+            "AND name >= 'resource.aws_' AND name < 'resource.aws`'"
         ):
             match = _RESOURCE_NAME.match(row[0])
             key = by_type.get(match["type"]) if match is not None else None

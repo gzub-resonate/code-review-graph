@@ -356,9 +356,17 @@ def _resolve_arn_getters(edges: list[dict[str, Any]]) -> None:
             edge["extra"]["resolved_via"] = f"arn_getter:{getter}"
 
 
+#: ``target_qualified`` of every AWS target lies in ``[_AWS_TARGET_FROM, _AWS_TARGET_BELOW)``: the
+#: strings that start with ``external:aws-`` (``.`` is the character after ``-``). A range on
+#: the indexed column lets SQLite read only those edges instead of every ``REFERENCES`` edge,
+#: and the leading ``+`` keeps it from picking the ``kind`` index that does the latter. The
+#: reader below drops a target that does not start with the prefix, so the rows are the same.
+_AWS_TARGET_FROM = "external:aws-"
+_AWS_TARGET_BELOW = "external:aws."
 _DECLARE_SQL = (
     "SELECT target_qualified, file_path, line, extra FROM edges "
-    "WHERE kind = 'REFERENCES' AND json_valid(extra) "
+    "WHERE +kind = 'REFERENCES' AND target_qualified >= '" + _AWS_TARGET_FROM + "' "
+    "AND target_qualified < '" + _AWS_TARGET_BELOW + "' AND json_valid(extra) "
     "AND json_extract(extra, '$.resolution') = ? "
     "AND json_extract(extra, '$.sdk') = 'terraform' "
     "AND json_extract(extra, '$.operation') = 'declare' "
